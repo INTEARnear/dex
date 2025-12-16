@@ -631,7 +631,7 @@ impl SandboxedDexEnging {
         };
 
         match &store.data().response {
-            // TODO send amount_out to the trader
+            // TODO subtract amount_out from dex balance, add amount_in to dex balance, send amount_out to the trader
             Some(SwapResponse::Ok {
                 amount_in: _,
                 amount_out,
