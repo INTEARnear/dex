@@ -1,0 +1,16 @@
+[package]
+name = "example-dex"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = "5.16"
+uint = "0.10"
+tear-sdk = { path = "../tear-sdk" }
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
