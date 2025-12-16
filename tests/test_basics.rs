@@ -1,4 +1,4 @@
-use near_sdk::json_types::U128;
+use near_sdk::{json_types::U128, NearToken};
 use serde_json::json;
 use tokio::process::Command;
 
@@ -35,11 +35,28 @@ async fn test_basics_on(
 
     let user_account = sandbox.dev_create_account().await?;
 
+    let dex_id = "example".to_string();
+    let result = user_account
+        .call(contract.id(), "deploy_code")
+        .max_gas()
+        .args_json(json!({
+            "id": dex_id,
+            "code": dex_wasm,
+        }))
+        .transact()
+        .await?;
+    println!("{:#?}", result);
+    assert!(result.is_success());
+
     let outcome = user_account
         .call(contract.id(), "swap")
         .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
-            "code": dex_wasm,
+            "dex_id": {
+                "deployer": user_account.id(),
+                "id": dex_id,
+            }
         }))
         .transact()
         .await?;

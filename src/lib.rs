@@ -38,15 +38,16 @@ macro_rules! unimplemented_host_functions_return_type {
 
 #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
 #[near(serializers=[json, borsh])]
-struct DexId {
-    author: AccountId,
-    id: String,
+pub struct DexId {
+    pub deployer: AccountId,
+    pub id: String,
 }
 
 type DexPersistentStorage = HashMap<Vec<u8>, Vec<u8>>;
 
 #[near(contract_state)]
-pub struct SandboxedDexEnging {
+pub struct SandboxedDexEngine {
+    codes: LookupMap<DexId, Vec<u8>>,
     balances: LookupMap<(DexId, AssetId), U128>,
     storage: LookupMap<DexId, DexPersistentStorage>,
 }
@@ -56,13 +57,15 @@ pub struct SandboxedDexEnging {
 enum StorageKey {
     DexBalances,
     DexStorage,
+    DexCodes,
 }
 
-impl Default for SandboxedDexEnging {
+impl Default for SandboxedDexEngine {
     fn default() -> Self {
         Self {
             balances: LookupMap::new(StorageKey::DexBalances),
             storage: LookupMap::new(StorageKey::DexStorage),
+            codes: LookupMap::new(StorageKey::DexCodes),
         }
     }
 }
@@ -76,8 +79,20 @@ struct RunnerData<'a, Request, Response> {
 }
 
 #[near]
-impl SandboxedDexEnging {
-    pub fn swap(&self, code: Vec<u8>) -> U128 {
+impl SandboxedDexEngine {
+    pub fn deploy_code(&mut self, id: String, code: Vec<u8>) {
+        let dex_id = DexId {
+            deployer: near_sdk::env::predecessor_account_id(),
+            id,
+        };
+        self.codes.insert(dex_id, code);
+    }
+
+    #[payable]
+    pub fn swap(&mut self, dex_id: DexId) -> U128 {
+        near_sdk::assert_one_yocto();
+
+        let code = self.codes.get(&dex_id).expect("Dex code not found");
         let engine = Engine::default();
         let module = match Module::new(&engine, &code) {
             Ok(module) => module,
