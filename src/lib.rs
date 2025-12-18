@@ -286,7 +286,6 @@ impl DexEngine {
         args: Base64VecU8,
         attached_assets: HashMap<AssetId, U128>,
     ) -> Base64VecU8 {
-        near_sdk::env::log_str(&format!("storage 0: {}", near_sdk::env::storage_usage()));
         near_sdk::assert_one_yocto();
         expect!(
             method != "swap",
@@ -340,7 +339,6 @@ impl DexEngine {
             Some(f) => f,
             None => panic!("Failed to get function"),
         };
-        near_sdk::env::log_str(&format!("storage 1: {}", near_sdk::env::storage_usage()));
         match dex_call_func.call(&mut store, &[], &mut []) {
             Ok(()) => (),
             Err(err) => panic!("Failed to call function: {err:?}"),
@@ -349,9 +347,7 @@ impl DexEngine {
         drop(store);
         drop(linker);
 
-        near_sdk::env::log_str(&format!("storage 1.5: {}", near_sdk::env::storage_usage()));
         self.dex_storage.flush();
-        near_sdk::env::log_str(&format!("storage 2: {}", near_sdk::env::storage_usage()));
         let storage_usage_after = near_sdk::env::storage_usage();
         self.dex_storage_balances
             .charge(&dex_id, storage_usage_before, storage_usage_after);
@@ -378,18 +374,11 @@ impl DexEngine {
         {
             match withdrawal_type {
                 AssetWithdrawalType::ToInternalUserBalance(account) => {
-                    let storage_usage_before = near_sdk::env::storage_usage();
                     self.transfer_assets(
                         AccountOrDexId::Dex(dex_id.clone()),
                         AccountOrDexId::Account(account.clone()),
                         asset_id.clone(),
                         amount,
-                    );
-                    let storage_usage_after = near_sdk::env::storage_usage();
-                    self.user_storage_balances.charge(
-                        &account,
-                        storage_usage_before,
-                        storage_usage_after,
                     );
                 }
                 AssetWithdrawalType::ToInternalDexBalance(other_dex_id) => {
@@ -421,12 +410,6 @@ impl DexEngine {
             self.dex_storage_balances
                 .deposit(&dex_id, response.add_storage_deposit);
         }
-        near_sdk::env::log_str(&format!("storage 8: {}", near_sdk::env::storage_usage()));
-        // self.dex_storage.flush();
-        // self.contract_tracked_balance.flush();
-        self.dex_balances.flush();
-        // self.user_balances.flush();
-        near_sdk::env::log_str(&format!("storage 9: {}", near_sdk::env::storage_usage()));
         Base64VecU8::from(response.response)
     }
 

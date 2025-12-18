@@ -51,7 +51,6 @@ impl DexEngine {
     }
 }
 
-// TODO: Force user to register assets before depositing them
 #[near]
 impl FungibleTokenReceiver for DexEngine {
     fn ft_on_transfer(

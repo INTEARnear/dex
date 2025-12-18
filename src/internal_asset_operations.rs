@@ -25,7 +25,6 @@ impl DexEngine {
         if amount.0 == 0 {
             return;
         }
-        self.assert_asset_registered(to.clone(), asset_id.clone());
         self.withdraw_assets(from, asset_id.clone(), amount);
         self.deposit_assets(to, asset_id.clone(), amount);
     }
@@ -64,6 +63,7 @@ impl DexEngine {
         asset_id: AssetId,
         amount: U128,
     ) {
+        self.assert_asset_registered(account_or_dex_id.clone(), asset_id.clone());
         match account_or_dex_id {
             AccountOrDexId::Account(account) => {
                 let balance = *self.user_balances
@@ -71,7 +71,7 @@ impl DexEngine {
                     .and_modify(|b| {
                         b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| panic!("Balance overflow for account {account} and asset {asset_id}: {} + {} > {}", b.0, amount.0, u128::MAX));
                     })
-                    .or_insert(amount);
+                    .or_insert_with(|| panic!("Failed to deposit assets to user balance: user {account} balance for asset {asset_id} was not found"));
                 IntearDexEvent::UserBalanceUpdate {
                     account_id: account.clone(),
                     asset_id: asset_id.clone(),
@@ -85,7 +85,7 @@ impl DexEngine {
                     .and_modify(|b| {
                         b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| panic!("Balance overflow for dex {dex_id} and asset {asset_id}: {} + {} > {}", b.0, amount.0, u128::MAX));
                     })
-                    .or_insert(amount);
+                    .or_insert_with(|| panic!("Failed to deposit assets to dex balance: dex {dex_id} balance for asset {asset_id} was not found"));
                 IntearDexEvent::DexBalanceUpdate {
                     dex_id: dex_id.clone(),
                     asset_id: asset_id.clone(),

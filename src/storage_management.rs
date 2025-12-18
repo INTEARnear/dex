@@ -1,4 +1,4 @@
-use intear_dex_types::DexId;
+use intear_dex_types::{DexId, expect};
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
@@ -156,6 +156,9 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
             .total
             .checked_sub(amount)
             .expect("Total balance less than used balance");
+        Promise::new(near_sdk::env::predecessor_account_id())
+            .transfer(amount)
+            .detach();
         (*storage_used).into()
     }
 
@@ -246,12 +249,11 @@ impl DexEngine {
         dex_id: DexId,
         amount: Option<NearToken>,
     ) -> StorageBalance {
+        expect!(
+            dex_id.deployer == near_sdk::env::predecessor_account_id(),
+            "Only the deployer can withdraw dex storage"
+        );
         self.dex_storage_balances.storage_withdraw(dex_id, amount)
-    }
-
-    #[payable]
-    pub fn dex_storage_unregister(&mut self, dex_id: DexId, force: Option<bool>) -> bool {
-        self.dex_storage_balances.storage_unregister(dex_id, force)
     }
 
     pub fn dex_storage_balance_bounds(&self) -> StorageBalanceBounds {

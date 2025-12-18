@@ -117,6 +117,20 @@ async fn test_minimal_on(contract_wasm: &[u8], dex_wasm: &[u8]) {
     .unwrap();
 
     let result = dex_deployer_account
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near],
+            "for": AccountOrDexId::Account(dex_deployer_account.id().clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(result.is_success());
+    track_tokens_burnt(&result, &mut total_near_burnt);
+
+    let result = dex_deployer_account
         .call(dex_engine_contract.id(), "near_deposit")
         .max_gas()
         .deposit(NearToken::from_near(20))
@@ -130,7 +144,8 @@ async fn test_minimal_on(contract_wasm: &[u8], dex_wasm: &[u8]) {
         &dex_deployer_account,
         initial_near_balance
             .saturating_sub(NearToken::from_near(20))
-            .saturating_sub(total_near_burnt),
+            .saturating_sub(total_near_burnt)
+            .saturating_sub(NearToken::from_yoctonear(1)),
     )
     .await
     .unwrap();
@@ -397,6 +412,37 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
     assert!(result.is_success());
     track_tokens_burnt(&result, &mut total_near_burnt);
 
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(dex_deployer_account.id().clone()),
+        AssetId::Near,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(dex_deployer_account.id().clone()),
+        AssetId::Nep141(ft.id().clone()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let result = dex_deployer_account
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near, AssetId::Nep141(ft.id().clone())],
+            "for": AccountOrDexId::Account(dex_deployer_account.id().clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(result.is_success());
+    track_tokens_burnt(&result, &mut total_near_burnt);
+
     let result = dex_deployer_account
         .call(dex_engine_contract.id(), "near_deposit")
         .max_gas()
@@ -412,7 +458,7 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
         initial_near_balance
             .saturating_sub(NearToken::from_near(20))
             .saturating_sub(total_near_burnt)
-            .saturating_sub(NearToken::from_yoctonear(1)),
+            .saturating_sub(NearToken::from_yoctonear(2)),
     )
     .await
     .unwrap();
@@ -451,7 +497,7 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
         &dex_engine_contract,
         AccountOrDexId::Account(dex_deployer_account.id().clone()),
         AssetId::Nep141(ft.id().clone()),
-        None,
+        Some(U128(0)),
     )
     .await
     .unwrap();
@@ -619,7 +665,7 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
             .saturating_sub(total_near_burnt)
             .saturating_sub("0.00125 NEAR".parse().unwrap())
             .saturating_sub(NearToken::from_near(20))
-            .saturating_sub(NearToken::from_yoctonear(4)),
+            .saturating_sub(NearToken::from_yoctonear(5)),
     )
     .await
     .unwrap();
@@ -676,7 +722,7 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
             .saturating_sub(total_near_burnt)
             .saturating_sub("0.00125 NEAR".parse().unwrap())
             .saturating_sub(NearToken::from_near(20))
-            .saturating_sub(NearToken::from_yoctonear(5)),
+            .saturating_sub(NearToken::from_yoctonear(6)),
     )
     .await
     .unwrap();
@@ -738,7 +784,7 @@ async fn test_example_on(contract_wasm: &[u8], dex_wasm: &[u8], ft_wasm: &[u8]) 
             .saturating_sub(total_near_burnt)
             .saturating_sub("0.00125 NEAR".parse().unwrap())
             .saturating_sub(NearToken::from_near(20))
-            .saturating_sub(NearToken::from_yoctonear(6)),
+            .saturating_sub(NearToken::from_yoctonear(7)),
     )
     .await
     .unwrap();
