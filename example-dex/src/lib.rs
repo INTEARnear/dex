@@ -71,7 +71,7 @@ impl Dex for SimpleSwap {
         let Ok(SwapArgs { pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
-        let Some(pool) = self.pools.get(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
             panic!("Pool not found");
         };
         expect!(
@@ -91,53 +91,49 @@ impl Dex for SimpleSwap {
         let first_in = pool.assets.0.asset_id == request.asset_in;
 
         match request.amount {
-            SwapRequestAmount::ExactIn(amount_in) => {
-                expect!(amount_in.0 > 0, "Amount must be greater than 0");
-                let in_balance = U256::from(if first_in {
-                    pool.assets.0.balance.0
+            SwapRequestAmount::ExactIn(exact_amount_in) => {
+                expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
+                let (in_balance, out_balance) = if first_in {
+                    (&mut pool.assets.0.balance.0, &mut pool.assets.1.balance.0)
                 } else {
-                    pool.assets.1.balance.0
-                });
-                let out_balance = U256::from(if first_in {
-                    pool.assets.1.balance.0
-                } else {
-                    pool.assets.0.balance.0
-                });
+                    (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
+                };
                 // in_balance was checked to be positive
                 #[allow(clippy::arithmetic_side_effects)]
-                let amount_out = (U256::from(amount_in.0) * out_balance
-                    / (in_balance + U256::from(amount_in.0)))
+                let amount_out = (U256::from(exact_amount_in.0) * U256::from(*out_balance)
+                    / (U256::from(*in_balance) + U256::from(exact_amount_in.0)))
                 .as_u128();
+                *in_balance = in_balance.checked_add(exact_amount_in.0).expect("Overflow");
+                *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
                 SwapResponse {
-                    amount_in,
+                    amount_in: exact_amount_in,
                     amount_out: U128(amount_out),
                 }
             }
-            SwapRequestAmount::ExactOut(amount_out) => {
-                expect!(amount_out.0 > 0, "Amount must be greater than 0");
-                let in_balance = U256::from(if first_in {
-                    pool.assets.0.balance.0
+            SwapRequestAmount::ExactOut(exact_amount_out) => {
+                expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
+                let (in_balance, out_balance) = if first_in {
+                    (&mut pool.assets.0.balance.0, &mut pool.assets.1.balance.0)
                 } else {
-                    pool.assets.1.balance.0
-                });
-                let out_balance = U256::from(if first_in {
-                    pool.assets.1.balance.0
-                } else {
-                    pool.assets.0.balance.0
-                });
+                    (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
+                };
                 expect!(
-                    amount_out.0 < out_balance.as_u128(),
+                    exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
                 // amount_out was checked to be less than out_balance
                 #[allow(clippy::arithmetic_side_effects)]
-                let amount_in = ((in_balance * U256::from(amount_out.0))
-                    / (out_balance - U256::from(amount_out.0))
+                let amount_in = ((U256::from(*in_balance) * U256::from(exact_amount_out.0))
+                    / (U256::from(*out_balance) - U256::from(exact_amount_out.0))
                     + U256::one())
                 .as_u128();
+                *in_balance = in_balance.checked_add(amount_in).expect("Overflow");
+                *out_balance = out_balance
+                    .checked_sub(exact_amount_out.0)
+                    .expect("Underflow");
                 SwapResponse {
                     amount_in: U128(amount_in),
-                    amount_out: U128(amount_out.0),
+                    amount_out: U128(exact_amount_out.0),
                 }
             }
         }
@@ -386,16 +382,21 @@ impl SimpleSwap {
             response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),
         }
     }
+
+    #[result_serializer(borsh)]
+    pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<&SimplePool> {
+        self.pools.get(&pool_id)
+    }
 }
 
 #[near(serializers=[borsh])]
-struct SimplePool {
+pub struct SimplePool {
     assets: (AssetWithBalance, AssetWithBalance),
     owner_id: AccountId,
 }
 
 #[near(serializers=[borsh])]
-struct AssetWithBalance {
+pub struct AssetWithBalance {
     asset_id: AssetId,
     balance: U128,
 }

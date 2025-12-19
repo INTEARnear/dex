@@ -128,12 +128,32 @@ pub enum IntearDexEvent {
     },
 }
 
+enum CallType<'a> {
+    View {
+        dex_storage: &'a LookupMap<(DexId, Vec<u8>), Vec<u8>>,
+    },
+    Call {
+        dex_storage_mut: &'a mut LookupMap<(DexId, Vec<u8>), Vec<u8>>,
+        predecessor_id: AccountId,
+    },
+}
+
+impl<'a> CallType<'a> {
+    pub fn dex_storage(&'a self) -> &'a LookupMap<(DexId, Vec<u8>), Vec<u8>> {
+        match self {
+            CallType::View { dex_storage } => dex_storage,
+            CallType::Call {
+                dex_storage_mut, ..
+            } => dex_storage_mut,
+        }
+    }
+}
+
 pub struct RunnerData<'a> {
     request: Vec<u8>,
     response: Option<Vec<u8>>,
     registers: HashMap<u64, Vec<u8>>,
-    dex_storage: &'a mut LookupMap<(DexId, Vec<u8>), Vec<u8>>,
-    predecessor_id: AccountId,
+    call_type: CallType<'a>,
     dex_id: DexId,
     dex_storage_balances: &'a StorageBalances<DexId>,
     dex_storage_usage_before_transaction: u64,
@@ -253,5 +273,10 @@ impl DexEngine {
 
     pub fn total_in_custody(&self, asset_id: AssetId) -> Option<U128> {
         self.total_in_custody.get(&asset_id).copied()
+    }
+
+    // View method, but needs &mut for compatibility ergonomics with RunnerData
+    pub fn dex_view(&self, dex_id: DexId, method: String, args: Base64VecU8) -> Base64VecU8 {
+        self.internal_dex_view(dex_id, method, args)
     }
 }

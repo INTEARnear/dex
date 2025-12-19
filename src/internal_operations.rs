@@ -15,7 +15,7 @@ use near_sdk::{
 use wasmi::{Engine, Func, Linker, Module, Store};
 
 use crate::{
-    DexEngine, DexEngineExt, IntearDexEvent, RunnerData, impl_supported_host_functions,
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData, impl_supported_host_functions,
     impl_unsupported_host_functions, internal_asset_operations::AccountOrDexId,
 };
 
@@ -49,7 +49,7 @@ pub enum Operation {
         asset_out: AssetId,
         /// If None, the ExactIn amount will be taken from
         /// the previous swap operation result.
-        amount: Option<U128>,
+        amount: Option<SwapRequestAmount>,
     },
     /// Call a method on a dex.
     DexCall {
@@ -123,8 +123,10 @@ impl DexEngine {
                     .expect("Failed to serialize swap request"),
                 response: None,
                 registers: HashMap::new(),
-                dex_storage: &mut self.dex_storage,
-                predecessor_id: trader.clone(),
+                call_type: CallType::Call {
+                    dex_storage_mut: &mut self.dex_storage,
+                    predecessor_id: trader.clone(),
+                },
                 dex_id: dex_id.clone(),
                 dex_storage_balances: &self.dex_storage_balances,
                 dex_storage_usage_before_transaction: storage_usage_before,
@@ -238,8 +240,10 @@ impl DexEngine {
                 request: near_sdk::borsh::to_vec(&request).expect("Failed to serialize request"),
                 response: None,
                 registers: HashMap::new(),
-                dex_storage: &mut self.dex_storage,
-                predecessor_id: predecessor.clone(),
+                call_type: CallType::Call {
+                    dex_storage_mut: &mut self.dex_storage,
+                    predecessor_id: predecessor.clone(),
+                },
                 dex_id: dex_id.clone(),
                 dex_storage_balances: &self.dex_storage_balances,
                 dex_storage_usage_before_transaction: storage_usage_before,
@@ -330,6 +334,63 @@ impl DexEngine {
                 .deposit(&dex_id, response.add_storage_deposit);
         }
         Base64VecU8::from(response.response)
+    }
+
+    pub(crate) fn internal_dex_view(
+        &self,
+        dex_id: DexId,
+        method: String,
+        args: Base64VecU8,
+    ) -> Base64VecU8 {
+        expect!(
+            method != "swap",
+            "Method name 'swap' is reserved for the swap operation"
+        );
+
+        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
+        let engine = Engine::default();
+        let module = match Module::new(&engine, code) {
+            Ok(module) => module,
+            Err(err) => panic!("Failed to load module: {err:?}"),
+        };
+
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let mut store = Store::new(
+            &engine,
+            RunnerData {
+                request: args.0,
+                response: None,
+                registers: HashMap::new(),
+                call_type: CallType::View {
+                    dex_storage: &self.dex_storage,
+                },
+                dex_id: dex_id.clone(),
+                dex_storage_balances: &self.dex_storage_balances,
+                dex_storage_usage_before_transaction: storage_usage_before,
+            },
+        );
+        let mut linker = Linker::new(&engine);
+
+        impl_supported_host_functions!(linker);
+        impl_unsupported_host_functions!(linker);
+
+        let instance = match linker.instantiate_and_start(&mut store, &module) {
+            Ok(i) => i,
+            Err(err) => panic!("Failed to instantiate module: {err:?}"),
+        };
+        let dex_call_func: Func = match instance.get_func(&mut store, method.as_str()) {
+            Some(f) => f,
+            None => panic!("Failed to get function"),
+        };
+        match dex_call_func.call(&mut store, &[], &mut []) {
+            Ok(()) => (),
+            Err(err) => panic!("Failed to call function: {err:?}"),
+        };
+        let response = store.data_mut().response.take();
+        drop(store);
+        drop(linker);
+
+        Base64VecU8::from(response.unwrap_or_default())
     }
 
     pub(crate) fn internal_register_assets(
@@ -473,7 +534,7 @@ impl DexEngine {
         operations: Vec<Operation>,
         by: AccountId,
     ) {
-        let mut last_output_amount = None;
+        let mut last_output = None;
         for operation in operations {
             match operation {
                 Operation::RegisterAssets { asset_ids, r#for } => {
@@ -505,19 +566,30 @@ impl DexEngine {
                     asset_out,
                     amount,
                 } => {
-                    let amount = amount
-                        .or(last_output_amount)
-                        .map(SwapRequestAmount::ExactIn)
-                        .expect("Amount is required for first SwapSimple operation");
+                    let amount = match amount {
+                        Some(amount) => amount,
+                        None => match last_output {
+                            Some((last_asset_out, amount)) => {
+                                if last_asset_out == asset_in {
+                                    SwapRequestAmount::ExactIn(amount)
+                                } else {
+                                    panic!(
+                                        "Amount can only be omitted if the last swap asset out matches the current asset in"
+                                    );
+                                }
+                            }
+                            None => panic!("Amount is required for first SwapSimple operation"),
+                        },
+                    };
                     let (_amount_in, amount_out) = self.internal_swap_simple(
                         dex_id,
                         message,
                         asset_in,
-                        asset_out,
+                        asset_out.clone(),
                         amount,
                         by.clone(),
                     );
-                    last_output_amount = Some(amount_out);
+                    last_output = Some((asset_out, amount_out));
                 }
                 Operation::DexCall {
                     dex_id,

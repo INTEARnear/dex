@@ -1,6 +1,6 @@
 use wasmi::Caller;
 
-use crate::{IntearDexEvent, RunnerData};
+use crate::{CallType, IntearDexEvent, RunnerData};
 use near_sdk::NearToken;
 
 #[macro_export]
@@ -327,7 +327,10 @@ pub fn attached_deposit(mut caller: Caller<'_, RunnerData>, balance_ptr: u64) {
 }
 
 pub fn predecessor_account_id(mut caller: Caller<'_, RunnerData>, register_id: u64) {
-    let buf = caller.data().predecessor_id.to_string().into_bytes();
+    let CallType::Call { predecessor_id, .. } = &caller.data().call_type else {
+        panic!("predecessor_account_id is not allowed in view functions");
+    };
+    let buf = predecessor_id.to_string().into_bytes();
     caller.data_mut().registers.insert(register_id, buf);
 }
 
@@ -383,10 +386,14 @@ pub fn storage_write(
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
         .expect("Failed to read value from guest memory");
-    let old_value = caller
-        .data_mut()
-        .dex_storage
-        .insert((dex_id, key_buf), value_buf);
+
+    let CallType::Call {
+        dex_storage_mut, ..
+    } = &mut caller.data_mut().call_type
+    else {
+        panic!("storage_write is not allowed in view functions");
+    };
+    let old_value = dex_storage_mut.insert((dex_id, key_buf), value_buf);
 
     if let Some(old_val) = old_value {
         caller.data_mut().registers.insert(register_id, old_val);
@@ -412,7 +419,13 @@ pub fn storage_read(
         .read(&caller, key_ptr as usize, &mut key_buf)
         .expect("Failed to read key from guest memory");
 
-    if let Some(value) = caller.data().dex_storage.get(&(dex_id, key_buf)).cloned() {
+    if let Some(value) = caller
+        .data()
+        .call_type
+        .dex_storage()
+        .get(&(dex_id, key_buf))
+        .cloned()
+    {
         caller.data_mut().registers.insert(register_id, value);
         1
     } else {
@@ -436,7 +449,13 @@ pub fn storage_remove(
         .read(&caller, key_ptr as usize, &mut key_buf)
         .expect("Failed to read key from guest memory");
 
-    if let Some(old_value) = caller.data_mut().dex_storage.remove(&(dex_id, key_buf)) {
+    let CallType::Call {
+        dex_storage_mut, ..
+    } = &mut caller.data_mut().call_type
+    else {
+        panic!("storage_write is not allowed in view functions");
+    };
+    if let Some(old_value) = dex_storage_mut.remove(&(dex_id, key_buf)) {
         caller.data_mut().registers.insert(register_id, old_value);
         1
     } else {
@@ -455,7 +474,12 @@ pub fn storage_has_key(caller: Caller<'_, RunnerData>, key_len: u64, key_ptr: u6
         .read(&caller, key_ptr as usize, &mut key_buf)
         .expect("Failed to read key from guest memory");
 
-    if caller.data().dex_storage.contains_key(&(dex_id, key_buf)) {
+    if caller
+        .data()
+        .call_type
+        .dex_storage()
+        .contains_key(&(dex_id, key_buf))
+    {
         1
     } else {
         0
@@ -475,7 +499,12 @@ pub fn epoch_height(_caller: Caller<'_, RunnerData>) -> u64 {
 }
 
 pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> u64 {
-    caller.data_mut().dex_storage.flush();
+    if let CallType::Call {
+        dex_storage_mut, ..
+    } = &mut caller.data_mut().call_type
+    {
+        dex_storage_mut.flush();
+    };
     let storage_usage_now = near_sdk::env::storage_usage();
     let storage_usage_during_transaction = i64::try_from(storage_usage_now)
         .expect("Storage usage overflow")
