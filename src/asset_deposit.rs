@@ -63,6 +63,9 @@ impl FungibleTokenReceiver for DexEngine {
         let operations: Option<Vec<Operation>> = if msg.is_empty() {
             None
         } else {
+            if sender_id != near_sdk::env::signer_account_id() {
+                panic!("Operations can only be executed if the sender is the transaction signer");
+            }
             Some(near_sdk::serde_json::from_str(&msg).expect("Failed to parse operations"))
         };
 
@@ -119,6 +122,9 @@ impl NonFungibleTokenReceiver for DexEngine {
                 panic!(
                     "Only the previous owner can execute operations on behalf of the previous owner"
                 );
+            }
+            if sender_id != near_sdk::env::signer_account_id() {
+                panic!("Operations can only be executed if the sender is the transaction signer");
             }
             Some(near_sdk::serde_json::from_str(&msg).expect("Failed to parse operations"))
         };
@@ -186,6 +192,9 @@ impl DexEngine {
                         "Only the previous owner can execute operations on behalf of the previous owner"
                     );
                 }
+            }
+            if sender_id != near_sdk::env::signer_account_id() {
+                panic!("Operations can only be executed if the sender is the transaction signer");
             }
             Some(near_sdk::serde_json::from_str(&msg).expect("Failed to parse operations"))
         };
