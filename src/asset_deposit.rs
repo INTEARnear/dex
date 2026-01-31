@@ -12,12 +12,38 @@ use crate::{
     internal_operations::Operation,
 };
 
+#[near(serializers=[json])]
+#[serde(untagged)]
+pub enum DepositMessage {
+    Operations(Vec<Operation>),
+    Advanced {
+        operations: Vec<Operation>,
+        referrer: Option<AccountId>,
+    },
+}
+
+impl DepositMessage {
+    fn operations(&self) -> Vec<Operation> {
+        match self {
+            Self::Operations(operations) => operations.clone(),
+            Self::Advanced { operations, .. } => operations.clone(),
+        }
+    }
+
+    fn referrer(&self) -> Option<AccountId> {
+        match self {
+            Self::Advanced { referrer, .. } => referrer.clone(),
+            _ => None,
+        }
+    }
+}
+
 #[near]
 impl DexEngine {
     #[payable]
     /// Deposit near to the dex engine contract's inner
     /// balance for the user.
-    pub fn deposit_near(&mut self, operations: Option<Vec<Operation>>) {
+    pub fn deposit_near(&mut self, operations: Option<DepositMessage>) {
         let deposit = U128(near_sdk::env::attached_deposit().as_yoctonear());
         self.total_in_custody
             .entry(AssetId::Near)
@@ -35,11 +61,12 @@ impl DexEngine {
                 panic!("Failed to deposit assets to contract tracked balance: asset not registered")
             });
 
-        if let Some(operations) = operations {
+        if let Some(message) = operations {
             self.internal_execute_operations(
-                operations,
+                message.operations(),
                 near_sdk::env::predecessor_account_id(),
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
+                message.referrer(),
             );
         } else {
             self.internal_increase_assets(
@@ -66,7 +93,7 @@ impl FungibleTokenReceiver for DexEngine {
         msg: String,
     ) -> PromiseOrValue<U128> {
         let contract_id = near_sdk::env::predecessor_account_id();
-        let operations: Option<Vec<Operation>> = if msg.is_empty() {
+        let operations: Option<DepositMessage> = if msg.is_empty() {
             None
         } else {
             Some(near_sdk::serde_json::from_str(&msg).expect("Failed to parse operations"))
@@ -88,11 +115,12 @@ impl FungibleTokenReceiver for DexEngine {
                 panic!("Failed to deposit assets to contract tracked balance: asset not registered")
             });
 
-        if let Some(operations) = operations {
+        if let Some(message) = operations {
             self.internal_execute_operations(
-                operations,
+                message.operations(),
                 sender_id,
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
+                message.referrer(),
             );
         } else {
             self.internal_increase_assets(
@@ -122,7 +150,7 @@ impl NonFungibleTokenReceiver for DexEngine {
         msg: String,
     ) -> PromiseOrValue<bool> {
         let contract_id = near_sdk::env::predecessor_account_id();
-        let operations: Option<Vec<Operation>> = if msg.is_empty() {
+        let message: Option<DepositMessage> = if msg.is_empty() {
             None
         } else {
             if sender_id != previous_owner_id {
@@ -148,14 +176,15 @@ impl NonFungibleTokenReceiver for DexEngine {
                 panic!("Failed to deposit assets to contract tracked balance: asset not registered")
             });
 
-        if let Some(operations) = operations {
+        if let Some(message) = message {
             self.internal_execute_operations(
-                operations,
+                message.operations(),
                 previous_owner_id,
                 Some(HashMap::from_iter([(
                     AssetId::Nep171(contract_id, token_id),
                     U128(1),
                 )])),
+                message.referrer(),
             );
         } else {
             self.internal_increase_assets(
@@ -194,7 +223,7 @@ impl DexEngine {
 
         let contract_id = near_sdk::env::predecessor_account_id();
 
-        let operations: Option<Vec<Operation>> = if msg.is_empty() {
+        let message: Option<DepositMessage> = if msg.is_empty() {
             None
         } else {
             for previous_owner_id in previous_owner_ids.iter() {
@@ -227,9 +256,9 @@ impl DexEngine {
                 });
         }
 
-        if let Some(operations) = operations {
+        if let Some(message) = message {
             self.internal_execute_operations(
-                operations,
+                message.operations(),
                 sender_id,
                 Some(HashMap::from_iter(
                     token_ids
@@ -242,6 +271,7 @@ impl DexEngine {
                             )
                         }),
                 )),
+                message.referrer(),
             );
         } else {
             for ((token_id, previous_owner_id), amount) in token_ids

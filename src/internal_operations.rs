@@ -119,6 +119,7 @@ impl DexEngine {
         .emit();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn internal_swap_simple(
         &mut self,
         dex_id: DexId,
@@ -127,6 +128,7 @@ impl DexEngine {
         asset_out: AssetId,
         amount: SwapRequestAmount,
         mut trader: TradeAccount,
+        referrer: Option<AccountId>,
     ) -> (U128, U128) {
         let swap_request = SwapRequest {
             message,
@@ -256,6 +258,7 @@ impl DexEngine {
                 TradeAccount::User(account) => account,
                 TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader,
             },
+            referrer,
         }
         .emit();
 
@@ -633,6 +636,7 @@ impl DexEngine {
         operations: Vec<Operation>,
         by: AccountId,
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
+        referrer: Option<AccountId>,
     ) {
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
         near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
@@ -767,6 +771,7 @@ impl DexEngine {
                             },
                             None => TradeAccount::User(by.clone()),
                         },
+                        referrer.clone(),
                     );
                     last_output = Some((asset_out, amount_out));
                 }

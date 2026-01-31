@@ -1,0 +1,13 @@
+[package]
+name = "xyk-dex"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = { version = "5", default-features = false }
+intear-dex-types = { path = "../../intear-dex-types", features = [] }
+talc = { version = "4.4.3", default-features = false, features = ["lock_api"] }
+crypto-bigint = { version = "0.6.1", default-features = false }

@@ -251,4 +251,12 @@ macro_rules! expect {
             ::near_sdk::env::panic_str(&::std::format!($message $(, $fmt_args)*));
         }
     };
+    ($(let $pat:pat = $expr:expr),+, $message:literal $(, $fmt_args:expr)* $(,)?) => {
+        let _panic_msg = ::std::format!($message $(, $fmt_args)*);
+        $(
+            let $pat = $expr else {
+                ::near_sdk::env::panic_str(&_panic_msg);
+            };
+        )+;
+    };
 }

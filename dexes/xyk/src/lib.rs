@@ -1,0 +1,937 @@
+#![deny(clippy::arithmetic_side_effects)]
+
+use std::{collections::HashMap, num::NonZeroU128};
+
+use crypto_bigint::{CheckedMul, U256};
+use intear_dex_types::{
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Dex, DexCallResponse, SwapRequest,
+    SwapRequestAmount, SwapResponse, expect,
+};
+use near_sdk::{
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto, json_types::U128,
+    near, store::LookupMap,
+};
+
+#[global_allocator]
+static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
+    static mut MEMORY: [u8; 0x8000] = [0; 0x8000]; // 32KB
+    let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
+    talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
+};
+
+#[near(serializers=[borsh])]
+#[derive(BorshStorageKey)]
+enum StorageKey {
+    Pools,
+    PublicPoolUserShares { pool_id: PoolId },
+    FeesCollectedByUsers,
+}
+
+type PoolId = u64;
+
+/// A production x*y=k pool with two assets
+#[near(contract_state)]
+#[derive(PanicOnDefault)]
+pub struct XykDex {
+    pools: LookupMap<PoolId, Pool>,
+    pool_counter: PoolId,
+    fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+}
+
+fn u128_to_u256(value: u128) -> U256 {
+    U256::from(value)
+}
+
+fn u256_to_u128(value: U256) -> u128 {
+    expect!(value.bits() <= 128, "Value must be less than 128 bits");
+    let bytes = value.to_le_bytes();
+    let first_chunk = bytes.first_chunk().unwrap();
+    u128::from_le_bytes(*first_chunk)
+}
+
+fn shares_to_tokens(
+    shares: SharesBalance,
+    total_shares: SharesBalance,
+    total_tokens: NonZeroU128,
+) -> u128 {
+    #[allow(clippy::arithmetic_side_effects)] // total_shares is NonZeroU128
+    u256_to_u128(
+        u128_to_u256(total_tokens.get()) * u128_to_u256(shares.get())
+            / u128_to_u256(total_shares.get()),
+    )
+}
+
+fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: NonZeroU128) -> u128 {
+    #[allow(clippy::arithmetic_side_effects)] // total_shares is NonZeroU128
+    u256_to_u128(
+        u128_to_u256(tokens) * u128_to_u256(total_shares.get()) / u128_to_u256(total_tokens.get()),
+    )
+}
+
+#[near]
+impl Dex for XykDex {
+    #[result_serializer(borsh)]
+    fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
+        #[near(serializers=[borsh])]
+        struct SwapArgs {
+            pool_id: PoolId,
+        }
+        let Ok(SwapArgs { pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
+            panic!("Invalid message");
+        };
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
+            panic!("Pool not found");
+        };
+        let (assets, fees) = match pool {
+            Pool::Private {
+                assets,
+                owner_id: _,
+                fees,
+            } => (assets, fees),
+            Pool::Public {
+                assets,
+                fees,
+                user_shares: _,
+                total_shares: _,
+            } => (assets, fees),
+        };
+        expect!(
+            assets.0.asset_id == request.asset_in || assets.1.asset_id == request.asset_in,
+            "Invalid asset in"
+        );
+        expect!(
+            assets.0.asset_id == request.asset_out || assets.1.asset_id == request.asset_out,
+            "Invalid asset out"
+        );
+        expect!(
+            assets.0.balance.0 > 0 && assets.1.balance.0 > 0,
+            "Pool is empty"
+        );
+        let first_in = assets.0.asset_id == request.asset_in;
+
+        let mut response = match request.amount {
+            SwapRequestAmount::ExactIn(exact_amount_in) => {
+                expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
+                let (in_balance, out_balance) = if first_in {
+                    (&mut assets.0.balance.0, &mut assets.1.balance.0)
+                } else {
+                    (&mut assets.1.balance.0, &mut assets.0.balance.0)
+                };
+                // in_balance was checked to be positive
+                #[allow(clippy::arithmetic_side_effects)]
+                let amount_out = u256_to_u128(
+                    u128_to_u256(exact_amount_in.0) * u128_to_u256(*out_balance)
+                        / (u128_to_u256(*in_balance) + u128_to_u256(exact_amount_in.0)),
+                );
+                *in_balance = in_balance.checked_add(exact_amount_in.0).expect("Overflow");
+                *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
+                SwapResponse {
+                    amount_in: exact_amount_in,
+                    amount_out: U128(amount_out),
+                }
+            }
+            SwapRequestAmount::ExactOut(exact_amount_out) => {
+                expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
+                let (in_balance, out_balance) = if first_in {
+                    (&mut assets.0.balance.0, &mut assets.1.balance.0)
+                } else {
+                    (&mut assets.1.balance.0, &mut assets.0.balance.0)
+                };
+                expect!(
+                    exact_amount_out.0 < *out_balance,
+                    "Amount must be less than out balance"
+                );
+                // amount_out was checked to be less than out_balance
+                #[allow(clippy::arithmetic_side_effects)]
+                let amount_in = u256_to_u128(
+                    ((u128_to_u256(*in_balance) * u128_to_u256(exact_amount_out.0))
+                        / (u128_to_u256(*out_balance) - u128_to_u256(exact_amount_out.0)))
+                    .saturating_add(&U256::ONE),
+                );
+                *in_balance = in_balance.checked_add(amount_in).expect("Overflow");
+                *out_balance = out_balance
+                    .checked_sub(exact_amount_out.0)
+                    .expect("Underflow");
+                SwapResponse {
+                    amount_in: U128(amount_in),
+                    amount_out: U128(exact_amount_out.0),
+                }
+            }
+        };
+        for (receiver, fee) in fees.receivers.iter() {
+            match receiver {
+                FeeReceiver::User(user_id) => {
+                    let fee_amount = u256_to_u128(
+                        u128_to_u256(response.amount_out.0)
+                            .checked_mul(&u128_to_u256(*fee as u128))
+                            .into_option()
+                            .unwrap_or_default(),
+                    );
+                    response.amount_out.0 = response
+                        .amount_out
+                        .0
+                        .checked_sub(fee_amount)
+                        .expect("Underflow");
+                    self.fees_collected_by_users
+                        .entry((user_id.clone(), request.asset_out.clone()))
+                        .and_modify(|b| b.0 = b.0.saturating_add(fee_amount))
+                        .or_insert_with(|| panic!("Fee receiver not registered"));
+                }
+            }
+        }
+        response
+    }
+}
+
+#[near]
+impl XykDex {
+    #[init]
+    #[payable]
+    pub fn new() -> Self {
+        assert_one_yocto();
+        Self {
+            pools: LookupMap::new(StorageKey::Pools),
+            pool_counter: 0,
+            fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn create_pool(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct CreatePoolArgs {
+            assets: (AssetId, AssetId),
+            fees: FeeConfiguration,
+            is_public: bool,
+        }
+        let Ok(CreatePoolArgs {
+            assets,
+            fees,
+            is_public,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(assets.0 != assets.1, "Assets must be different");
+
+        let pool_id = self.pool_counter;
+        self.pool_counter = self
+            .pool_counter
+            .checked_add(1)
+            .expect("Pool counter overflow");
+
+        fees.validate();
+
+        for fee_receiver in fees.receivers.keys() {
+            match fee_receiver {
+                FeeReceiver::User(user_id) => {
+                    self.fees_collected_by_users
+                        .entry((user_id.clone(), assets.0.clone()))
+                        .or_default();
+                }
+            }
+        }
+        self.fees_collected_by_users.flush();
+
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let old_pool_with_same_id = self.pools.insert(
+            pool_id,
+            if is_public {
+                Pool::Public {
+                    assets: (
+                        AssetWithBalance {
+                            asset_id: assets.0.clone(),
+                            balance: U128(0),
+                        },
+                        AssetWithBalance {
+                            asset_id: assets.1,
+                            balance: U128(0),
+                        },
+                    ),
+                    fees,
+                    user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
+                    total_shares: None,
+                }
+            } else {
+                Pool::Private {
+                    assets: (
+                        AssetWithBalance {
+                            asset_id: assets.0.clone(),
+                            balance: U128(0),
+                        },
+                        AssetWithBalance {
+                            asset_id: assets.1,
+                            balance: U128(0),
+                        },
+                    ),
+                    fees,
+                    owner_id: near_sdk::env::predecessor_account_id(),
+                }
+            },
+        );
+        expect!(
+            old_pool_with_same_id.is_none(),
+            "Pool with same id somehow already exists"
+        );
+        self.pools.flush();
+
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128)
+                .checked_sub(storage_usage_before as u128)
+                .expect("Can't possibly be lower after inserting"),
+        );
+
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .expect("Near should be attached for storage")
+                .0,
+        );
+        expect!(
+            attached_near >= storage_cost,
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        expect!(
+            attached_assets.is_empty(),
+            "No assets other than NEAR should be attached"
+        );
+
+        #[near(serializers=[borsh])]
+        struct CreatePoolResponse {
+            pool_id: PoolId,
+        }
+        let response = CreatePoolResponse { pool_id };
+        DexCallResponse {
+            asset_withdraw_requests: if let Some(leftover) = attached_near.checked_sub(storage_cost)
+            {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn register_liquidity(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct RegisterLiquidityArgs {
+            pool_id: PoolId,
+        }
+        let Ok(RegisterLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
+            panic!("Pool not found");
+        };
+        let Pool::Public { user_shares, .. } = pool else {
+            panic!("Liquidity registration is only needed for public pools");
+        };
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        expect!(
+            attached_assets.is_empty(),
+            "No assets other than NEAR should be attached"
+        );
+
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let predecessor_id = near_sdk::env::predecessor_account_id();
+        user_shares.entry(predecessor_id).or_insert(None);
+        user_shares.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+
+        expect!(
+            attached_near >= storage_cost,
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+
+        DexCallResponse {
+            asset_withdraw_requests: if let Some(leftover) = attached_near.checked_sub(storage_cost)
+            {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn add_liquidity(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct AddLiquidityArgs {
+            pool_id: PoolId,
+        }
+        let Ok(AddLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
+            panic!("Pool not found");
+        };
+
+        let asset_withdraw_requests = match pool {
+            Pool::Private {
+                assets,
+                owner_id,
+                fees: _,
+            } => {
+                expect!(
+                    *owner_id == near_sdk::env::predecessor_account_id(),
+                    "Only pool owner can add liquidity"
+                );
+                let asset_0_amount = attached_assets
+                    .remove(&assets.0.asset_id)
+                    .expect("Asset 1 not found");
+                let asset_1_amount = attached_assets
+                    .remove(&assets.1.asset_id)
+                    .expect("Asset 2 not found");
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than the two pool assets should be attached"
+                );
+                assets.0.balance.0 = assets
+                    .0
+                    .balance
+                    .0
+                    .checked_add(asset_0_amount.0)
+                    .expect("Overflow");
+                assets.1.balance.0 = assets
+                    .1
+                    .balance
+                    .0
+                    .checked_add(asset_1_amount.0)
+                    .expect("Overflow");
+                Vec::new()
+            }
+            Pool::Public {
+                assets,
+                fees: _,
+                user_shares,
+                total_shares,
+            } => {
+                let asset_0_amount = attached_assets
+                    .remove(&assets.0.asset_id)
+                    .expect("Asset 1 not found");
+                let asset_1_amount = attached_assets
+                    .remove(&assets.1.asset_id)
+                    .expect("Asset 2 not found");
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than the two pool assets should be attached"
+                );
+                expect!(
+                    asset_0_amount.0 > 0 && asset_1_amount.0 > 0,
+                    "Amounts must be greater than 0"
+                );
+                expect!(
+                    user_shares.contains_key(&near_sdk::env::predecessor_account_id()),
+                    "User has not registered using register_liquidity"
+                );
+                let mut asset_withdraw_requests = Vec::new();
+                match total_shares {
+                    None => {
+                        assets.0.balance.0 = assets
+                            .0
+                            .balance
+                            .0
+                            .checked_add(asset_0_amount.0)
+                            .expect("Overflow");
+                        assets.1.balance.0 = assets
+                            .1
+                            .balance
+                            .0
+                            .checked_add(asset_1_amount.0)
+                            .expect("Overflow");
+                        *total_shares = Some(INITIAL_SHARES);
+                        expect!(
+                            user_shares
+                                .insert(
+                                    near_sdk::env::predecessor_account_id(),
+                                    Some(INITIAL_SHARES)
+                                )
+                                .is_some_and(|s| s.is_none()),
+                            "User already has shares but there are no total shares"
+                        );
+                    }
+                    Some(total_shares) => {
+                        // expect!(
+                        //     assets.0.balance.0 > 0 && assets.1.balance.0 > 0,
+                        //     "Pool is empty"
+                        // );
+                        expect!(
+                            let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
+                            let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
+                            "Pool is empty"
+                        );
+
+                        let shares_from_asset_0 = NonZeroU128::new(tokens_to_shares(
+                            asset_0_amount.0.saturating_sub(1),
+                            *total_shares,
+                            pool_balance_0,
+                        ))
+                        .expect("Can't mint zero shares");
+                        let shares_from_asset_1 = NonZeroU128::new(tokens_to_shares(
+                            asset_1_amount.0.saturating_sub(1),
+                            *total_shares,
+                            pool_balance_1,
+                        ))
+                        .expect("Can't mint zero shares");
+                        let shares_to_mint = shares_from_asset_0.min(shares_from_asset_1);
+
+                        let used_asset_0 =
+                            shares_to_tokens(shares_to_mint, *total_shares, pool_balance_0);
+                        let used_asset_1 =
+                            shares_to_tokens(shares_to_mint, *total_shares, pool_balance_1);
+
+                        assets.0.balance.0 = assets
+                            .0
+                            .balance
+                            .0
+                            .checked_add(used_asset_0)
+                            .expect("Overflow");
+                        assets.1.balance.0 = assets
+                            .1
+                            .balance
+                            .0
+                            .checked_add(used_asset_1)
+                            .expect("Overflow");
+
+                        *total_shares = total_shares
+                            .checked_add(shares_to_mint.get())
+                            .expect("Overflow");
+                        user_shares
+                            .entry(near_sdk::env::predecessor_account_id())
+                            .and_modify(|shares| match shares {
+                                Some(shares) => {
+                                    *shares =
+                                        shares.checked_add(shares_to_mint.get()).expect("Overflow");
+                                }
+                                None => {
+                                    *shares = Some(shares_to_mint);
+                                }
+                            })
+                            .or_insert(Some(shares_to_mint));
+
+                        if let Some(leftover) = asset_0_amount.0.checked_sub(used_asset_0) {
+                            asset_withdraw_requests.push(AssetWithdrawRequest {
+                                asset_id: assets.0.asset_id.clone(),
+                                amount: U128(leftover),
+                                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                    near_sdk::env::predecessor_account_id(),
+                                ),
+                            });
+                        }
+                        if let Some(leftover) = asset_1_amount.0.checked_sub(used_asset_1) {
+                            asset_withdraw_requests.push(AssetWithdrawRequest {
+                                asset_id: assets.1.asset_id.clone(),
+                                amount: U128(leftover),
+                                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                    near_sdk::env::predecessor_account_id(),
+                                ),
+                            });
+                        }
+                    }
+                }
+                asset_withdraw_requests
+            }
+        };
+
+        #[near(serializers=[borsh])]
+        struct AddLiquidityResponse;
+        let response = AddLiquidityResponse;
+        DexCallResponse {
+            asset_withdraw_requests,
+            response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn remove_liquidity(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct RemoveLiquidityArgs {
+            pool_id: PoolId,
+            shares_to_remove: Option<SharesBalance>,
+        }
+        let Ok(RemoveLiquidityArgs {
+            pool_id,
+            shares_to_remove,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
+            panic!("Pool not found");
+        };
+
+        let (withdraw_to, (asset_id_0, amount_0), (asset_id_1, amount_1)) = match pool {
+            Pool::Private {
+                assets,
+                owner_id,
+                fees: _,
+            } => {
+                expect!(
+                    *owner_id == near_sdk::env::predecessor_account_id(),
+                    "Only pool owner can remove liquidity"
+                );
+                expect!(
+                    shares_to_remove.is_none(),
+                    "Shares must be None for private pools"
+                );
+                let amount_0 = assets.0.balance.0;
+                let amount_1 = assets.1.balance.0;
+                assets.0.balance.0 = 0;
+                assets.1.balance.0 = 0;
+                (
+                    owner_id.clone(),
+                    (assets.0.asset_id.clone(), amount_0),
+                    (assets.1.asset_id.clone(), amount_1),
+                )
+            }
+            Pool::Public {
+                assets,
+                fees: _,
+                user_shares,
+                total_shares,
+            } => {
+                let current_shares = user_shares
+                    .get(&near_sdk::env::predecessor_account_id())
+                    .copied()
+                    .flatten()
+                    .expect("User has no shares");
+                let shares_to_remove = shares_to_remove.unwrap_or(current_shares);
+                expect!(
+                    shares_to_remove <= current_shares,
+                    "Not enough shares to remove"
+                );
+                expect!(let Some(pool_total_shares) = total_shares, "Pool has no shares");
+                let (amount_0, amount_1) = if shares_to_remove == *pool_total_shares {
+                    let amount_0 = assets.0.balance.0;
+                    let amount_1 = assets.1.balance.0;
+                    assets.0.balance.0 = 0;
+                    assets.1.balance.0 = 0;
+                    (amount_0, amount_1)
+                } else {
+                    let amount_0 = NonZeroU128::new(assets.0.balance.0)
+                        .map(|balance| {
+                            shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                        })
+                        .unwrap_or_default();
+                    let amount_1 = NonZeroU128::new(assets.1.balance.0)
+                        .map(|balance| {
+                            shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                        })
+                        .unwrap_or_default();
+                    assets.0.balance.0 = assets
+                        .0
+                        .balance
+                        .0
+                        .checked_sub(amount_0)
+                        .expect("Somehow not enough balance for asset 1 withdrawal");
+                    assets.1.balance.0 = assets
+                        .1
+                        .balance
+                        .0
+                        .checked_sub(amount_1)
+                        .expect("Somehow not enough balance for asset 2 withdrawal");
+                    (amount_0, amount_1)
+                };
+                *total_shares = NonZeroU128::new(
+                    pool_total_shares
+                        .get()
+                        .checked_sub(shares_to_remove.get())
+                        .expect("Underflow"),
+                );
+                let updated_shares = NonZeroU128::new(
+                    current_shares
+                        .get()
+                        .checked_sub(shares_to_remove.get())
+                        .expect("Underflow"),
+                );
+                user_shares.insert(near_sdk::env::predecessor_account_id(), updated_shares);
+                (
+                    near_sdk::env::predecessor_account_id(),
+                    (assets.0.asset_id.clone(), amount_0),
+                    (assets.1.asset_id.clone(), amount_1),
+                )
+            }
+        };
+
+        #[near(serializers=[borsh])]
+        struct RemoveLiquidityResponse;
+        let response = RemoveLiquidityResponse;
+        DexCallResponse {
+            asset_withdraw_requests: vec![
+                AssetWithdrawRequest {
+                    asset_id: asset_id_0,
+                    amount: U128(amount_0),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                        withdraw_to.clone(),
+                    ),
+                },
+                AssetWithdrawRequest {
+                    asset_id: asset_id_1,
+                    amount: U128(amount_1),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(withdraw_to),
+                },
+            ],
+            response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn edit_fees(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct EditFeesArgs {
+            pool_id: PoolId,
+            fees: FeeConfiguration,
+        }
+        let Ok(EditFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let Some(pool) = self.pools.get_mut(&pool_id) else {
+            panic!("Pool not found");
+        };
+        let (assets, pool_fees) = match pool {
+            Pool::Private {
+                assets,
+                owner_id,
+                fees,
+            } => {
+                expect!(
+                    *owner_id == near_sdk::env::predecessor_account_id(),
+                    "Only pool owner can edit fees"
+                );
+                (assets, fees)
+            }
+            Pool::Public { .. } => {
+                panic!("Fees cannot be edited for public pools");
+            }
+        };
+        fees.validate();
+
+        let storage_usage_before = near_sdk::env::storage_usage();
+        for fee_receiver in fees.receivers.keys() {
+            match fee_receiver {
+                FeeReceiver::User(user_id) => {
+                    self.fees_collected_by_users
+                        .entry((user_id.clone(), assets.0.asset_id.clone()))
+                        .or_default();
+                    self.fees_collected_by_users
+                        .entry((user_id.clone(), assets.1.asset_id.clone()))
+                        .or_default();
+                }
+            }
+        }
+        self.fees_collected_by_users.flush();
+
+        *pool_fees = fees;
+        self.pools.flush();
+
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        expect!(
+            attached_near >= storage_cost,
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        expect!(
+            attached_assets.is_empty(),
+            "No assets other than NEAR should be attached"
+        );
+
+        DexCallResponse {
+            asset_withdraw_requests: if let Some(leftover) = attached_near.checked_sub(storage_cost)
+            {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn withdraw_fees(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct WithdrawFeesArgs {
+            assets: Vec<AssetId>,
+        }
+        let Ok(WithdrawFeesArgs { assets }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+
+        let mut asset_withdraw_requests = Vec::new();
+        for asset_id in assets {
+            let Some(balance) = self
+                .fees_collected_by_users
+                .get(&(near_sdk::env::predecessor_account_id(), asset_id.clone()))
+                .cloned()
+            else {
+                continue;
+            };
+            if balance.0 == 0 {
+                continue;
+            }
+            self.fees_collected_by_users.insert(
+                (near_sdk::env::predecessor_account_id(), asset_id.clone()),
+                U128(0),
+            );
+            asset_withdraw_requests.push(AssetWithdrawRequest {
+                asset_id,
+                amount: balance,
+                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                    near_sdk::env::predecessor_account_id(),
+                ),
+            });
+        }
+
+        DexCallResponse {
+            asset_withdraw_requests,
+            ..Default::default()
+        }
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<&Pool> {
+        self.pools.get(&pool_id)
+    }
+}
+
+#[near(serializers=[borsh])]
+pub enum Pool {
+    Private {
+        assets: (AssetWithBalance, AssetWithBalance),
+        owner_id: AccountId,
+        fees: FeeConfiguration,
+    },
+    Public {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: FeeConfiguration,
+        user_shares: LookupMap<AccountId, Option<SharesBalance>>,
+        total_shares: Option<SharesBalance>,
+    },
+}
+
+/// When a public pool is created, the creator gets
+/// 1e18 shares, which represents 100% of the pool.
+/// When someone adds liquidity, the rate of tokens
+/// per share is calculated by dividing the total
+/// pool value by the total shares, and shares are
+/// minted or burnt accordingly.
+type SharesBalance = NonZeroU128;
+
+/// Should add up to less than 1000000 (1% = 10000)
+#[near(serializers=[borsh, json])]
+pub struct FeeConfiguration {
+    receivers: HashMap<FeeReceiver, FeeFraction>,
+}
+
+/// 100% = 1000000
+type FeeFraction = u32;
+
+const MAX_FEE_FRACTION: FeeFraction = 1000000;
+const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
+
+impl FeeConfiguration {
+    fn validate(&self) {
+        expect!(self.receivers.len() <= 100, "Too many fee receivers");
+        expect!(
+            self.receivers.values().all(|fee| *fee < MAX_FEE_FRACTION),
+            "Fee must be less than 100% per receiver"
+        );
+        expect!(
+            self.receivers.values().sum::<u32>() < MAX_FEE_FRACTION,
+            "Fees must add up to less than 100%"
+        );
+    }
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum FeeReceiver {
+    User(AccountId),
+    // Pool, // unimplemented
+}
+
+#[near(serializers=[borsh])]
+pub struct AssetWithBalance {
+    asset_id: AssetId,
+    balance: U128,
+}

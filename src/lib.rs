@@ -126,6 +126,7 @@ pub enum IntearDexEvent {
         amount_in: U128,
         amount_out: U128,
         trader: AccountId,
+        referrer: Option<AccountId>,
     },
 }
 
@@ -200,6 +201,7 @@ impl DexEngine {
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
+        referrer: Option<AccountId>,
     ) -> (U128, U128) {
         near_sdk::assert_one_yocto();
         self.internal_swap_simple(
@@ -209,6 +211,7 @@ impl DexEngine {
             asset_out,
             amount,
             TradeAccount::User(near_sdk::env::predecessor_account_id()),
+            referrer,
         )
     }
 
@@ -279,9 +282,14 @@ impl DexEngine {
     }
 
     #[payable]
-    pub fn execute_operations(&mut self, operations: Vec<Operation>) {
+    pub fn execute_operations(&mut self, operations: Vec<Operation>, referrer: Option<AccountId>) {
         near_sdk::assert_one_yocto();
-        self.internal_execute_operations(operations, near_sdk::env::predecessor_account_id(), None);
+        self.internal_execute_operations(
+            operations,
+            near_sdk::env::predecessor_account_id(),
+            None,
+            referrer,
+        );
     }
 
     pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<U128> {

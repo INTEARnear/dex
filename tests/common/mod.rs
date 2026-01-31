@@ -15,6 +15,7 @@ pub struct CompiledWasms {
     pub simple_amm_dex_wasm: Vec<u8>,
     pub minimal_dex_wasm: Vec<u8>,
     pub otc_dex_wasm: Vec<u8>,
+    pub xyk_dex_wasm: Vec<u8>,
     pub ft_wasm: Vec<u8>,
 }
 
@@ -113,6 +114,35 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                     .success()
             );
 
+            println!("Compiling xyk-dex");
+            assert!(
+                Command::new("cargo")
+                    .args([
+                        "build",
+                        "--package=xyk-dex",
+                        "--release",
+                        "--target",
+                        "wasm32-unknown-unknown"
+                    ])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                Command::new("wasm-opt")
+                    .args([
+                        "-O",
+                        "./target/wasm32-unknown-unknown/release/xyk_dex.wasm",
+                        "-o",
+                        "./target/wasm32-unknown-unknown/release/xyk_dex.wasm"
+                    ])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+
             println!("Compilation complete");
 
             let simple_amm_dex_wasm =
@@ -122,6 +152,8 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 std::fs::read("./target/wasm32-unknown-unknown/release/minimal_dex.wasm").unwrap();
             let otc_dex_wasm =
                 std::fs::read("./target/wasm32-unknown-unknown/release/otc_dex.wasm").unwrap();
+            let xyk_dex_wasm =
+                std::fs::read("./target/wasm32-unknown-unknown/release/xyk_dex.wasm").unwrap();
             let ft_wasm = include_bytes!("../assets/ft.wasm").to_vec();
 
             CompiledWasms {
@@ -129,6 +161,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 simple_amm_dex_wasm,
                 minimal_dex_wasm,
                 otc_dex_wasm,
+                xyk_dex_wasm,
                 ft_wasm,
             }
         })

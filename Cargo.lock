@@ -4718,6 +4718,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xyk-dex"
+version = "0.1.0"
+dependencies = [
+ "crypto-bigint",
+ "intear-dex-types",
+ "near-sdk",
+ "talc",
+]
+
+[[package]]
 name = "xz2"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
