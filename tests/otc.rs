@@ -125,112 +125,31 @@ async fn test_otc_regular_flow() {
     let trade_amount_ft = 100_000_000u128;
     let ft_initial_deposit = 1_000_000_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         sandbox,
         dex_engine_contract,
         ft1,
         deployer,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let initial_near_balance = deployer.view_account().await.unwrap().balance;
     let mut total_near_burnt = NearToken::from_yoctonear(0);
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Near,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    track_tokens_burnt(&result, &mut total_near_burnt);
-
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Near,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Nep141(ft1.id().clone()),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Account(deployer.id().clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    track_tokens_burnt(&result, &mut total_near_burnt);
 
     let result = deployer
         .call(dex_engine_contract.id(), "deposit_near")
@@ -242,15 +161,7 @@ async fn test_otc_regular_flow() {
         .unwrap();
     assert_success(&result).unwrap();
     track_tokens_burnt(&result, &mut total_near_burnt);
-    assert_near_balance(
-        &deployer,
-        initial_near_balance
-            .saturating_sub(initial_near_deposit)
-            .saturating_sub(total_near_burnt)
-            .saturating_sub(NearToken::from_yoctonear(2)),
-    )
-    .await
-    .unwrap();
+
     assert_inner_asset_balance(
         &dex_engine_contract,
         AccountOrDexId::Account(deployer.id().clone()),
@@ -259,8 +170,6 @@ async fn test_otc_regular_flow() {
     )
     .await
     .unwrap();
-
-    ft_storage_deposit_for(&ft1, ft1.as_account(), dex_engine_contract.id()).await;
 
     let initial_ft_balance = ft1
         .view("ft_balance_of")
@@ -488,7 +397,7 @@ async fn test_otc_regular_flow() {
         initial_near_balance
             .saturating_sub(initial_near_deposit)
             .saturating_sub(total_near_burnt)
-            .saturating_sub(NearToken::from_yoctonear(6)),
+            .saturating_sub(NearToken::from_yoctonear(4)),
     )
     .await
     .unwrap();
@@ -527,6 +436,8 @@ async fn test_otc_relayed_by_third_party() {
     let trade_amount_ft = 100_000_000u128;
     let ft_initial_deposit = 1_000_000_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         dex_engine_contract,
         ft1,
@@ -537,109 +448,20 @@ async fn test_otc_relayed_by_third_party() {
         user2_key,
         user3,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Account(user1.id().clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Account(user2.id().clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -650,10 +472,6 @@ async fn test_otc_relayed_by_third_party() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    ft_storage_deposit(&ft1, &user2).await;
-
-    ft_storage_deposit_for(&ft1, &user3, dex_engine_contract.id()).await;
 
     let result = deployer
         .call(ft1.id(), "ft_transfer")
@@ -907,92 +725,28 @@ async fn test_otc_single_intent_from_one_account_fails() {
     let trade_amount_near = NearToken::from_near(2);
     let trade_amount_ft = 100_000_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         dex_engine_contract,
         ft1,
-        deployer,
         user1,
+        deployer,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Account(user1.id().clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1089,6 +843,8 @@ async fn test_otc_mismatching_intents_fail() {
     let mismatched_ft_amount = 200_000_000u128;
     let ft_initial_deposit = 1_000_000_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         dex_engine_contract,
         ft1,
@@ -1098,107 +854,20 @@ async fn test_otc_mismatching_intents_fail() {
         user2,
         user2_key,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1209,10 +878,6 @@ async fn test_otc_mismatching_intents_fail() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    ft_storage_deposit(&ft1, &user2).await;
-
-    ft_storage_deposit_for(&ft1, &deployer, dex_engine_contract.id()).await;
 
     let result = deployer
         .call(ft1.id(), "ft_transfer")
@@ -1427,6 +1092,8 @@ async fn test_otc_three_intents_with_same_value() {
     let ft1_initial_deposit = 1_000_000u128;
     let ft2_initial_deposit = 100_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         dex_engine_contract,
         ft1,
@@ -1439,129 +1106,20 @@ async fn test_otc_three_intents_with_same_value() {
         user3,
         user3_key,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user3
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user3
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft2.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1572,14 +1130,6 @@ async fn test_otc_three_intents_with_same_value() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    ft_storage_deposit(&ft1, &user2).await;
-
-    ft_storage_deposit(&ft2, &user3).await;
-
-    ft_storage_deposit_for(&ft1, &deployer, dex_engine_contract.id()).await;
-
-    ft_storage_deposit_for(&ft2, &deployer, dex_engine_contract.id()).await;
 
     let result = deployer
         .call(ft1.id(), "ft_transfer")
@@ -1961,6 +1511,8 @@ async fn test_otc_nonces() {
     let trade_amount_ft = 100_000_000u128;
     let ft_initial_deposit = 1_000_000_000u128;
 
+    let wasms = get_compiled_wasms().await;
+
     let TestContext {
         sandbox,
         dex_engine_contract,
@@ -1971,107 +1523,20 @@ async fn test_otc_nonces() {
         user2,
         user2_key,
         ..
-    } = setup_test_environment().await;
-    let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.otc_dex_wasm;
-
-    let dex_id_string = "dex".to_string();
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
     let dex_id = DexId {
         deployer: deployer.id().clone(),
-        id: dex_id_string.clone(),
+        id: "dex".to_string(),
     };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "dex_storage_deposit")
-        .max_gas()
-        .deposit(engine_dex_storage_deposit())
-        .args_json(json!({
-            "dex_id": dex_id,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deploy_dex_code")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "last_part_of_id": dex_id_string,
-            "code_base64": BASE64_STANDARD.encode(dex_wasm),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-            "for": AccountOrDexId::Dex(dex_id.clone()),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user1
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -2082,10 +1547,6 @@ async fn test_otc_nonces() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    ft_storage_deposit(&ft1, &user2).await;
-
-    ft_storage_deposit_for(&ft1, &deployer, dex_engine_contract.id()).await;
 
     let result = deployer
         .call(ft1.id(), "ft_transfer")

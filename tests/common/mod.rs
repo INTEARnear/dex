@@ -1,12 +1,16 @@
 #![allow(unused)]
 
 use intear_dex::internal_asset_operations::AccountOrDexId;
-use intear_dex_types::AssetId;
+use intear_dex::internal_operations::Operation;
+use intear_dex_types::{AssetId, DexId};
 use near_crypto::KeyType;
+use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
+use near_sdk::json_types::Base64VecU8;
 use near_sdk::serde_json::json;
 use near_sdk::{AccountId, NearToken, json_types::U128};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, Contract};
+use std::collections::HashMap;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
@@ -335,6 +339,19 @@ pub const fn engine_dex_storage_deposit() -> NearToken {
     NearToken::from_near(20)
 }
 
+pub struct DexSetupConfig {
+    pub id: String,
+    pub code: Vec<u8>,
+    pub init_method: Option<(String, Vec<u8>)>,
+}
+
+#[derive(Default)]
+pub struct TestSetupConfig {
+    pub dex: Option<DexSetupConfig>,
+    pub register_assets_for_all: bool,
+    pub ft_storage_deposit_for_all: bool,
+}
+
 pub struct TestContext {
     pub sandbox: near_workspaces::Worker<near_workspaces::network::Sandbox>,
     pub dex_engine_contract: Contract,
@@ -356,6 +373,11 @@ pub struct TestContext {
 
 /// Set up the basic test environment
 pub async fn setup_test_environment() -> TestContext {
+    setup_test_environment_with_config(TestSetupConfig::default()).await
+}
+
+/// Set up the test environment with custom configuration.
+pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> TestContext {
     let wasms = get_compiled_wasms().await;
     let sandbox = near_workspaces::sandbox().await.unwrap();
     let dex_engine_contract = sandbox.dev_deploy(&wasms.contract_wasm).await.unwrap();
@@ -435,6 +457,121 @@ pub async fn setup_test_environment() -> TestContext {
         .transact()
         .await
         .unwrap();
+
+    let all_accounts = [&user1, &user2, &user3, &user4, &user5, &deployer];
+    let all_fts = [&ft1, &ft2, &ft3];
+
+    if config.ft_storage_deposit_for_all {
+        for ft in &all_fts {
+            ft_storage_deposit_for(ft, ft.as_account(), dex_engine_contract.id()).await;
+            for account in &all_accounts {
+                ft_storage_deposit(ft, account).await;
+            }
+        }
+    }
+
+    if config.register_assets_for_all {
+        let asset_ids = vec![
+            AssetId::Near,
+            AssetId::Nep141(ft1.id().clone()),
+            AssetId::Nep141(ft2.id().clone()),
+            AssetId::Nep141(ft3.id().clone()),
+        ];
+        for account in &all_accounts {
+            let result = account
+                .call(dex_engine_contract.id(), "storage_deposit")
+                .max_gas()
+                .deposit(engine_user_storage_deposit())
+                .args_json(json!({}))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+
+            let result = account
+                .call(dex_engine_contract.id(), "register_assets")
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .args_json(json!({
+                    "asset_ids": asset_ids,
+                    "for": AccountOrDexId::Account(account.id().clone()),
+                }))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+        }
+    }
+
+    if let Some(dex_config) = config.dex {
+        let dex_id = DexId {
+            deployer: deployer.id().clone(),
+            id: dex_config.id.clone(),
+        };
+
+        let result = deployer
+            .call(dex_engine_contract.id(), "dex_storage_deposit")
+            .max_gas()
+            .deposit(engine_dex_storage_deposit())
+            .args_json(json!({
+                "dex_id": dex_id,
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+
+        let result = deployer
+            .call(dex_engine_contract.id(), "deploy_dex_code")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "last_part_of_id": dex_config.id,
+                "code_base64": BASE64_STANDARD.encode(&dex_config.code),
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+
+        if config.register_assets_for_all {
+            let asset_ids = vec![
+                AssetId::Near,
+                AssetId::Nep141(ft1.id().clone()),
+                AssetId::Nep141(ft2.id().clone()),
+                AssetId::Nep141(ft3.id().clone()),
+            ];
+            let result = deployer
+                .call(dex_engine_contract.id(), "register_assets")
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .args_json(json!({
+                    "asset_ids": asset_ids,
+                    "for": AccountOrDexId::Dex(dex_id.clone()),
+                }))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+        }
+
+        if let Some((method, args)) = dex_config.init_method {
+            let result = deployer
+                .call(dex_engine_contract.id(), "dex_call")
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .args_json(json!({
+                    "dex_id": dex_id.clone(),
+                    "method": method,
+                    "args": BASE64_STANDARD.encode(&args),
+                    "attached_assets": {},
+                }))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+        }
+    }
 
     TestContext {
         sandbox,

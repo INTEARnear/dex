@@ -338,11 +338,6 @@ impl DexEngine {
         drop(store);
         drop(linker);
 
-        self.dex_storage.flush();
-        let storage_usage_after = near_sdk::env::storage_usage();
-        self.dex_storage_balances
-            .charge(&dex_id, storage_usage_before, storage_usage_after);
-
         let response: DexCallResponse = match response {
             Some(response) => near_sdk::borsh::from_slice(&response)
                 .expect("Failed to deserialize dex call response"),
@@ -421,6 +416,12 @@ impl DexEngine {
             self.dex_storage_balances
                 .deposit(&dex_id, response.add_storage_deposit);
         }
+
+        self.dex_storage.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        self.dex_storage_balances
+            .charge(&dex_id, storage_usage_before, storage_usage_after);
+
         Base64VecU8::from(response.response)
     }
 

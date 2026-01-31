@@ -19,7 +19,8 @@ macro_rules! declare_unimplemented_host_functions {
                     unimplemented!(concat!("Function ", stringify!($name), " is not implemented"))
                 },
             )
-            .expect("Failed to create host function");
+            .map_err(|err| panic!("Failed to create host function: {err}"))
+            .ok();
         )*
     };
 }
@@ -264,29 +265,34 @@ macro_rules! impl_supported_host_functions {
     };
 }
 
-pub fn register_len(caller: Caller<'_, RunnerData>, register_id: u64) -> u64 {
-    caller
+pub fn register_len(caller: Caller<'_, RunnerData>, register_id: u64) -> Result<u64, wasmi::Error> {
+    Ok(caller
         .data()
         .registers
         .get(&register_id)
         .map(|v| v.len() as u64)
-        .unwrap_or(u64::MAX)
+        .unwrap_or(u64::MAX))
 }
 
-pub fn read_register(mut caller: Caller<'_, RunnerData>, register_id: u64, ptr: u64) {
+pub fn read_register(
+    mut caller: Caller<'_, RunnerData>,
+    register_id: u64,
+    ptr: u64,
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let buf = caller
         .data()
         .registers
         .get(&register_id)
-        .expect("Invalid register")
+        .ok_or_else(|| wasmi::Error::new("Invalid register"))?
         .clone();
     memory
         .write(&mut caller, ptr as usize, &buf)
-        .expect("Failed to write data to guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to write data to guest memory: {err}")))?;
+    Ok(())
 }
 
 pub fn write_register(
@@ -294,25 +300,32 @@ pub fn write_register(
     register_id: u64,
     data_len: u64,
     data_ptr: u64,
-) {
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut buf = vec![0; data_len as usize];
     memory
         .read(&caller, data_ptr as usize, &mut buf)
-        .expect("Failed to read data from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read data from guest memory: {err}"))
+        })?;
     caller.data_mut().registers.insert(register_id, buf);
+    Ok(())
 }
 
-pub fn input(mut caller: Caller<'_, RunnerData>, register_id: u64) {
+pub fn input(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
     let request = caller.data().request.clone();
     caller.data_mut().registers.insert(register_id, request);
+    Ok(())
 }
 
 // 1 yocto if this is an authorized dex call, 0 otherwise
-pub fn attached_deposit(mut caller: Caller<'_, RunnerData>, balance_ptr: u64) {
+pub fn attached_deposit(
+    mut caller: Caller<'_, RunnerData>,
+    balance_ptr: u64,
+) -> Result<(), wasmi::Error> {
     let attached_deposit = match caller.data().call_type {
         CallType::Call {
             is_authorized: true,
@@ -323,53 +336,68 @@ pub fn attached_deposit(mut caller: Caller<'_, RunnerData>, balance_ptr: u64) {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     memory
         .write(
             &mut caller,
             balance_ptr as usize,
             &attached_deposit.as_yoctonear().to_le_bytes(),
         )
-        .expect("Failed to write data to guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to write data to guest memory: {err}")))?;
+    Ok(())
 }
 
-pub fn predecessor_account_id(mut caller: Caller<'_, RunnerData>, register_id: u64) {
+pub fn predecessor_account_id(
+    mut caller: Caller<'_, RunnerData>,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
     let CallType::Call { predecessor_id, .. } = &caller.data().call_type else {
-        panic!("predecessor_account_id is not allowed in view functions");
+        return Err(wasmi::Error::new(
+            "predecessor_account_id is only allowed in call functions",
+        ));
     };
     let buf = predecessor_id.to_string().into_bytes();
     caller.data_mut().registers.insert(register_id, buf);
+    Ok(())
 }
 
-pub fn value_return(mut caller: Caller<'_, RunnerData>, value_len: u64, value_ptr: u64) {
+pub fn value_return(
+    mut caller: Caller<'_, RunnerData>,
+    value_len: u64,
+    value_ptr: u64,
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut buf)
-        .expect("Failed to get return value");
+        .map_err(|err| wasmi::Error::new(format!("Failed to get return value: {err}")))?;
     caller.data_mut().response = Some(buf);
+    Ok(())
 }
 
-pub fn panic(caller: Caller<'_, RunnerData>) {
+pub fn panic(caller: Caller<'_, RunnerData>) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
-    panic!("[{dex_id}] Dex panicked");
+    Err(wasmi::Error::new(format!("[{dex_id}] Dex panicked")))
 }
 
-pub fn panic_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) {
+pub fn panic_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut buf = vec![0; len as usize];
     memory
         .read(&caller, ptr as usize, &mut buf)
-        .expect("Failed to read panic message");
-    let message = String::from_utf8(buf).expect("Failed to parse panic message");
-    panic!("[{dex_id}] Dex panicked: {message}");
+        .map_err(|err| wasmi::Error::new(format!("Failed to read panic message: {err}")))?;
+    let message = String::from_utf8(buf)
+        .map_err(|err| wasmi::Error::new(format!("Failed to parse panic message: {err}")))?;
+    Err(wasmi::Error::new(format!(
+        "[{dex_id}] Dex panicked: {message}"
+    )))
 }
 
 pub fn storage_write(
@@ -379,31 +407,35 @@ pub fn storage_write(
     value_len: u64,
     value_ptr: u64,
     register_id: u64,
-) -> u64 {
+) -> Result<u64, wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut key_buf = vec![0; key_len as usize];
     memory
         .read(&caller, key_ptr as usize, &mut key_buf)
-        .expect("Failed to read key from guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to read key from guest memory: {err}")))?;
     let mut value_buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
-        .expect("Failed to read value from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
 
     let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() else {
-        panic!("storage_write is not allowed in view functions");
+        return Err(wasmi::Error::new(
+            "storage_write is not allowed in view functions",
+        ));
     };
     let old_value = dex_storage_mut.insert((dex_id, key_buf), value_buf);
 
     if let Some(old_val) = old_value {
         caller.data_mut().registers.insert(register_id, old_val);
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
@@ -412,16 +444,16 @@ pub fn storage_read(
     key_len: u64,
     key_ptr: u64,
     register_id: u64,
-) -> u64 {
+) -> Result<u64, wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut key_buf = vec![0; key_len as usize];
     memory
         .read(&caller, key_ptr as usize, &mut key_buf)
-        .expect("Failed to read key from guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to read key from guest memory: {err}")))?;
 
     if let Some(value) = caller
         .data()
@@ -431,9 +463,9 @@ pub fn storage_read(
         .cloned()
     {
         caller.data_mut().registers.insert(register_id, value);
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
@@ -442,38 +474,44 @@ pub fn storage_remove(
     key_len: u64,
     key_ptr: u64,
     register_id: u64,
-) -> u64 {
+) -> Result<u64, wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut key_buf = vec![0; key_len as usize];
     memory
         .read(&caller, key_ptr as usize, &mut key_buf)
-        .expect("Failed to read key from guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to read key from guest memory: {err}")))?;
 
     let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() else {
-        panic!("storage_write is not allowed in view functions");
+        return Err(wasmi::Error::new(
+            "storage_write is not allowed in view functions",
+        ));
     };
     if let Some(old_value) = dex_storage_mut.remove(&(dex_id, key_buf)) {
         caller.data_mut().registers.insert(register_id, old_value);
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
-pub fn storage_has_key(caller: Caller<'_, RunnerData>, key_len: u64, key_ptr: u64) -> u64 {
+pub fn storage_has_key(
+    caller: Caller<'_, RunnerData>,
+    key_len: u64,
+    key_ptr: u64,
+) -> Result<u64, wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut key_buf = vec![0; key_len as usize];
     memory
         .read(&caller, key_ptr as usize, &mut key_buf)
-        .expect("Failed to read key from guest memory");
+        .map_err(|err| wasmi::Error::new(format!("Failed to read key from guest memory: {err}")))?;
 
     if caller
         .data()
@@ -481,62 +519,71 @@ pub fn storage_has_key(caller: Caller<'_, RunnerData>, key_len: u64, key_ptr: u6
         .dex_storage()
         .contains_key(&(dex_id, key_buf))
     {
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
-pub fn block_index(_caller: Caller<'_, RunnerData>) -> u64 {
-    near_sdk::env::block_height()
+pub fn block_index(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
+    Ok(near_sdk::env::block_height())
 }
 
-pub fn block_timestamp(_caller: Caller<'_, RunnerData>) -> u64 {
-    near_sdk::env::block_timestamp()
+pub fn block_timestamp(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
+    Ok(near_sdk::env::block_timestamp())
 }
 
-pub fn epoch_height(_caller: Caller<'_, RunnerData>) -> u64 {
-    near_sdk::env::epoch_height()
+pub fn epoch_height(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
+    Ok(near_sdk::env::epoch_height())
 }
 
-pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> u64 {
+pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
     if let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() {
         dex_storage_mut.flush();
     };
     let storage_usage_now = near_sdk::env::storage_usage();
     let storage_usage_during_transaction = i64::try_from(storage_usage_now)
-        .expect("Storage usage overflow")
+        .map_err(|err| wasmi::Error::new(format!("Storage usage overflow: {err}")))?
         .checked_sub(
             i64::try_from(caller.data().dex_storage_usage_before_transaction)
-                .expect("Storage usage overflow"),
+                .map_err(|err| wasmi::Error::new(format!("Storage usage overflow: {err}")))?,
         )
-        .expect("Storage usage underflow");
+        .ok_or_else(|| wasmi::Error::new("Storage usage underflow"))?;
     let data_used_before_transaction = caller
         .data()
         .dex_storage_balances
         .get_bytes_used(&caller.data().dex_id);
-    i64::try_from(data_used_before_transaction)
-        .expect("Data used before transaction overflow")
+    let total_usage = i64::try_from(data_used_before_transaction)
+        .map_err(|err| wasmi::Error::new(format!("Data used before transaction overflow: {err}")))?
         .checked_add(storage_usage_during_transaction)
-        .expect("Result of storage usage calculation is not within i64 range")
-        .try_into()
-        .expect("Result of storage usage calculation is not within u64 range")
+        .ok_or_else(|| {
+            wasmi::Error::new("Result of storage usage calculation is not within i64 range")
+        })?;
+    total_usage.try_into().map_err(|err| {
+        wasmi::Error::new(format!(
+            "Result of storage usage calculation is not within u64 range: {err}"
+        ))
+    })
 }
 
-pub fn prepaid_gas(_caller: Caller<'_, RunnerData>) -> u64 {
-    near_sdk::env::prepaid_gas().as_gas()
+pub fn prepaid_gas(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
+    Ok(near_sdk::env::prepaid_gas().as_gas())
 }
 
-pub fn used_gas(_caller: Caller<'_, RunnerData>) -> u64 {
-    near_sdk::env::used_gas().as_gas()
+pub fn used_gas(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
+    Ok(near_sdk::env::used_gas().as_gas())
 }
 
-pub fn random_seed(mut caller: Caller<'_, RunnerData>, register_id: u64) {
+pub fn random_seed(
+    mut caller: Caller<'_, RunnerData>,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
     let seed = near_sdk::env::random_seed();
     caller
         .data_mut()
         .registers
         .insert(register_id, seed.to_vec());
+    Ok(())
 }
 
 pub fn sha256(
@@ -544,20 +591,23 @@ pub fn sha256(
     value_len: u64,
     value_ptr: u64,
     register_id: u64,
-) {
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut value_buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
-        .expect("Failed to read value from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
     let hash = near_sdk::env::sha256_array(&value_buf);
     caller
         .data_mut()
         .registers
         .insert(register_id, hash.to_vec());
+    Ok(())
 }
 
 pub fn keccak256(
@@ -565,20 +615,23 @@ pub fn keccak256(
     value_len: u64,
     value_ptr: u64,
     register_id: u64,
-) {
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut value_buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
-        .expect("Failed to read value from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
     let hash = near_sdk::env::keccak256_array(&value_buf);
     caller
         .data_mut()
         .registers
         .insert(register_id, hash.to_vec());
+    Ok(())
 }
 
 pub fn keccak512(
@@ -586,20 +639,23 @@ pub fn keccak512(
     value_len: u64,
     value_ptr: u64,
     register_id: u64,
-) {
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut value_buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
-        .expect("Failed to read value from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
     let hash = near_sdk::env::keccak512_array(&value_buf);
     caller
         .data_mut()
         .registers
         .insert(register_id, hash.to_vec());
+    Ok(())
 }
 
 pub fn ripemd160(
@@ -607,20 +663,23 @@ pub fn ripemd160(
     value_len: u64,
     value_ptr: u64,
     register_id: u64,
-) {
+) -> Result<(), wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut value_buf = vec![0; value_len as usize];
     memory
         .read(&caller, value_ptr as usize, &mut value_buf)
-        .expect("Failed to read value from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
     let hash = near_sdk::env::ripemd160_array(&value_buf);
     caller
         .data_mut()
         .registers
         .insert(register_id, hash.to_vec());
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -633,22 +692,28 @@ pub fn ecrecover(
     v: u64,
     malleability_flag: u64,
     register_id: u64,
-) -> u64 {
+) -> Result<u64, wasmi::Error> {
     if v >= 4 {
-        panic!("Invalid recovery ID passed to ecrecover: {v}");
+        return Err(wasmi::Error::new(format!(
+            "Invalid recovery ID passed to ecrecover: {v}"
+        )));
     }
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let mut hash_buf = vec![0; hash_len as usize];
     memory
         .read(&caller, hash_ptr as usize, &mut hash_buf)
-        .expect("Failed to read hash from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read hash from guest memory: {err}"))
+        })?;
     let mut sig_buf = vec![0; sig_len as usize];
     memory
         .read(&caller, sig_ptr as usize, &mut sig_buf)
-        .expect("Failed to read signature from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read signature from guest memory: {err}"))
+        })?;
 
     let maybe_public_key = near_sdk::env::ecrecover(
         &hash_buf,
@@ -657,7 +722,11 @@ pub fn ecrecover(
         match malleability_flag {
             0 => false,
             1 => true,
-            _ => panic!("Invalid malleability flag passed to ecrecover: {malleability_flag}"),
+            _ => {
+                return Err(wasmi::Error::new(format!(
+                    "Invalid malleability flag passed to ecrecover: {malleability_flag}"
+                )));
+            }
         },
     );
     if let Some(public_key) = maybe_public_key {
@@ -665,9 +734,9 @@ pub fn ecrecover(
             .data_mut()
             .registers
             .insert(register_id, public_key.to_vec());
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
@@ -679,49 +748,64 @@ pub fn ed25519_verify(
     message_ptr: u64,
     public_key_len: u64,
     public_key_ptr: u64,
-) -> u64 {
+) -> Result<u64, wasmi::Error> {
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     if signature_len != 64 || public_key_len != 32 {
-        return 0;
+        return Ok(0);
     }
     let mut sig_buf = [0u8; 64];
     memory
         .read(&caller, signature_ptr as usize, &mut sig_buf)
-        .expect("Failed to read signature from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read signature from guest memory: {err}"))
+        })?;
     let mut msg_buf = vec![0; message_len as usize];
     memory
         .read(&caller, message_ptr as usize, &mut msg_buf)
-        .expect("Failed to read message from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read message from guest memory: {err}"))
+        })?;
     let mut pub_key_buf = [0u8; 32];
     memory
         .read(&caller, public_key_ptr as usize, &mut pub_key_buf)
-        .expect("Failed to read public key from guest memory");
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read public key from guest memory: {err}"
+            ))
+        })?;
     if near_sdk::env::ed25519_verify(&sig_buf, &msg_buf, &pub_key_buf) {
-        1
+        Ok(1)
     } else {
-        0
+        Ok(0)
     }
 }
 
-pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) {
+pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let msg_bytes = if len == u64::MAX {
-        panic!("log_utf8: unterminated log strings are not supported");
+        return Err(wasmi::Error::new(
+            "log_utf8: unterminated log strings are not supported",
+        ));
     } else {
         let mut buf = vec![0; len as usize];
         memory
             .read(&caller, ptr as usize, &mut buf)
-            .expect("Failed to read log_utf8 buffer from guest memory");
+            .map_err(|err| {
+                wasmi::Error::new(format!(
+                    "Failed to read log_utf8 buffer from guest memory: {err}"
+                ))
+            })?;
         buf
     };
-    let message = String::from_utf8(msg_bytes).expect("log_utf8 received invalid UTF-8");
+    let message = String::from_utf8(msg_bytes)
+        .map_err(|err| wasmi::Error::new(format!("log_utf8 received invalid UTF-8: {err}")))?;
     if let Some(event) = message.strip_prefix("EVENT_JSON:") {
         if let Ok(event) = near_sdk::serde_json::from_str(event) {
             IntearDexEvent::DexEvent {
@@ -729,33 +813,44 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) {
                 event,
             }
             .emit();
-            return;
+            return Ok(());
         }
     }
 
     near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
+    Ok(())
 }
 
-pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) {
+pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
         .and_then(|m| m.into_memory())
-        .expect("Failed to get memory");
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
     let utf16: Vec<u16> = if len == u64::MAX {
-        panic!("log_utf16: unterminated log strings are not supported");
+        return Err(wasmi::Error::new(
+            "log_utf16: unterminated log strings are not supported",
+        ));
     } else {
         if len % 2 != 0 {
-            panic!("log_utf16 length must be even (u16 units)");
+            return Err(wasmi::Error::new(
+                "log_utf16 length must be even (u16 units)",
+            ));
         }
         let mut buf = vec![0; len as usize];
         memory
             .read(&caller, ptr as usize, &mut buf)
-            .expect("Failed to read log_utf16 buffer from guest memory");
+            .map_err(|err| {
+                wasmi::Error::new(format!(
+                    "Failed to read log_utf16 buffer from guest memory: {err}"
+                ))
+            })?;
         buf.chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect()
     };
-    let message = String::from_utf16(&utf16).expect("log_utf16 received invalid UTF-16");
+    let message = String::from_utf16(&utf16)
+        .map_err(|err| wasmi::Error::new(format!("log_utf16 received invalid UTF-16: {err}")))?;
     near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
+    Ok(())
 }
