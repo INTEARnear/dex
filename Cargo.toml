@@ -44,3 +44,12 @@ lto = true
 debug = false
 panic = "abort"
 overflow-checks = false # deny(clippy::arithmetic_side_effects) makes this unnecessary, unless bug is in a dependency
+
+[profile.release.package.xyk-dex]
+opt-level = "z"
+
+[profile.release.package.wasmi]
+opt-level = 3
+
+[profile.release.package.borsh]
+opt-level = 3

@@ -76,7 +76,6 @@ impl Dex for SimpleAmmDex {
                 } else {
                     (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
                 };
-                // in_balance was checked to be positive
                 #[allow(clippy::arithmetic_side_effects)]
                 let amount_out = u128::from_le_bytes(
                     *(U256::from(exact_amount_in.0) * U256::from(*out_balance)
@@ -103,7 +102,6 @@ impl Dex for SimpleAmmDex {
                     exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
-                // amount_out was checked to be less than out_balance
                 #[allow(clippy::arithmetic_side_effects)]
                 let amount_in = u128::from_le_bytes(
                     *((U256::from(*in_balance) * U256::from(exact_amount_out.0))

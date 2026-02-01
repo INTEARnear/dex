@@ -14,7 +14,8 @@ use near_sdk::{
 
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
-    static mut MEMORY: [u8; 0x8000] = [0; 0x8000]; // 32KB
+    const MEMORY_SIZE: usize = 0x8000; // 32KB
+    static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
     let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
@@ -73,7 +74,8 @@ fn shares_to_tokens(
     total_shares: SharesBalance,
     total_tokens: NonZeroU128,
 ) -> u128 {
-    #[allow(clippy::arithmetic_side_effects)] // total_shares is NonZeroU128
+    // total_shares is NonZeroU128; multiplication of u128's can not overflow u256
+    #[allow(clippy::arithmetic_side_effects)]
     u256_to_u128(
         u128_to_u256(total_tokens.get()) * u128_to_u256(shares.get())
             / u128_to_u256(total_shares.get()),
@@ -81,7 +83,8 @@ fn shares_to_tokens(
 }
 
 fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: NonZeroU128) -> u128 {
-    #[allow(clippy::arithmetic_side_effects)] // total_shares is NonZeroU128
+    // total_shares is NonZeroU128; multiplication of u128's can not overflow u256
+    #[allow(clippy::arithmetic_side_effects)]
     u256_to_u128(
         u128_to_u256(tokens) * u128_to_u256(total_shares.get()) / u128_to_u256(total_tokens.get()),
     )
@@ -144,7 +147,9 @@ impl Dex for XykDex {
             let mut fees_breakdown = Vec::new();
             let mut total_fees = 0u128;
             for (receiver, fee_fraction) in fees.receivers.iter() {
-                #[allow(clippy::arithmetic_side_effects)] // MAX_FEE_FRACTION is constant
+                // MAX_FEE_FRACTION is constant, so no zero division; u128 * u128 can't
+                // overflow u256
+                #[allow(clippy::arithmetic_side_effects)]
                 let fee_amount = u256_to_u128(
                     u128_to_u256(amount_in) * u128_to_u256(*fee_fraction as u128)
                         / u128_to_u256(MAX_FEE_FRACTION as u128),
@@ -182,7 +187,7 @@ impl Dex for XykDex {
                     fees,
                     &mut self.fees_collected_by_users,
                 );
-                // in_balance was checked to be positive
+                // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
                 #[allow(clippy::arithmetic_side_effects)]
                 let amount_out = u256_to_u128(
                     u128_to_u256(amount_in_after_fees) * u128_to_u256(*out_balance)
@@ -211,7 +216,9 @@ impl Dex for XykDex {
                     exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
-                // amount_out was checked to be less than out_balance
+                // u128 * u128 can't overflow u256; out_balance was checked to be
+                // greater than exact_amount_out so no underflow or zero division
+                // can happen
                 #[allow(clippy::arithmetic_side_effects)]
                 let amount_in_without_fees = u256_to_u128(
                     ((u128_to_u256(*in_balance) * u128_to_u256(exact_amount_out.0))
@@ -229,8 +236,10 @@ impl Dex for XykDex {
                 let fee_denominator_minus_one = fee_denominator
                     .checked_sub(1)
                     .expect("Fee fraction somehow equals 100%");
+                // checked_sub would fail if denominator was 0; MAX_FEE_FRACTION is
+                // constant, so multiplication of u128's will not be close to overflowing
+                // u256 after adding another u1282
                 #[allow(clippy::arithmetic_side_effects)]
-                // checked_sub would fail if denominator was 0
                 let amount_in = u256_to_u128(
                     (u128_to_u256(amount_in_without_fees) * u128_to_u256(MAX_FEE_FRACTION as u128)
                         + u128_to_u256(fee_denominator_minus_one))
