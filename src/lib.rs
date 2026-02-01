@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::{
     internal_asset_operations::AccountOrDexId,
-    internal_operations::{Operation, TradeAccount},
+    internal_operations::{Operation, TradeAccount, WithdrawAmount},
     storage_management::StorageBalances,
 };
 use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount};
@@ -194,6 +194,7 @@ impl DexEngine {
     /// Swap one asset for another on a specific dex.
     /// Multi-step aggregator method coming soon.
     #[payable]
+    #[allow(clippy::too_many_arguments)]
     pub fn swap_simple(
         &mut self,
         dex_id: DexId,
@@ -202,6 +203,7 @@ impl DexEngine {
         asset_out: AssetId,
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
+        constraint: Option<U128>,
     ) -> (U128, U128) {
         near_sdk::assert_one_yocto();
         self.internal_swap_simple(
@@ -212,6 +214,7 @@ impl DexEngine {
             amount,
             TradeAccount::User(near_sdk::env::predecessor_account_id()),
             referrer,
+            constraint,
         )
     }
 
@@ -269,7 +272,7 @@ impl DexEngine {
     pub fn withdraw(
         &mut self,
         asset_id: AssetId,
-        amount: Option<U128>,
+        amount: WithdrawAmount,
         withdraw_to: Option<AccountId>,
     ) -> PromiseOrValue<bool> {
         near_sdk::assert_one_yocto();

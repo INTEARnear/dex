@@ -56,7 +56,7 @@ pub enum Operation {
     /// balance of the asset will be withdrawn.
     Withdraw {
         asset_id: AssetId,
-        amount: Option<U128>,
+        amount: WithdrawAmount,
         to: Option<AccountId>,
         /// If the withdrawal fails and current user doesn't have
         /// a registerd balance in this asset, the assets will be
@@ -71,6 +71,8 @@ pub enum Operation {
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapOperationAmount,
+        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
+        constraint: Option<U128>,
     },
     /// Call a method on a dex.
     DexCall {
@@ -91,6 +93,13 @@ pub enum Operation {
         amount: U128,
         r#for: Option<AccountOrDexId>,
     },
+}
+
+#[near(serializers=[json])]
+#[derive(Clone, Debug, Copy)]
+pub enum WithdrawAmount {
+    Full { at_least: Option<U128> },
+    Exact(U128),
 }
 
 impl DexEngine {
@@ -129,6 +138,7 @@ impl DexEngine {
         amount: SwapRequestAmount,
         mut trader: TradeAccount,
         referrer: Option<AccountId>,
+        constraint: Option<U128>,
     ) -> (U128, U128) {
         let swap_request = SwapRequest {
             message,
@@ -195,12 +205,24 @@ impl DexEngine {
         match swap_request.amount {
             SwapRequestAmount::ExactIn(exact_in) => {
                 expect!(exact_in == response.amount_in, "Amount in does not match");
+                if let Some(constraint) = constraint {
+                    expect!(
+                        response.amount_out >= constraint,
+                        "Output amount is less than constraint"
+                    );
+                }
             }
             SwapRequestAmount::ExactOut(exact_out) => {
                 expect!(
                     exact_out == response.amount_out,
                     "Amount out does not match"
                 );
+                if let Some(constraint) = constraint {
+                    expect!(
+                        response.amount_in <= constraint,
+                        "Input amount is greater than constraint"
+                    );
+                }
             }
         }
 
@@ -398,7 +420,7 @@ impl DexEngine {
                 AssetWithdrawalType::WithdrawUnderlyingAsset(to_account_id) => {
                     self.internal_withdraw(
                         asset_id.clone(),
-                        Some(amount),
+                        WithdrawAmount::Exact(amount),
                         Some(to_account_id.clone()),
                         AccountOrDexId::Dex(dex_id.clone()),
                     )
@@ -531,14 +553,26 @@ impl DexEngine {
     pub(crate) fn internal_withdraw(
         &mut self,
         asset_id: AssetId,
-        amount: Option<U128>,
+        amount: WithdrawAmount,
         withdraw_to: Option<AccountId>,
         withdraw_from: AccountOrDexId,
     ) -> PromiseOrValue<bool> {
-        let amount = amount.unwrap_or_else(|| {
-            self.asset_balance_of(withdraw_from.clone(), asset_id.clone())
-                .unwrap_or_default()
-        });
+        let amount = match amount {
+            WithdrawAmount::Full { at_least } => {
+                let balance = self
+                    .asset_balance_of(withdraw_from.clone(), asset_id.clone())
+                    .unwrap_or_default();
+                if balance >= at_least.unwrap_or_default() {
+                    balance
+                } else {
+                    panic!(
+                        "Not enough balance for withdraw {asset_id}: {} < {:?}",
+                        balance.0, at_least
+                    );
+                }
+            }
+            WithdrawAmount::Exact(amount) => amount,
+        };
         if amount.0 == 0 {
             return PromiseOrValue::Value(true);
         }
@@ -669,7 +703,19 @@ impl DexEngine {
                         let asset_balance = anonymous_assets
                             .get_mut(&asset_id)
                             .expect("Asset to withdraw not found in anonymous assets");
-                        let amount = amount.unwrap_or(*asset_balance);
+                        let amount = match amount {
+                            WithdrawAmount::Full { at_least } => {
+                                if *asset_balance >= at_least.unwrap_or_default() {
+                                    *asset_balance
+                                } else {
+                                    panic!(
+                                        "Not enough balance for withdraw {asset_id}: {} < {:?}",
+                                        asset_balance.0, at_least,
+                                    );
+                                }
+                            }
+                            WithdrawAmount::Exact(amount) => amount,
+                        };
                         asset_balance.0 = asset_balance
                             .0
                             .checked_sub(amount.0)
@@ -730,6 +776,7 @@ impl DexEngine {
                     asset_in,
                     asset_out,
                     amount,
+                    constraint,
                 } => {
                     let amount = match amount {
                         SwapOperationAmount::Amount(amount) => amount,
@@ -773,6 +820,7 @@ impl DexEngine {
                             None => TradeAccount::User(by.clone()),
                         },
                         referrer.clone(),
+                        constraint,
                     );
                     last_output = Some((asset_out, amount_out));
                 }

@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use intear_dex::internal_asset_operations::AccountOrDexId;
-use intear_dex::internal_operations::{Operation, SwapOperationAmount};
+use intear_dex::internal_operations::{Operation, SwapOperationAmount, WithdrawAmount};
 use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
 use near_sdk::AccountId;
 use near_sdk::serde_json::json;
@@ -282,10 +282,11 @@ async fn test_xyk_private_flow() {
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    constraint: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: None,
+                    amount: WithdrawAmount::Full { at_least: None },
                     to: None,
                     rescue_address: None,
                 },
@@ -668,10 +669,11 @@ async fn test_xyk_public_flow() {
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    constraint: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: None,
+                    amount: WithdrawAmount::Full { at_least: None },
                     to: None,
                     rescue_address: None,
                 },
@@ -1239,10 +1241,11 @@ async fn test_xyk_fees() {
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    constraint: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: None,
+                    amount: WithdrawAmount::Full { at_least: None },
                     to: None,
                     rescue_address: None,
                 },
@@ -1473,10 +1476,11 @@ async fn test_xyk_exact_output() {
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(exact_output_ft2))),
+                    constraint: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: None,
+                    amount: WithdrawAmount::Full { at_least: None },
                     to: None,
                     rescue_address: None,
                 },
