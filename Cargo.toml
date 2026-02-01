@@ -39,11 +39,11 @@ near-crypto = "0.34.2"
 
 [profile.release]
 codegen-units = 1
-opt-level = "z" # TODO: Improve size and speed optimization once near moves to wasmtime
+opt-level = "s" # TODO: Improve size and speed optimization once near moves to wasmtime
 lto = true
 debug = false
 panic = "abort"
 overflow-checks = false # deny(clippy::arithmetic_side_effects) makes this unnecessary, unless bug is in a dependency
 
 # [profile.release.package.wasmi]
-# opt-level = 2 # brings usage down on one test from 84.4 TGas to 63.9 TGas. Can be cut down to 48.3 TGas with full opt-level = 2, but exceeds contract size limit
+# opt-level = 2 # 57.7 Tgas -> 48.5 Tgas, but cuts very close to the limit
