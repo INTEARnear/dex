@@ -6,7 +6,6 @@ use intear_dex::internal_operations::{Operation, SwapOperationAmount};
 use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
 use near_sdk::AccountId;
 use near_sdk::serde_json::json;
-use near_sdk::store::LookupMap;
 use near_sdk::{
     NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
@@ -72,17 +71,16 @@ struct AssetWithBalance {
 }
 
 #[near(serializers=[borsh])]
-enum Pool {
+enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
         fees: FeeConfiguration,
+        owner_id: AccountId,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: FeeConfiguration,
-        user_shares: LookupMap<AccountId, Option<std::num::NonZeroU128>>,
-        total_shares: Option<std::num::NonZeroU128>,
+        total_shares: Option<U128>,
     },
 }
 
@@ -95,7 +93,7 @@ async fn get_pool(
     dex_engine_contract: &near_workspaces::Contract,
     dex_id: &DexId,
     pool_id: u64,
-) -> Option<Pool> {
+) -> Option<PoolView> {
     let result = dex_engine_contract
         .view("dex_view")
         .args_json(json!({
@@ -244,14 +242,14 @@ async fn test_xyk_private_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private {
+        PoolView::Private {
             assets, owner_id, ..
         } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2);
             assert_eq!(owner_id, deployer.id());
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     let result = deployer
@@ -305,11 +303,11 @@ async fn test_xyk_private_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private { assets, .. } => {
+        PoolView::Private { assets, .. } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1 + swap_amount_ft1);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
@@ -347,11 +345,11 @@ async fn test_xyk_private_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private { assets, .. } => {
+        PoolView::Private { assets, .. } => {
             assert_eq!(assets.0.balance.0, 0);
             assert_eq!(assets.1.balance.0, 0);
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     assert_inner_asset_balance(
@@ -612,7 +610,7 @@ async fn test_xyk_public_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Public {
+        PoolView::Public {
             assets,
             total_shares,
             ..
@@ -627,7 +625,7 @@ async fn test_xyk_public_flow() {
             );
             assert!(total_shares.is_some());
         }
-        Pool::Private { .. } => panic!("Expected public pool"),
+        PoolView::Private { .. } => panic!("Expected public pool"),
     }
 
     let deployer_shares =
@@ -698,7 +696,7 @@ async fn test_xyk_public_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Public {
+        PoolView::Public {
             assets,
             total_shares,
             ..
@@ -706,11 +704,11 @@ async fn test_xyk_public_flow() {
             assert_eq!(assets.0.balance.0, pool_ft1_after_swap);
             assert_eq!(assets.1.balance.0, pool_ft2_after_swap);
             assert_eq!(
-                total_shares.unwrap().get(),
-                10u128.pow(18) + 10u128.pow(18) / 2 - 1000000000
+                *total_shares,
+                Some(U128(10u128.pow(18) + 10u128.pow(18) / 2 - 1000000000))
             );
         }
-        Pool::Private { .. } => panic!("Expected public pool"),
+        PoolView::Private { .. } => panic!("Expected public pool"),
     }
 
     let result = deployer
@@ -753,7 +751,7 @@ async fn test_xyk_public_flow() {
         .await
         .unwrap();
     match &pool {
-        Pool::Public {
+        PoolView::Public {
             assets,
             total_shares,
             ..
@@ -762,7 +760,7 @@ async fn test_xyk_public_flow() {
             assert_eq!(assets.1.balance.0, 0);
             assert!(total_shares.is_none());
         }
-        Pool::Private { .. } => panic!("Expected public pool"),
+        PoolView::Private { .. } => panic!("Expected public pool"),
     }
 
     let deployer_shares =
@@ -1015,11 +1013,11 @@ async fn test_xyk_multi_user_liquidity() {
         .await
         .unwrap();
     match &pool {
-        Pool::Public { assets, .. } => {
+        PoolView::Public { assets, .. } => {
             assert_eq!(assets.0.balance.0, total_ft1 - 3);
             assert_eq!(assets.1.balance.0, total_ft2 - 8);
         }
-        Pool::Private { .. } => panic!("Expected public pool"),
+        PoolView::Private { .. } => panic!("Expected public pool"),
     }
 
     let removal_order = [&user3, &user1, &user5, &user2, &user4];
@@ -1047,7 +1045,7 @@ async fn test_xyk_multi_user_liquidity() {
         .await
         .unwrap();
     match &pool {
-        Pool::Public {
+        PoolView::Public {
             assets,
             total_shares,
             ..
@@ -1056,7 +1054,7 @@ async fn test_xyk_multi_user_liquidity() {
             assert_eq!(assets.1.balance.0, 0);
             assert!(total_shares.is_none());
         }
-        Pool::Private { .. } => panic!("Expected public pool"),
+        PoolView::Private { .. } => panic!("Expected public pool"),
     }
 
     let mut withdrawn_ft1 = 0u128;
@@ -1270,12 +1268,12 @@ async fn test_xyk_fees() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private { assets, fees, .. } => {
+        PoolView::Private { assets, fees, .. } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1 + amount_after_fee);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
             assert_eq!(fees.receivers.len(), 1);
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     let result = user2
@@ -1423,14 +1421,14 @@ async fn test_xyk_exact_output() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private {
+        PoolView::Private {
             assets, owner_id, ..
         } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2);
             assert_eq!(owner_id, deployer.id());
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     let ft1_for_swap = 200_000_000u128;
@@ -1496,11 +1494,11 @@ async fn test_xyk_exact_output() {
         .await
         .unwrap();
     match &pool {
-        Pool::Private { assets, .. } => {
+        PoolView::Private { assets, .. } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1 + expected_ft1_in);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - exact_output_ft2);
         }
-        Pool::Public { .. } => panic!("Expected private pool"),
+        PoolView::Public { .. } => panic!("Expected private pool"),
     }
 
     assert_ft_balance(&user1, ft2.clone(), U128(exact_output_ft2))

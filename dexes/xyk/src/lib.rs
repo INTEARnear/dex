@@ -1022,8 +1022,8 @@ impl XykDex {
     }
 
     #[result_serializer(borsh)]
-    pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<&Pool> {
-        self.pools.get(&pool_id)
+    pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<PoolView> {
+        self.pools.get(&pool_id).map(|pool| pool.into())
     }
 
     #[result_serializer(borsh)]
@@ -1055,6 +1055,46 @@ pub enum Pool {
         user_shares: LookupMap<AccountId, Option<SharesBalance>>,
         total_shares: Option<SharesBalance>,
     },
+}
+
+#[near(serializers=[borsh])]
+pub enum PoolView {
+    Private {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: FeeConfiguration,
+        owner_id: AccountId,
+    },
+    Public {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: FeeConfiguration,
+        total_shares: Option<U128>,
+    },
+}
+
+impl From<&Pool> for PoolView {
+    fn from(pool: &Pool) -> Self {
+        match pool {
+            Pool::Private {
+                assets,
+                owner_id,
+                fees,
+            } => PoolView::Private {
+                assets: assets.clone(),
+                fees: fees.clone(),
+                owner_id: owner_id.clone(),
+            },
+            Pool::Public {
+                assets,
+                fees,
+                total_shares,
+                user_shares: _,
+            } => PoolView::Public {
+                assets: assets.clone(),
+                fees: fees.clone(),
+                total_shares: total_shares.map(|s| U128(s.get())),
+            },
+        }
+    }
 }
 
 /// When a public pool is created, the creator gets
