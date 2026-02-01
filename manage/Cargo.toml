@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-near-api = { version = "0.8", features = ["keystore"] }
+near-api = { version = "0.8.3", features = ["keystore"] }
 clap = { version = "4.5", features = ["derive"] }
 dotenvy = "0.15"
 base64 = "0.21"

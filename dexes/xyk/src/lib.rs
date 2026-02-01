@@ -1040,6 +1040,23 @@ impl XykDex {
             Pool::Private { .. } => None,
         }
     }
+
+    #[result_serializer(borsh)]
+    pub fn get_pending_fees(
+        &self,
+        #[serializer(borsh)] account_id: AccountId,
+        #[serializer(borsh)] asset_ids: Vec<AssetId>,
+    ) -> Vec<(AssetId, U128)> {
+        asset_ids
+            .into_iter()
+            .filter_map(|asset_id| {
+                self.fees_collected_by_users
+                    .get(&(account_id.clone(), asset_id.clone()))
+                    .cloned()
+                    .map(|balance| (asset_id, balance))
+            })
+            .collect()
+    }
 }
 
 #[near(serializers=[borsh])]

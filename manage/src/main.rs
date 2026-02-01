@@ -3,7 +3,7 @@ use borsh::BorshSerialize;
 use clap::{Parser, Subcommand};
 use near_api::{
     Contract, NearToken, NetworkConfig, RPCEndpoint, Signer,
-    types::{AccountId, PublicKey},
+    types::{AccountId, PublicKey, json::U128},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
@@ -24,6 +24,10 @@ enum Commands {
         #[command(subcommand)]
         action: OtcAction,
     },
+    Xyk {
+        #[command(subcommand)]
+        action: XykAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -42,6 +46,77 @@ enum OtcAction {
         asset_id: AssetId,
         amount: u128,
     },
+}
+
+#[derive(Subcommand)]
+enum XykAction {
+    Deploy,
+    CreatePool {
+        account_id: AccountId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+        #[arg(long)]
+        public: bool,
+        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
+        #[arg(long, value_delimiter = ',')]
+        fees: Vec<FeeReceiverArg>,
+    },
+    GetPool {
+        pool_id: XykPoolId,
+    },
+    AddLiquidity {
+        account_id: AccountId,
+        pool_id: XykPoolId,
+        amount_0: u128,
+        amount_1: u128,
+    },
+    RemoveLiquidity {
+        account_id: AccountId,
+        pool_id: XykPoolId,
+        /// Shares to remove (for public pools). If not provided, removes all liquidity.
+        #[arg(long)]
+        shares: Option<u128>,
+    },
+    EditFees {
+        account_id: AccountId,
+        pool_id: XykPoolId,
+        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
+        #[arg(long, value_delimiter = ',')]
+        fees: Vec<FeeReceiverArg>,
+    },
+    GetPendingFees {
+        account_id: AccountId,
+        #[arg(value_delimiter = ',')]
+        asset_ids: Vec<AssetId>,
+    },
+    WithdrawFees {
+        account_id: AccountId,
+        #[arg(value_delimiter = ',')]
+        asset_ids: Vec<AssetId>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct FeeReceiverArg {
+    account_id: AccountId,
+    fee_fraction: u32,
+}
+
+impl FromStr for FeeReceiverArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (account_id, fee_fraction) = s
+            .split_once(':')
+            .ok_or_else(|| format!("Invalid fee receiver format: {s}"))?;
+        Ok(Self {
+            account_id: account_id
+                .parse()
+                .map_err(|e| format!("Invalid account id: {e}"))?,
+            fee_fraction: fee_fraction
+                .parse()
+                .map_err(|e| format!("Invalid fee fraction: {e}"))?,
+        })
+    }
 }
 
 struct Config {
@@ -120,12 +195,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wasm =
                     std::fs::read("./target/wasm32-unknown-unknown/release/otc_dex.wasm").unwrap();
                 let wasm_base64 = BASE64_STANDARD.encode(&wasm);
-                let args = json!({
-                    "last_part_of_id": "otc",
-                    "code_base64": wasm_base64,
-                });
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("deploy_dex_code", args)
+                    .call_function(
+                        "deploy_dex_code",
+                        json!({
+                            "last_part_of_id": "otc",
+                            "code_base64": wasm_base64,
+                        }),
+                    )
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -138,24 +215,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id.clone(), "otc");
+                let dex_id = format!("{}/{}", config.deployer_id, "otc");
                 #[derive(BorshSerialize)]
                 struct OtcSetAuthorizedKeyArgs {
                     key_bytes: Vec<u8>,
                 }
-                let args = json!({
-                    "dex_id": dex_id,
-                    "method": "set_authorized_key",
-                    "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcSetAuthorizedKeyArgs {
-                        key_bytes: match key {
-                            PublicKey::ED25519(public_key) => [vec![0], public_key.0.to_vec()].concat(),
-                            PublicKey::SECP256K1(public_key) => [vec![1], public_key.0.to_vec()].concat(),
-                        },
-                    }).unwrap()),
-                    "attached_assets": {},
-                });
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("dex_call", args)
+                    .call_function("dex_call", json!({
+                        "dex_id": dex_id,
+                        "method": "set_authorized_key",
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+                            key_bytes: match key {
+                                PublicKey::ED25519(public_key) => [vec![0], public_key.0.to_vec()].concat(),
+                                PublicKey::SECP256K1(public_key) => [vec![1], public_key.0.to_vec()].concat(),
+                            },
+                        }).unwrap()),
+                        "attached_assets": {},
+                    }))
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -168,23 +244,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id.clone(), "otc");
+                let dex_id = format!("{}/{}", config.deployer_id, "otc");
                 #[derive(BorshSerialize)]
                 struct OtcStorageDepositArgs;
-                let args = json!({
-                    "operations": [{
-                        "DexCall": {
-                            "dex_id": dex_id,
-                            "method": "storage_deposit",
-                            "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
-                            "attached_assets": {
-                                "near": amount,
-                            },
-                        }
-                    }]
-                });
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("deposit_near", args)
+                    .call_function("deposit_near", json!({
+                        "operations": [{
+                            "DexCall": {
+                                "dex_id": dex_id,
+                                "method": "storage_deposit",
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                                "attached_assets": {
+                                    "near": amount,
+                                },
+                            }
+                        }]
+                    }))
                     .transaction()
                     .max_gas()
                     .deposit(amount)
@@ -201,20 +276,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id.clone(), "otc");
+                let dex_id = format!("{}/{}", config.deployer_id, "otc");
                 #[derive(BorshSerialize)]
                 struct OtcDepositAssetsArgs;
                 // U128 serializes as a number
-                let attached_assets: HashMap<AssetId, String> =
-                    HashMap::from_iter([(asset_id, amount.to_string())]);
-                let args = json!({
-                    "dex_id": dex_id,
-                    "method": "deposit_assets",
-                    "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
-                    "attached_assets": attached_assets,
-                });
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("dex_call", args)
+                    .call_function("dex_call", json!({
+                        "dex_id": dex_id,
+                        "method": "deposit_assets",
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(asset_id, U128(amount))]),
+                    }))
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -222,6 +294,318 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .send_to(&network())
                     .await?;
                 println!("Deposit assets completed. Result: {:?}", result.outcome());
+            }
+        },
+        Commands::Xyk { action } => match action {
+            XykAction::Deploy => {
+                println!("Compiling xyk-dex");
+                assert!(
+                    Command::new("cargo")
+                        .args([
+                            "build",
+                            "--package=xyk-dex",
+                            "--release",
+                            "--target",
+                            "wasm32-unknown-unknown"
+                        ])
+                        .status()
+                        .await
+                        .unwrap()
+                        .success()
+                );
+                println!("Optimizing xyk-dex");
+                assert!(
+                    Command::new("wasm-opt")
+                        .args([
+                            "-O",
+                            "./target/wasm32-unknown-unknown/release/xyk_dex.wasm",
+                            "-o",
+                            "./target/wasm32-unknown-unknown/release/xyk_dex.wasm"
+                        ])
+                        .status()
+                        .await
+                        .unwrap()
+                        .success()
+                );
+                println!("Deploying xyk-dex");
+                let wasm =
+                    std::fs::read("./target/wasm32-unknown-unknown/release/xyk_dex.wasm").unwrap();
+                let wasm_base64 = BASE64_STANDARD.encode(&wasm);
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "deploy_dex_code",
+                        json!({
+                            "last_part_of_id": "xyk",
+                            "code_base64": wasm_base64,
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
+                    .send_to(&network())
+                    .await?;
+                println!("Deployed. Result: {:?}", result.outcome());
+            }
+            XykAction::CreatePool {
+                account_id,
+                asset_0,
+                asset_1,
+                public,
+                fees,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                #[derive(BorshSerialize)]
+                struct CreatePoolArgs {
+                    assets: (AssetId, AssetId),
+                    fees: XykFeeConfiguration,
+                    is_public: bool,
+                }
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function("deposit_near", json!({
+                        "operations": [{
+                            "DexCall": {
+                                "dex_id": dex_id,
+                                "method": "create_pool",
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&CreatePoolArgs {
+                                    assets: (asset_0, asset_1),
+                                    fees: XykFeeConfiguration {
+                                        receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
+                                    },
+                                    is_public: public,
+                                }).unwrap()),
+                                "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
+                            }
+                        }]
+                    }))
+                    .transaction()
+                    .max_gas()
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Pool created. Result: {:?}", result.outcome());
+            }
+            XykAction::GetPool { pool_id } => {
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                match xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await? {
+                    Some(pool) => println!("Pool: {:#?}", pool),
+                    None => println!("Pool not found"),
+                }
+            }
+            XykAction::AddLiquidity {
+                account_id,
+                pool_id,
+                amount_0,
+                amount_1,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+
+                let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
+                let pool = pool.expect("Pool not found");
+                let (asset_0, asset_1) = match pool {
+                    XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
+                        (assets.0.asset_id, assets.1.asset_id)
+                    }
+                };
+
+                #[derive(BorshSerialize)]
+                struct RegisterLiquidityArgs {
+                    pool_id: XykPoolId,
+                }
+                #[derive(BorshSerialize)]
+                struct AddLiquidityArgs {
+                    pool_id: XykPoolId,
+                }
+
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "deposit_near",
+                        json!({
+                            "operations": [
+                                {
+                                    "DexCall": {
+                                        "dex_id": dex_id,
+                                        "method": "register_liquidity",
+                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap()),
+                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
+                                    }
+                                },
+                                {
+                                    "DexCall": {
+                                        "dex_id": dex_id,
+                                        "method": "add_liquidity",
+                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap()),
+                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([
+                                            (asset_0, U128(amount_0)),
+                                            (asset_1, U128(amount_1)),
+                                        ]),
+                                    }
+                                },
+                            ]
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Liquidity added. Result: {:?}", result.outcome());
+            }
+            XykAction::RemoveLiquidity {
+                account_id,
+                pool_id,
+                shares,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                #[derive(BorshSerialize)]
+                struct RemoveLiquidityArgs {
+                    pool_id: XykPoolId,
+                    shares_to_remove: Option<std::num::NonZeroU128>,
+                }
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function("execute_operations", json!({
+                        "operations": [{
+                            "DexCall": {
+                                "dex_id": dex_id,
+                                "method": "remove_liquidity",
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&RemoveLiquidityArgs {
+                                    pool_id,
+                                    shares_to_remove: shares.and_then(std::num::NonZeroU128::new),
+                                }).unwrap()),
+                                "attached_assets": {},
+                            }
+                        }]
+                    }))
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Liquidity removed. Result: {:?}", result.outcome());
+            }
+            XykAction::EditFees {
+                account_id,
+                pool_id,
+                fees,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                #[derive(BorshSerialize)]
+                struct EditFeesArgs {
+                    pool_id: XykPoolId,
+                    fees: XykFeeConfiguration,
+                }
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function("deposit_near", json!({
+                        "operations": [{
+                            "DexCall": {
+                                "dex_id": dex_id,
+                                "method": "edit_fees",
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&EditFeesArgs {
+                                    pool_id,
+                                    fees: XykFeeConfiguration {
+                                        receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
+                                    },
+                                }).unwrap()),
+                                "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
+                            }
+                        }]
+                    }))
+                    .transaction()
+                    .max_gas()
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Fees updated. Result: {:?}", result.outcome());
+            }
+            XykAction::GetPendingFees {
+                account_id,
+                asset_ids,
+            } => {
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                #[derive(BorshSerialize)]
+                struct GetPendingFeesArgs {
+                    account_id: AccountId,
+                    asset_ids: Vec<AssetId>,
+                }
+                let result: near_api::Data<serde_json::Value> =
+                    Contract(config.dex_contract_id.clone())
+                        .call_function(
+                            "dex_view",
+                            json!({
+                                "dex_id": dex_id,
+                                "method": "get_pending_fees",
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&GetPendingFeesArgs {
+                                    account_id,
+                                    asset_ids,
+                                }).unwrap()),
+                            }),
+                        )
+                        .read_only()
+                        .fetch_from(&network())
+                        .await?;
+                let response_base64 = result.data.as_str().expect("Expected base64 response");
+                let response_bytes = BASE64_STANDARD.decode(response_base64)?;
+                let pending_fees: Vec<(AssetId, U128)> = borsh::from_slice(&response_bytes)?;
+                if pending_fees.is_empty() {
+                    println!("No pending fees");
+                } else {
+                    println!("Pending fees:");
+                    for (asset_id, amount) in pending_fees {
+                        println!("  {}: {}", asset_id, amount.0);
+                    }
+                }
+            }
+            XykAction::WithdrawFees {
+                account_id,
+                asset_ids,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                #[derive(BorshSerialize)]
+                struct WithdrawFeesArgs {
+                    assets: Vec<AssetId>,
+                }
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "execute_operations",
+                        json!({
+                            "operations": [{
+                                "DexCall": {
+                                    "dex_id": dex_id,
+                                    "method": "withdraw_fees",
+                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&WithdrawFeesArgs {
+                                        assets: asset_ids,
+                                    }).unwrap()),
+                                    "attached_assets": {},
+                                }
+                            }]
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Fees withdrawn. Result: {:?}", result.outcome());
             }
         },
     }
@@ -308,4 +692,60 @@ impl<'de> Deserialize<'de> for AssetId {
         let s: String = Deserialize::deserialize(deserializer)?;
         Self::from_str(&s).map_err(serde::de::Error::custom)
     }
+}
+
+#[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]
+struct XykFeeConfiguration {
+    receivers: Vec<(XykFeeReceiver, u32)>,
+}
+
+#[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]
+enum XykFeeReceiver {
+    User(AccountId),
+}
+
+#[allow(dead_code)]
+#[derive(borsh::BorshDeserialize, Debug)]
+enum XykPoolView {
+    Private {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: XykFeeConfiguration,
+        owner_id: AccountId,
+    },
+    Public {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: XykFeeConfiguration,
+        total_shares: Option<U128>,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(borsh::BorshDeserialize, Clone, Debug)]
+struct AssetWithBalance {
+    asset_id: AssetId,
+    balance: U128,
+}
+
+type XykPoolId = u64;
+
+async fn xyk_fetch_pool(
+    dex_contract_id: AccountId,
+    dex_id: &str,
+    pool_id: XykPoolId,
+) -> Result<Option<XykPoolView>, Box<dyn std::error::Error>> {
+    let result: String = Contract(dex_contract_id)
+        .call_function(
+            "dex_view",
+            json!({
+                "dex_id": dex_id,
+                "method": "get_pool",
+                "args": BASE64_STANDARD.encode(borsh::to_vec(&pool_id).unwrap()),
+            }),
+        )
+        .read_only()
+        .fetch_from(&network())
+        .await?
+        .data;
+    let response_bytes = BASE64_STANDARD.decode(&result)?;
+    Ok(borsh::from_slice(&response_bytes)?)
 }
