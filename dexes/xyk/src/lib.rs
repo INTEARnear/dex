@@ -268,6 +268,16 @@ impl Dex for XykDex {
             }
         };
         self.fees_collected_by_users.flush();
+        XykDexEvent::PoolUpdated {
+            pool_id,
+            assets: assets.clone(),
+            fees: fees.clone(),
+            total_shares: match pool {
+                Pool::Public { total_shares, .. } => total_shares.map(|s| U128(s.get())),
+                Pool::Private { .. } => None,
+            },
+        }
+        .emit();
         XykDexEvent::Swap {
             pool_id,
             request,
