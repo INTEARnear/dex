@@ -797,13 +797,15 @@ impl DexEngine {
                                     "Failed to withdraw assets from contract tracked balance: asset not registered"
                                 )
                             });
-                        self.internal_withdraw_unchecked(
-                            asset_id,
-                            amount,
-                            by.clone(),
-                            AccountOrDexId::Account(rescue_address.clone()),
-                        )
-                        .detach();
+                        if amount.0 > 0 {
+                            self.internal_withdraw_unchecked(
+                                asset_id,
+                                amount,
+                                by.clone(),
+                                AccountOrDexId::Account(rescue_address.clone()),
+                            )
+                            .detach();
+                        }
                     } else {
                         self.internal_withdraw(
                             asset_id.clone(),

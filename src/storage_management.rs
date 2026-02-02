@@ -30,7 +30,7 @@ impl From<StorageUsed> for StorageBalance {
     }
 }
 
-const STORAGE_MIN_BOUND: NearToken = NearToken::from_millinear(10); // 0.01 NEAR = 1KB
+const STORAGE_MIN_BOUND: NearToken = NearToken::from_millinear(5); // 0.005 NEAR = 500KB
 
 #[near(serializers=[borsh])]
 pub struct StorageBalances<K: Ord + BorshSerialize + BorshDeserialize> {

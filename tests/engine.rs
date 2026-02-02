@@ -215,7 +215,7 @@ async fn test_minimal() {
 #[tokio::test]
 async fn test_storage_actions() {
     let storage_deposit_amount = NearToken::from_near(1);
-    let min_storage_bound = NearToken::from_millinear(10);
+    let min_storage_bound = NearToken::from_millinear(5);
 
     let TestContext {
         dex_engine_contract,
@@ -315,7 +315,7 @@ async fn test_storage_actions() {
 
 #[tokio::test]
 async fn test_dex_storage_actions() {
-    let min_storage_bound = NearToken::from_millinear(10);
+    let min_storage_bound = NearToken::from_millinear(5);
 
     let TestContext {
         dex_engine_contract,
