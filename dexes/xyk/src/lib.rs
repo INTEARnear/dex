@@ -43,12 +43,7 @@ pub struct XykDex {
 #[near(event_json(standard = "xyk"))]
 enum XykDexEvent {
     #[event_version("1.0.0")]
-    PoolUpdated {
-        pool_id: PoolId,
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: FeeConfiguration,
-        total_shares: Option<U128>,
-    },
+    PoolUpdated { pool_id: PoolId, pool: PoolView },
     #[event_version("1.0.0")]
     Swap {
         pool_id: PoolId,
@@ -270,12 +265,7 @@ impl Dex for XykDex {
         self.fees_collected_by_users.flush();
         XykDexEvent::PoolUpdated {
             pool_id,
-            assets: assets.clone(),
-            fees: fees.clone(),
-            total_shares: match pool {
-                Pool::Public { total_shares, .. } => total_shares.map(|s| U128(s.get())),
-                Pool::Private { .. } => None,
-            },
+            pool: (&*pool).into(),
         }
         .emit();
         XykDexEvent::Swap {
@@ -404,18 +394,7 @@ impl XykDex {
 
         XykDexEvent::PoolUpdated {
             pool_id,
-            assets: (
-                AssetWithBalance {
-                    asset_id: assets.0.clone(),
-                    balance: U128(0),
-                },
-                AssetWithBalance {
-                    asset_id: assets.1.clone(),
-                    balance: U128(0),
-                },
-            ),
-            fees,
-            total_shares: if is_public { Some(U128(0)) } else { None },
+            pool: self.pools.get(pool_id).unwrap().into(),
         }
         .emit();
 
@@ -529,7 +508,7 @@ impl XykDex {
             Pool::Private {
                 assets,
                 owner_id,
-                fees,
+                fees: _,
             } => {
                 expect!(
                     *owner_id == near_sdk::env::predecessor_account_id(),
@@ -558,19 +537,11 @@ impl XykDex {
                     .checked_add(asset_1_amount.0)
                     .expect("Overflow");
 
-                XykDexEvent::PoolUpdated {
-                    pool_id,
-                    assets: assets.clone(),
-                    fees: fees.clone(),
-                    total_shares: None,
-                }
-                .emit();
-
                 Vec::new()
             }
             Pool::Public {
                 assets,
-                fees,
+                fees: _,
                 user_shares,
                 total_shares,
             } => {
@@ -697,16 +668,15 @@ impl XykDex {
                         }
                     }
                 }
-                XykDexEvent::PoolUpdated {
-                    pool_id,
-                    assets: assets.clone(),
-                    fees: fees.clone(),
-                    total_shares: Some(total_shares.map(|s| U128(s.get())).unwrap_or_default()),
-                }
-                .emit();
                 asset_withdraw_requests
             }
         };
+
+        XykDexEvent::PoolUpdated {
+            pool_id,
+            pool: (&*pool).into(),
+        }
+        .emit();
 
         #[near(serializers=[borsh])]
         struct AddLiquidityResponse;
@@ -747,7 +717,7 @@ impl XykDex {
             Pool::Private {
                 assets,
                 owner_id,
-                fees,
+                fees: _,
             } => {
                 expect!(
                     *owner_id == near_sdk::env::predecessor_account_id(),
@@ -761,13 +731,6 @@ impl XykDex {
                 let amount_1 = assets.1.balance.0;
                 assets.0.balance.0 = 0;
                 assets.1.balance.0 = 0;
-                XykDexEvent::PoolUpdated {
-                    pool_id,
-                    assets: assets.clone(),
-                    fees: fees.clone(),
-                    total_shares: None,
-                }
-                .emit();
                 (
                     owner_id.clone(),
                     (assets.0.asset_id.clone(), amount_0),
@@ -776,7 +739,7 @@ impl XykDex {
             }
             Pool::Public {
                 assets,
-                fees,
+                fees: _,
                 user_shares,
                 total_shares,
             } => {
@@ -835,13 +798,6 @@ impl XykDex {
                         .expect("Underflow"),
                 );
                 user_shares.insert(near_sdk::env::predecessor_account_id(), updated_shares);
-                XykDexEvent::PoolUpdated {
-                    pool_id,
-                    assets: assets.clone(),
-                    fees: fees.clone(),
-                    total_shares: Some(total_shares.map(|s| U128(s.get())).unwrap_or_default()),
-                }
-                .emit();
                 (
                     near_sdk::env::predecessor_account_id(),
                     (assets.0.asset_id.clone(), amount_0),
@@ -849,6 +805,12 @@ impl XykDex {
                 )
             }
         };
+
+        XykDexEvent::PoolUpdated {
+            pool_id,
+            pool: (&*pool).into(),
+        }
+        .emit();
 
         #[near(serializers=[borsh])]
         struct RemoveLiquidityResponse;
@@ -930,9 +892,7 @@ impl XykDex {
         *pool_fees = fees.clone();
         XykDexEvent::PoolUpdated {
             pool_id,
-            assets: (assets.0.clone(), assets.1.clone()),
-            fees: fees.clone(),
-            total_shares: None,
+            pool: (&*pool).into(),
         }
         .emit();
         self.pools.flush();
@@ -1091,7 +1051,7 @@ pub enum Pool {
     },
 }
 
-#[near(serializers=[borsh])]
+#[near(serializers=[borsh, json])]
 pub enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
