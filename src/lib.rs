@@ -14,9 +14,9 @@ use crate::{
     internal_operations::{Operation, TradeAccount, WithdrawAmount},
     storage_management::StorageBalances,
 };
-use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount};
+use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
 use near_sdk::{
-    AccountId, BorshStorageKey, PromiseOrValue,
+    AccountId, BorshStorageKey, NearToken, PromiseOrValue,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
     store::{IterableMap, LookupMap},
@@ -371,7 +371,14 @@ impl DexEngine {
 
     #[payable]
     pub fn execute_operations(&mut self, operations: Vec<Operation>, referrer: Option<AccountId>) {
-        near_sdk::assert_one_yocto();
+        expect!(let Some(leftover) = near_sdk::env::attached_deposit().checked_sub(NearToken::from_yoctonear(1)), "Deposit of one yoctoNEAR is required.");
+        if !leftover.is_zero() {
+            self.internal_increase_assets(
+                AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
+                AssetId::Near,
+                U128(leftover.as_yoctonear()),
+            );
+        }
         self.internal_execute_operations(
             operations,
             near_sdk::env::predecessor_account_id(),
