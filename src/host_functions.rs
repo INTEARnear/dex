@@ -804,6 +804,12 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<()
             IntearDexEvent::DexEvent {
                 dex_id: caller.data().dex_id.clone(),
                 event,
+                referrer: caller.data().referrer.clone(),
+                user: match &caller.data().call_type {
+                    CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
+                    CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
+                    _ => None,
+                },
             }
             .emit();
             return Ok(());

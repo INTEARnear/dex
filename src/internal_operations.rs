@@ -147,6 +147,7 @@ impl DexEngine {
         request: Vec<u8>,
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
+        referrer: Option<AccountId>,
     ) -> Option<Vec<u8>> {
         let engine = Engine::default();
         let module = match Module::new(&engine, code) {
@@ -165,6 +166,7 @@ impl DexEngine {
                 dex_id: dex_id.clone(),
                 dex_storage_balances,
                 dex_storage_usage_before_transaction: storage_usage_before,
+                referrer,
             },
         );
         let mut linker = Linker::new(&engine);
@@ -215,10 +217,15 @@ impl DexEngine {
             &dex_id,
             CallType::Trade {
                 dex_storage_mut: &mut self.dex_storage,
+                alleged_trader: match &trader {
+                    TradeAccount::User(account) => account.clone(),
+                    TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader.clone(),
+                },
             },
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
             "swap",
             &self.dex_storage_balances,
+            referrer.clone(),
         );
 
         self.dex_storage.flush();
@@ -325,6 +332,7 @@ impl DexEngine {
         attached_assets: HashMap<AssetId, U128>,
         predecessor: AccountId,
         anon_swap_available_assets: Option<&mut HashMap<AssetId, U128>>,
+        referrer: Option<AccountId>,
     ) -> Base64VecU8 {
         expect!(
             method != "swap",
@@ -358,6 +366,7 @@ impl DexEngine {
             near_sdk::borsh::to_vec(&request).expect("Failed to serialize request"),
             &method,
             &self.dex_storage_balances,
+            referrer,
         );
 
         let response: DexCallResponse = match response {
@@ -454,6 +463,7 @@ impl DexEngine {
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
+        referrer: Option<AccountId>,
     ) -> (U128, U128) {
         let swap_request = SwapRequest {
             message,
@@ -473,6 +483,7 @@ impl DexEngine {
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
             "swap",
             &self.dex_storage_balances,
+            referrer,
         );
         let response: SwapResponse = match response {
             Some(response) => {
@@ -516,6 +527,7 @@ impl DexEngine {
             args.0,
             &method,
             &self.dex_storage_balances,
+            None,
         );
 
         Base64VecU8::from(response.unwrap_or_default())
@@ -883,6 +895,7 @@ impl DexEngine {
                         attached_assets,
                         by.clone(),
                         anon_swap_available_assets.as_mut(),
+                        referrer.clone(),
                     );
                 }
                 Operation::TransferAsset {

@@ -94,6 +94,8 @@ pub enum IntearDexEvent {
     DexEvent {
         dex_id: DexId,
         event: near_sdk::serde_json::Value,
+        referrer: Option<AccountId>,
+        user: Option<AccountId>,
     },
     #[event_version("1.0.0")]
     UserDeposit {
@@ -134,6 +136,7 @@ pub enum IntearDexEvent {
 enum CallType<'a> {
     Trade {
         dex_storage_mut: &'a mut DexStorage,
+        alleged_trader: AccountId,
     },
     TradeView {
         dex_storage: &'a DexStorage,
@@ -154,7 +157,9 @@ type DexStorage = LookupMap<(DexId, Vec<u8>), Vec<u8>>;
 impl CallType<'_> {
     pub fn dex_storage_get(&self, dex_id: DexId, key: Vec<u8>) -> Option<&Vec<u8>> {
         match self {
-            CallType::Trade { dex_storage_mut } => dex_storage_mut.get(&(dex_id, key)),
+            CallType::Trade {
+                dex_storage_mut, ..
+            } => dex_storage_mut.get(&(dex_id, key)),
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
@@ -171,7 +176,9 @@ impl CallType<'_> {
 
     pub fn dex_storage_contains_key(&self, dex_id: DexId, key: Vec<u8>) -> bool {
         match self {
-            CallType::Trade { dex_storage_mut } => dex_storage_mut.contains_key(&(dex_id, key)),
+            CallType::Trade {
+                dex_storage_mut, ..
+            } => dex_storage_mut.contains_key(&(dex_id, key)),
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
@@ -193,7 +200,9 @@ impl CallType<'_> {
         value: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, wasmi::Error> {
         match self {
-            CallType::Trade { dex_storage_mut } => Ok(dex_storage_mut.insert((dex_id, key), value)),
+            CallType::Trade {
+                dex_storage_mut, ..
+            } => Ok(dex_storage_mut.insert((dex_id, key), value)),
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
@@ -221,7 +230,9 @@ impl CallType<'_> {
         key: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, wasmi::Error> {
         match self {
-            CallType::Trade { dex_storage_mut } => Ok(dex_storage_mut.remove(&(dex_id, key))),
+            CallType::Trade {
+                dex_storage_mut, ..
+            } => Ok(dex_storage_mut.remove(&(dex_id, key))),
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
@@ -244,7 +255,9 @@ impl CallType<'_> {
 
     pub fn dex_storage_flush(&mut self) {
         match self {
-            CallType::Trade { dex_storage_mut } => dex_storage_mut.flush(),
+            CallType::Trade {
+                dex_storage_mut, ..
+            } => dex_storage_mut.flush(),
             CallType::TradeView { .. } => (),
             CallType::View { .. } => (),
             CallType::Call {
@@ -262,6 +275,7 @@ pub struct RunnerData<'a> {
     dex_id: DexId,
     dex_storage_balances: &'a StorageBalances<DexId>,
     dex_storage_usage_before_transaction: u64,
+    referrer: Option<AccountId>,
 }
 
 #[near]
@@ -314,6 +328,7 @@ impl DexEngine {
         method: String,
         args: Base64VecU8,
         attached_assets: HashMap<AssetId, U128>,
+        referrer: Option<AccountId>,
     ) -> Base64VecU8 {
         near_sdk::assert_one_yocto();
         self.internal_dex_call(
@@ -323,6 +338,7 @@ impl DexEngine {
             attached_assets,
             near_sdk::env::predecessor_account_id(),
             None,
+            referrer,
         )
     }
 
@@ -418,7 +434,8 @@ impl DexEngine {
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
+        referrer: Option<AccountId>,
     ) -> (U128, U128) {
-        self.internal_simulate_swap_simple(dex_id, message, asset_in, asset_out, amount)
+        self.internal_simulate_swap_simple(dex_id, message, asset_in, asset_out, amount, referrer)
     }
 }

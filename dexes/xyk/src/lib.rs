@@ -55,7 +55,7 @@ enum XykDexEvent {
         request: SwapRequest,
         amount_in: U128,
         fees_breakdown: Vec<(FeeReceiver, U128)>,
-        amount_out_after_fees: U128,
+        amount_out: U128,
     },
 }
 
@@ -272,8 +272,8 @@ impl Dex for XykDex {
             pool_id,
             request,
             amount_in: response.amount_in,
+            amount_out: response.amount_out,
             fees_breakdown,
-            amount_out_after_fees: response.amount_out,
         }
         .emit();
         response
