@@ -5,7 +5,7 @@ use near_api::{
     Contract, NearGas, NearToken, NetworkConfig, RPCEndpoint, Signer, Transaction,
     types::{AccountId, Action, PublicKey, json::U128, transaction::actions::FunctionCallAction},
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::json;
 use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::process::Command;
@@ -28,11 +28,70 @@ enum Commands {
         #[command(subcommand)]
         action: XykAction,
     },
+    RegisterAssets {
+        account_id: AccountId,
+        asset_ids: Vec<AssetId>,
+        /// Register assets for a specific account or dex. Format: "account:alice.near" or "dex:deployer.near/xyk"
+        #[arg(long)]
+        r#for: Option<AccountOrDexId>,
+    },
+    DepositAsset {
+        account_id: AccountId,
+        asset_id: AssetId,
+        amount: u128,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum AccountOrDexId {
+    Account(AccountId),
+    Dex(String),
+}
+
+impl FromStr for AccountOrDexId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(account) = s.strip_prefix("account:") {
+            Ok(Self::Account(
+                account
+                    .parse()
+                    .map_err(|e| format!("Invalid account id: {e}"))?,
+            ))
+        } else if let Some(dex) = s.strip_prefix("dex:") {
+            Ok(Self::Dex(dex.to_string()))
+        } else {
+            Err(
+                "Invalid format. Use 'account:<account_id>' or 'dex:<deployer>/<dex_name>'"
+                    .to_string(),
+            )
+        }
+    }
+}
+
+impl Serialize for AccountOrDexId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Account(account_id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("Account", account_id)?;
+                map.end()
+            }
+            Self::Dex(dex_id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("Dex", dex_id)?;
+                map.end()
+            }
+        }
+    }
 }
 
 #[derive(Subcommand)]
 enum OtcAction {
     Deploy,
+    Initialize,
     SetAuthorizedKey {
         account_id: AccountId,
         key: PublicKey,
@@ -51,6 +110,7 @@ enum OtcAction {
 #[derive(Subcommand)]
 enum XykAction {
     Deploy,
+    Initialize,
     CreatePool {
         account_id: AccountId,
         asset_0: AssetId,
@@ -94,6 +154,56 @@ enum XykAction {
         #[arg(value_delimiter = ',')]
         asset_ids: Vec<AssetId>,
     },
+    SimulateTrade {
+        #[arg(value_enum)]
+        direction: TradeDirection,
+        amount: u128,
+        pool_id: XykPoolId,
+        asset_in: AssetId,
+    },
+    Trade {
+        account_id: AccountId,
+        #[arg(value_enum)]
+        direction: TradeDirection,
+        amount: u128,
+        pool_id: XykPoolId,
+        asset_in: AssetId,
+        /// Slippage tolerance (e.g. "1%" or "0.5%"). Sets min amount out for exact-in, max amount in for exact-out.
+        #[arg(long)]
+        slippage: Option<SlippagePercent>,
+        /// Withdraw the output asset after the swap
+        #[arg(long)]
+        withdraw: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SlippagePercent(f64);
+
+impl FromStr for SlippagePercent {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if !s.ends_with('%') {
+            return Err(format!("Slippage must end with '%', got: {s}"));
+        }
+        let num_str = &s[..s.len() - 1];
+        let percent: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid slippage percentage: {e}"))?;
+        if !(0.0..=100.0).contains(&percent) {
+            return Err(format!(
+                "Slippage must be between 0% and 100%, got: {percent}%"
+            ));
+        }
+        Ok(Self(percent))
+    }
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum TradeDirection {
+    ExactIn,
+    ExactOut,
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +334,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
 
                 println!("Deployed. Result: {:?}", result.outcome());
+            }
+            OtcAction::Initialize => {
+                let dex_id = format!("{}/{}", config.deployer_id, "otc");
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "dex_call",
+                        json!({
+                            "dex_id": dex_id,
+                            "method": "new",
+                            "args": "",
+                            "attached_assets": {},
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
+                    .send_to(&network())
+                    .await?;
+                println!("Initialized OTC dex. Result: {:?}", result.outcome());
             }
             OtcAction::SetAuthorizedKey { account_id, key } => {
                 let account_signer =
@@ -375,6 +505,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("Deployed. Result: {:?}", result.outcome());
             }
+            XykAction::Initialize => {
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "dex_call",
+                        json!({
+                            "dex_id": dex_id,
+                            "method": "new",
+                            "args": "",
+                            "attached_assets": {},
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
+                    .send_to(&network())
+                    .await?;
+                println!("Initialized XYK dex. Result: {:?}", result.outcome());
+            }
             XykAction::CreatePool {
                 account_id,
                 asset_0,
@@ -393,7 +543,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     is_public: bool,
                 }
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("deposit_near", json!({
+                    .call_function("execute_operations", json!({
                         "operations": [{
                             "DexCall": {
                                 "dex_id": dex_id,
@@ -437,6 +587,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
                 let pool = pool.expect("Pool not found");
+                let is_public = matches!(pool, XykPoolView::Public { .. });
                 let (asset_0, asset_1) = match pool {
                     XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
                         (assets.0.asset_id, assets.1.asset_id)
@@ -452,36 +603,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pool_id: XykPoolId,
                 }
 
+                let mut operations = vec![json!({
+                    "DexCall": {
+                        "dex_id": dex_id,
+                        "method": "add_liquidity",
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap()),
+                        "attached_assets": HashMap::<AssetId, U128>::from_iter([
+                            (asset_0, U128(amount_0)),
+                            (asset_1, U128(amount_1)),
+                        ]),
+                    }
+                })];
+                if is_public {
+                    operations.push(json!({
+                        "DexCall": {
+                            "dex_id": dex_id,
+                            "method": "register_liquidity",
+                            "args": BASE64_STANDARD.encode(borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap()),
+                            "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
+                        }
+                    }));
+                }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
-                        "deposit_near",
+                        "execute_operations",
                         json!({
-                            "operations": [
-                                {
-                                    "DexCall": {
-                                        "dex_id": dex_id,
-                                        "method": "register_liquidity",
-                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap()),
-                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
-                                    }
-                                },
-                                {
-                                    "DexCall": {
-                                        "dex_id": dex_id,
-                                        "method": "add_liquidity",
-                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap()),
-                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([
-                                            (asset_0, U128(amount_0)),
-                                            (asset_1, U128(amount_1)),
-                                        ]),
-                                    }
-                                },
-                            ]
+                            "operations": operations,
                         }),
                     )
                     .transaction()
                     .max_gas()
-                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .deposit(NearToken::from_yoctonear(1))
                     .with_signer(account_id.clone(), account_signer)
                     .send_to(&network())
                     .await?;
@@ -538,7 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     fees: XykFeeConfiguration,
                 }
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("deposit_near", json!({
+                    .call_function("execute_operations", json!({
                         "operations": [{
                             "DexCall": {
                                 "dex_id": dex_id,
@@ -635,7 +787,305 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
                 println!("Fees withdrawn. Result: {:?}", result.outcome());
             }
+            XykAction::SimulateTrade {
+                direction,
+                amount,
+                pool_id,
+                asset_in,
+            } => {
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
+                let pool = pool.expect("Pool not found");
+                let (asset_0, asset_1) = match &pool {
+                    XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
+                        (assets.0.asset_id.clone(), assets.1.asset_id.clone())
+                    }
+                };
+                let asset_out = if asset_in == asset_0 {
+                    asset_1
+                } else if asset_in == asset_1 {
+                    asset_0
+                } else {
+                    panic!("Asset in not found in pool");
+                };
+                #[derive(BorshSerialize)]
+                struct SwapArgs {
+                    pool_id: XykPoolId,
+                }
+                let swap_amount = match direction {
+                    TradeDirection::ExactIn => SwapRequestAmount::ExactIn(U128(amount)),
+                    TradeDirection::ExactOut => SwapRequestAmount::ExactOut(U128(amount)),
+                };
+                let result: near_api::Data<(U128, U128)> =
+                    Contract(config.dex_contract_id.clone())
+                        .call_function(
+                            "simulate_swap_simple",
+                            json!({
+                                "dex_id": dex_id,
+                                "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                "asset_in": asset_in,
+                                "asset_out": asset_out,
+                                "amount": swap_amount,
+                            }),
+                        )
+                        .read_only()
+                        .fetch_from(&network())
+                        .await?;
+                let (amount_in, amount_out) = result.data;
+                println!("Simulated swap result:");
+                println!("  Amount in:  {} ({})", amount_in.0, asset_in);
+                println!("  Amount out: {} ({})", amount_out.0, asset_out);
+            }
+            XykAction::Trade {
+                account_id,
+                direction,
+                amount,
+                pool_id,
+                asset_in,
+                slippage,
+                withdraw,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
+                let pool = pool.expect("Pool not found");
+                let (asset_0, asset_1) = match &pool {
+                    XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
+                        (assets.0.asset_id.clone(), assets.1.asset_id.clone())
+                    }
+                };
+                let asset_out = if asset_in == asset_0 {
+                    asset_1
+                } else if asset_in == asset_1 {
+                    asset_0
+                } else {
+                    panic!("Asset in not found in pool");
+                };
+                #[derive(BorshSerialize)]
+                struct SwapArgs {
+                    pool_id: XykPoolId,
+                }
+                let swap_amount = match direction {
+                    TradeDirection::ExactIn => SwapRequestAmount::ExactIn(U128(amount)),
+                    TradeDirection::ExactOut => SwapRequestAmount::ExactOut(U128(amount)),
+                };
+                let constraint: Option<U128> = if let Some(SlippagePercent(slippage_pct)) = slippage
+                {
+                    let sim_result: near_api::Data<(U128, U128)> =
+                        Contract(config.dex_contract_id.clone())
+                            .call_function(
+                                "simulate_swap_simple",
+                                json!({
+                                    "dex_id": dex_id,
+                                    "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                    "asset_in": asset_in,
+                                    "asset_out": asset_out,
+                                    "amount": swap_amount,
+                                }),
+                            )
+                            .read_only()
+                            .fetch_from(&network())
+                            .await?;
+                    let (sim_amount_in, sim_amount_out) = sim_result.data;
+                    let multiplier = slippage_pct / 100.0;
+                    match direction {
+                        TradeDirection::ExactIn => {
+                            let min_out = (sim_amount_out.0 as f64 * (1.0 - multiplier)) as u128;
+                            println!(
+                                "Simulated amount out: {}, min out with {slippage_pct}% slippage: {min_out}",
+                                sim_amount_out.0
+                            );
+                            Some(U128(min_out))
+                        }
+                        TradeDirection::ExactOut => {
+                            let max_in = (sim_amount_in.0 as f64 * (1.0 + multiplier)) as u128;
+                            println!(
+                                "Simulated amount in: {}, max in with {slippage_pct}% slippage: {max_in}",
+                                sim_amount_in.0
+                            );
+                            Some(U128(max_in))
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let mut operations = vec![Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                    asset_in: asset_in.clone(),
+                    asset_out: asset_out.clone(),
+                    amount: SwapOperationAmount::Amount(swap_amount),
+                    constraint,
+                }];
+
+                if withdraw {
+                    operations.push(Operation::Withdraw {
+                        asset_id: asset_out.clone(),
+                        amount: WithdrawAmount::PreviousSwapOutput,
+                        to: None,
+                        rescue_address: None,
+                    });
+                }
+
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "execute_operations",
+                        json!({
+                            "operations": operations,
+                            "referrer": null,
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Swap executed. Result: {:?}", result.outcome());
+            }
         },
+        Commands::RegisterAssets {
+            account_id,
+            asset_ids,
+            r#for,
+        } => {
+            let account_signer =
+                Signer::from_keystore_with_search_for_keys(account_id.clone(), &network()).await?;
+            let result = Contract(config.dex_contract_id.clone())
+                .call_function(
+                    "register_assets",
+                    json!({
+                        "asset_ids": asset_ids,
+                        "for": r#for,
+                    }),
+                )
+                .transaction()
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .with_signer(account_id.clone(), account_signer)
+                .send_to(&network())
+                .await?;
+            println!("Assets registered. Result: {:?}", result.outcome());
+        }
+        Commands::DepositAsset {
+            account_id,
+            asset_id,
+            amount,
+        } => {
+            let account_signer =
+                Signer::from_keystore_with_search_for_keys(account_id.clone(), &network()).await?;
+            match asset_id {
+                AssetId::Near => {
+                    let result = Contract(config.dex_contract_id.clone())
+                        .call_function("deposit_near", json!({}))
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(amount))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("NEAR deposited. Result: {:?}", result.outcome());
+                }
+                AssetId::Nep141(token_contract_id) => {
+                    let _ = Contract(token_contract_id.clone())
+                        .call_function(
+                            "storage_deposit",
+                            json!({
+                                "account_id": config.dex_contract_id,
+                            }),
+                        )
+                        .transaction()
+                        .gas(NearGas::from_tgas(10))
+                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                        .with_signer(account_id.clone(), account_signer.clone())
+                        .send_to(&network())
+                        .await;
+                    let result = Contract(token_contract_id.clone())
+                        .call_function(
+                            "ft_transfer_call",
+                            json!({
+                                "receiver_id": config.dex_contract_id,
+                                "amount": U128(amount),
+                                "msg": "",
+                            }),
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("FT deposited. Result: {:?}", result.outcome());
+                }
+                AssetId::Nep171(nft_contract_id, token_id) => {
+                    assert_eq!(amount, 1, "NFTs can only be deposited in whole numbers");
+                    let _ = Contract(nft_contract_id.clone())
+                        .call_function(
+                            "storage_deposit",
+                            json!({
+                                "account_id": config.dex_contract_id,
+                            }),
+                        )
+                        .transaction()
+                        .gas(NearGas::from_tgas(10))
+                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                        .with_signer(account_id.clone(), account_signer.clone())
+                        .send_to(&network())
+                        .await;
+                    let result = Contract(nft_contract_id.clone())
+                        .call_function(
+                            "nft_transfer_call",
+                            json!({
+                                "receiver_id": config.dex_contract_id,
+                                "token_id": token_id,
+                                "msg": "",
+                            }),
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("NFT deposited. Result: {:?}", result.outcome());
+                }
+                AssetId::Nep245(mt_contract_id, token_id) => {
+                    let _ = Contract(mt_contract_id.clone())
+                        .call_function(
+                            "storage_deposit",
+                            json!({
+                                "account_id": config.dex_contract_id,
+                            }),
+                        )
+                        .transaction()
+                        .gas(NearGas::from_tgas(10))
+                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                        .with_signer(account_id.clone(), account_signer.clone())
+                        .send_to(&network())
+                        .await;
+                    let result = Contract(mt_contract_id.clone())
+                        .call_function(
+                            "mt_transfer_call",
+                            json!({
+                                "receiver_id": config.dex_contract_id,
+                                "token_id": token_id,
+                                "amount": U128(amount),
+                                "msg": "",
+                            }),
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("MT deposited. Result: {:?}", result.outcome());
+                }
+            }
+        }
     }
 
     Ok(())
@@ -725,6 +1175,66 @@ impl<'de> Deserialize<'de> for AssetId {
 #[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]
 struct XykFeeConfiguration {
     receivers: Vec<(XykFeeReceiver, u32)>,
+}
+
+#[derive(BorshSerialize, Serialize, Clone, Debug)]
+enum SwapRequestAmount {
+    ExactIn(U128),
+    ExactOut(U128),
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[allow(dead_code)]
+enum Operation {
+    RegisterAssets {
+        asset_ids: Vec<AssetId>,
+        r#for: Option<AccountOrDexId>,
+    },
+    Withdraw {
+        asset_id: AssetId,
+        amount: WithdrawAmount,
+        to: Option<AccountId>,
+        rescue_address: Option<AccountId>,
+    },
+    SwapSimple {
+        dex_id: String,
+        message: String,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapOperationAmount,
+        constraint: Option<U128>,
+    },
+    DexCall {
+        dex_id: String,
+        method: String,
+        args: String,
+        attached_assets: HashMap<AssetId, U128>,
+    },
+    TransferAsset {
+        to: AccountOrDexId,
+        asset_id: AssetId,
+        amount: U128,
+    },
+    StorageDeposit {
+        amount: U128,
+        r#for: Option<AccountOrDexId>,
+    },
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[allow(dead_code)]
+enum SwapOperationAmount {
+    Amount(SwapRequestAmount),
+    OutputOfLastIn,
+    EntireBalanceIn,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[allow(dead_code)]
+enum WithdrawAmount {
+    Full { at_least: Option<U128> },
+    Exact(U128),
+    PreviousSwapOutput,
 }
 
 #[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]

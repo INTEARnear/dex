@@ -101,6 +101,15 @@ pub enum Operation {
 pub enum WithdrawAmount {
     Full { at_least: Option<U128> },
     Exact(U128),
+    PreviousSwapOutput,
+}
+
+#[near(serializers=[json])]
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum DirectWithdrawAmount {
+    Full { at_least: Option<U128> },
+    Exact(U128),
 }
 
 impl DexEngine {
@@ -181,7 +190,6 @@ impl DexEngine {
         store.data_mut().response.take()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn internal_swap_simple(
         &mut self,
         dex_id: DexId,
@@ -412,7 +420,7 @@ impl DexEngine {
                 AssetWithdrawalType::WithdrawUnderlyingAsset(to_account_id) => {
                     self.internal_withdraw(
                         asset_id.clone(),
-                        WithdrawAmount::Exact(amount),
+                        DirectWithdrawAmount::Exact(amount),
                         Some(to_account_id.clone()),
                         AccountOrDexId::Dex(dex_id.clone()),
                     )
@@ -562,12 +570,12 @@ impl DexEngine {
     pub(crate) fn internal_withdraw(
         &mut self,
         asset_id: AssetId,
-        amount: WithdrawAmount,
+        amount: DirectWithdrawAmount,
         withdraw_to: Option<AccountId>,
         withdraw_from: AccountOrDexId,
     ) -> PromiseOrValue<bool> {
         let amount = match amount {
-            WithdrawAmount::Full { at_least } => {
+            DirectWithdrawAmount::Full { at_least } => {
                 let balance = self
                     .asset_balance_of(withdraw_from.clone(), asset_id.clone())
                     .unwrap_or_default();
@@ -580,7 +588,7 @@ impl DexEngine {
                     );
                 }
             }
-            WithdrawAmount::Exact(amount) => amount,
+            DirectWithdrawAmount::Exact(amount) => amount,
         };
         if amount.0 == 0 {
             return PromiseOrValue::Value(true);
@@ -724,6 +732,20 @@ impl DexEngine {
                                 }
                             }
                             WithdrawAmount::Exact(amount) => amount,
+                            WithdrawAmount::PreviousSwapOutput => match &last_output {
+                                Some((last_asset_out, amount)) => {
+                                    if *last_asset_out == asset_id {
+                                        *amount
+                                    } else {
+                                        panic!(
+                                            "PreviousSwapOutput can only be used if the last swap asset out matches the withdraw asset"
+                                        );
+                                    }
+                                }
+                                None => panic!(
+                                    "PreviousSwapOutput can only be used after a swap, in the same operation batch"
+                                ),
+                            },
                         };
                         asset_balance.0 = asset_balance
                             .0
@@ -771,8 +793,23 @@ impl DexEngine {
                         .detach();
                     } else {
                         self.internal_withdraw(
-                            asset_id,
-                            amount,
+                            asset_id.clone(),
+                            match amount {
+                                WithdrawAmount::Full { at_least } => DirectWithdrawAmount::Full { at_least },
+                                WithdrawAmount::Exact(amount) => DirectWithdrawAmount::Exact(amount),
+                                WithdrawAmount::PreviousSwapOutput => {
+                                    match &last_output {
+                                        Some((last_asset_out, amount)) => {
+                                            if *last_asset_out == asset_id {
+                                                DirectWithdrawAmount::Exact(*amount)
+                                            } else {
+                                                panic!("PreviousSwapOutput can only be used if the last swap asset out matches the withdraw asset");
+                                            }
+                                        }
+                                        None => panic!("PreviousSwapOutput can only be used after a swap, in the same operation batch"),
+                                    }
+                                },
+                            },
                             to,
                             AccountOrDexId::Account(by.clone()),
                         )

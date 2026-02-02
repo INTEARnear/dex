@@ -63,7 +63,7 @@ impl DexEngine {
         asset_id: AssetId,
         amount: U128,
     ) {
-        let balance = match account_or_dex_id {
+        let balance = match &account_or_dex_id {
             AccountOrDexId::Account(account) => self
                 .user_balances
                 .get(&(account.clone(), asset_id.clone()))
@@ -79,7 +79,9 @@ impl DexEngine {
         };
         expect!(
             balance.0 >= amount.0,
-            "Insufficient balance in ensure_has_assets: {} < {}",
+            "Insufficient balance of {} for {}: {} < {}",
+            asset_id,
+            account_or_dex_id,
             balance.0,
             amount.0
         );

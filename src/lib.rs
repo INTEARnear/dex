@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::{
     internal_asset_operations::AccountOrDexId,
-    internal_operations::{Operation, TradeAccount, WithdrawAmount},
+    internal_operations::{DirectWithdrawAmount, Operation, TradeAccount},
     storage_management::StorageBalances,
 };
 use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
@@ -357,7 +357,7 @@ impl DexEngine {
     pub fn withdraw(
         &mut self,
         asset_id: AssetId,
-        amount: WithdrawAmount,
+        amount: DirectWithdrawAmount,
         withdraw_to: Option<AccountId>,
     ) -> PromiseOrValue<bool> {
         near_sdk::assert_one_yocto();
@@ -371,12 +371,15 @@ impl DexEngine {
 
     #[payable]
     pub fn execute_operations(&mut self, operations: Vec<Operation>, referrer: Option<AccountId>) {
-        expect!(let Some(leftover) = near_sdk::env::attached_deposit().checked_sub(NearToken::from_yoctonear(1)), "Deposit of one yoctoNEAR is required.");
-        if !leftover.is_zero() {
+        expect!(
+            !near_sdk::env::attached_deposit().is_zero(),
+            "Deposit of one yoctoNEAR is required."
+        );
+        if near_sdk::env::attached_deposit() > NearToken::from_yoctonear(1) {
             self.internal_increase_assets(
                 AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
                 AssetId::Near,
-                U128(leftover.as_yoctonear()),
+                U128(near_sdk::env::attached_deposit().as_yoctonear()),
             );
         }
         self.internal_execute_operations(
