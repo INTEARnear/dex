@@ -1,5 +1,5 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
-use borsh::BorshSerialize;
+use borsh::{BorshDeserialize, BorshSerialize};
 use clap::{Parser, Subcommand};
 use near_api::{
     Contract, NearGas, NearToken, NetworkConfig, RPCEndpoint, Signer, Transaction,
@@ -1145,9 +1145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(
-    PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug, BorshSerialize, borsh::BorshDeserialize,
-)]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug, BorshSerialize, BorshDeserialize)]
 pub enum AssetId {
     Near,
     Nep141(AccountId),
@@ -1226,7 +1224,7 @@ impl<'de> Deserialize<'de> for AssetId {
     }
 }
 
-#[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 struct XykFeeConfiguration {
     receivers: Vec<(XykFeeReceiver, u32)>,
 }
@@ -1291,13 +1289,13 @@ enum WithdrawAmount {
     PreviousSwapOutput,
 }
 
-#[derive(BorshSerialize, borsh::BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 enum XykFeeReceiver {
     User(AccountId),
 }
 
 #[allow(dead_code)]
-#[derive(borsh::BorshDeserialize, Debug)]
+#[derive(BorshDeserialize, Debug)]
 enum XykPoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
@@ -1312,7 +1310,7 @@ enum XykPoolView {
 }
 
 #[allow(dead_code)]
-#[derive(borsh::BorshDeserialize, Clone, Debug)]
+#[derive(BorshDeserialize, Clone, Debug)]
 struct AssetWithBalance {
     asset_id: AssetId,
     balance: U128,
