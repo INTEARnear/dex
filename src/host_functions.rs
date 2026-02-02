@@ -424,12 +424,10 @@ pub fn storage_write(
             wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
         })?;
 
-    let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() else {
-        return Err(wasmi::Error::new(
-            "storage_write is not allowed in view functions",
-        ));
-    };
-    let old_value = dex_storage_mut.insert((dex_id, key_buf), value_buf);
+    let old_value = caller
+        .data_mut()
+        .call_type
+        .dex_storage_insert(dex_id, key_buf, value_buf)?;
 
     if let Some(old_val) = old_value {
         caller.data_mut().registers.insert(register_id, old_val);
@@ -458,8 +456,7 @@ pub fn storage_read(
     if let Some(value) = caller
         .data()
         .call_type
-        .dex_storage()
-        .get(&(dex_id, key_buf))
+        .dex_storage_get(dex_id, key_buf)
         .cloned()
     {
         caller.data_mut().registers.insert(register_id, value);
@@ -485,12 +482,11 @@ pub fn storage_remove(
         .read(&caller, key_ptr as usize, &mut key_buf)
         .map_err(|err| wasmi::Error::new(format!("Failed to read key from guest memory: {err}")))?;
 
-    let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() else {
-        return Err(wasmi::Error::new(
-            "storage_write is not allowed in view functions",
-        ));
-    };
-    if let Some(old_value) = dex_storage_mut.remove(&(dex_id, key_buf)) {
+    if let Some(old_value) = caller
+        .data_mut()
+        .call_type
+        .dex_storage_remove(dex_id, key_buf)?
+    {
         caller.data_mut().registers.insert(register_id, old_value);
         Ok(1)
     } else {
@@ -516,8 +512,7 @@ pub fn storage_has_key(
     if caller
         .data()
         .call_type
-        .dex_storage()
-        .contains_key(&(dex_id, key_buf))
+        .dex_storage_contains_key(dex_id, key_buf)
     {
         Ok(1)
     } else {
@@ -538,9 +533,7 @@ pub fn epoch_height(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error
 }
 
 pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
-    if let Some(dex_storage_mut) = caller.data_mut().call_type.dex_storage_mut() {
-        dex_storage_mut.flush();
-    };
+    caller.data_mut().call_type.dex_storage_flush();
     let storage_usage_now = near_sdk::env::storage_usage();
     let storage_usage_during_transaction = i64::try_from(storage_usage_now)
         .map_err(|err| wasmi::Error::new(format!("Storage usage overflow: {err}")))?

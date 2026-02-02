@@ -45,5 +45,5 @@ debug = false
 panic = "abort"
 overflow-checks = false # deny(clippy::arithmetic_side_effects) makes this unnecessary, unless bug is in a dependency
 
-# [profile.release.package.wasmi]
-# opt-level = 2 # 57.7 Tgas -> 48.5 Tgas, but cuts very close to the limit
+[profile.release.package.wasmi]
+opt-level = 2 # 57.7 Tgas -> 48.5 Tgas

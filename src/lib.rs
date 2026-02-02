@@ -1,4 +1,5 @@
 #![deny(clippy::arithmetic_side_effects)]
+#![allow(clippy::too_many_arguments)]
 
 pub mod asset_deposit;
 pub mod host_functions;
@@ -134,6 +135,10 @@ enum CallType<'a> {
     Trade {
         dex_storage_mut: &'a mut DexStorage,
     },
+    TradeView {
+        dex_storage: &'a DexStorage,
+        ephemeral_storage_updates: HashMap<Vec<u8>, Option<Vec<u8>>>,
+    },
     View {
         dex_storage: &'a DexStorage,
     },
@@ -147,23 +152,104 @@ enum CallType<'a> {
 type DexStorage = LookupMap<(DexId, Vec<u8>), Vec<u8>>;
 
 impl CallType<'_> {
-    pub const fn dex_storage(&self) -> &DexStorage {
+    pub fn dex_storage_get(&self, dex_id: DexId, key: Vec<u8>) -> Option<&Vec<u8>> {
         match self {
-            CallType::Trade { dex_storage_mut } => dex_storage_mut,
-            CallType::View { dex_storage } => dex_storage,
+            CallType::Trade { dex_storage_mut } => dex_storage_mut.get(&(dex_id, key)),
+            CallType::TradeView {
+                dex_storage,
+                ephemeral_storage_updates,
+            } => ephemeral_storage_updates
+                .get(&key)
+                .and_then(|value| value.as_ref())
+                .or_else(|| dex_storage.get(&(dex_id, key))),
+            CallType::View { dex_storage } => dex_storage.get(&(dex_id, key)),
             CallType::Call {
                 dex_storage_mut, ..
-            } => dex_storage_mut,
+            } => dex_storage_mut.get(&(dex_id, key)),
         }
     }
 
-    pub const fn dex_storage_mut(&mut self) -> Option<&mut DexStorage> {
+    pub fn dex_storage_contains_key(&self, dex_id: DexId, key: Vec<u8>) -> bool {
         match self {
-            CallType::Trade { dex_storage_mut } => Some(dex_storage_mut),
-            CallType::View { .. } => None,
+            CallType::Trade { dex_storage_mut } => dex_storage_mut.contains_key(&(dex_id, key)),
+            CallType::TradeView {
+                dex_storage,
+                ephemeral_storage_updates,
+            } => {
+                ephemeral_storage_updates.contains_key(&key)
+                    || dex_storage.contains_key(&(dex_id, key))
+            }
+            CallType::View { dex_storage } => dex_storage.contains_key(&(dex_id, key)),
             CallType::Call {
                 dex_storage_mut, ..
-            } => Some(dex_storage_mut),
+            } => dex_storage_mut.contains_key(&(dex_id, key)),
+        }
+    }
+
+    pub fn dex_storage_insert(
+        &mut self,
+        dex_id: DexId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, wasmi::Error> {
+        match self {
+            CallType::Trade { dex_storage_mut } => Ok(dex_storage_mut.insert((dex_id, key), value)),
+            CallType::TradeView {
+                dex_storage,
+                ephemeral_storage_updates,
+            } => {
+                if let Some(prev_value) = ephemeral_storage_updates.get(&key).cloned() {
+                    ephemeral_storage_updates.insert(key, Some(value));
+                    Ok(prev_value)
+                } else if let Some(prev_value) = dex_storage.get(&(dex_id, key.clone())) {
+                    ephemeral_storage_updates.insert(key, Some(value));
+                    Ok(Some(prev_value.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+            CallType::View { .. } => Err(wasmi::Error::new("Cannot modify data in view-only mode")),
+            CallType::Call {
+                dex_storage_mut, ..
+            } => Ok(dex_storage_mut.insert((dex_id, key), value)),
+        }
+    }
+
+    pub fn dex_storage_remove(
+        &mut self,
+        dex_id: DexId,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, wasmi::Error> {
+        match self {
+            CallType::Trade { dex_storage_mut } => Ok(dex_storage_mut.remove(&(dex_id, key))),
+            CallType::TradeView {
+                dex_storage,
+                ephemeral_storage_updates,
+            } => {
+                if let Some(prev_value) = ephemeral_storage_updates.remove(&key) {
+                    Ok(prev_value)
+                } else if let Some(prev_value) = dex_storage.get(&(dex_id, key.clone())) {
+                    ephemeral_storage_updates.insert(key, None);
+                    Ok(Some(prev_value.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+            CallType::View { .. } => Err(wasmi::Error::new("Cannot modify data in view-only mode")),
+            CallType::Call {
+                dex_storage_mut, ..
+            } => Ok(dex_storage_mut.remove(&(dex_id, key))),
+        }
+    }
+
+    pub fn dex_storage_flush(&mut self) {
+        match self {
+            CallType::Trade { dex_storage_mut } => dex_storage_mut.flush(),
+            CallType::TradeView { .. } => (),
+            CallType::View { .. } => (),
+            CallType::Call {
+                dex_storage_mut, ..
+            } => dex_storage_mut.flush(),
         }
     }
 }
@@ -194,7 +280,6 @@ impl DexEngine {
     /// Swap one asset for another on a specific dex.
     /// Multi-step aggregator method coming soon.
     #[payable]
-    #[allow(clippy::too_many_arguments)]
     pub fn swap_simple(
         &mut self,
         dex_id: DexId,
@@ -311,5 +396,19 @@ impl DexEngine {
     // View method, but needs &mut for compatibility ergonomics with RunnerData
     pub fn dex_view(&self, dex_id: DexId, method: String, args: Base64VecU8) -> Base64VecU8 {
         self.internal_dex_view(dex_id, method, args)
+    }
+
+    /// Simulate a swap without executing it. Returns the expected
+    /// (amount_in, amount_out) that would result from the swap.
+    /// This is a view method and does not modify any state.
+    pub fn simulate_swap_simple(
+        &self,
+        dex_id: DexId,
+        message: Base64VecU8,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapRequestAmount,
+    ) -> (U128, U128) {
+        self.internal_simulate_swap_simple(dex_id, message, asset_in, asset_out, amount)
     }
 }

@@ -15,8 +15,8 @@ use near_sdk::{
 use wasmi::{Engine, Func, Linker, Module, Store};
 
 use crate::{
-    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData, impl_supported_host_functions,
-    impl_unsupported_host_functions, internal_asset_operations::AccountOrDexId,
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData,
+    internal_asset_operations::AccountOrDexId,
 };
 
 #[derive(Clone)]
@@ -128,6 +128,58 @@ impl DexEngine {
         .emit();
     }
 
+    /// Core WASM execution logic shared between swap, dex_call, and dex_view methods.
+    /// Returns the raw response bytes after running the WASM function.
+    fn run_wasm_function<'a>(
+        code: &[u8],
+        dex_id: &DexId,
+        call_type: CallType<'a>,
+        request: Vec<u8>,
+        method: &str,
+        dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
+    ) -> Option<Vec<u8>> {
+        let engine = Engine::default();
+        let module = match Module::new(&engine, code) {
+            Ok(module) => module,
+            Err(err) => panic!("Failed to load module: {err:?}"),
+        };
+
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let mut store = Store::new(
+            &engine,
+            RunnerData {
+                request,
+                response: None,
+                registers: HashMap::new(),
+                call_type,
+                dex_id: dex_id.clone(),
+                dex_storage_balances,
+                dex_storage_usage_before_transaction: storage_usage_before,
+            },
+        );
+        let mut linker = Linker::new(&engine);
+
+        crate::impl_supported_host_functions!(linker);
+        // might be needed for some near-sdk features that are actually never called,
+        // but not for any of the dexes in this workspace, and this helps reduce wasm
+        // size by 4kb.
+        // crate::impl_unsupported_host_functions!(linker);
+
+        let instance = match linker.instantiate_and_start(&mut store, &module) {
+            Ok(i) => i,
+            Err(err) => panic!("Failed to instantiate module: {err:?}"),
+        };
+        let func: Func = match instance.get_func(&mut store, method) {
+            Some(f) => f,
+            None => panic!("Failed to get function '{method}'"),
+        };
+        match func.call(&mut store, &[], &mut []) {
+            Ok(()) => (),
+            Err(err) => panic!("Failed to call function '{method}': {err:?}"),
+        };
+        store.data_mut().response.take()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn internal_swap_simple(
         &mut self,
@@ -148,48 +200,17 @@ impl DexEngine {
         };
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let engine = Engine::default();
-        let module = match Module::new(&engine, code) {
-            Ok(module) => module,
-            Err(err) => panic!("Failed to load module: {err:?}"),
-        };
-
         let storage_usage_before = near_sdk::env::storage_usage();
-        let mut store = Store::new(
-            &engine,
-            RunnerData {
-                request: near_sdk::borsh::to_vec(&swap_request)
-                    .expect("Failed to serialize swap request"),
-                response: None,
-                registers: HashMap::new(),
-                call_type: CallType::Trade {
-                    dex_storage_mut: &mut self.dex_storage,
-                },
-                dex_id: dex_id.clone(),
-                dex_storage_balances: &self.dex_storage_balances,
-                dex_storage_usage_before_transaction: storage_usage_before,
+        let response = Self::run_wasm_function(
+            code,
+            &dex_id,
+            CallType::Trade {
+                dex_storage_mut: &mut self.dex_storage,
             },
+            near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
+            "swap",
+            &self.dex_storage_balances,
         );
-        let mut linker = Linker::new(&engine);
-
-        impl_supported_host_functions!(linker);
-        impl_unsupported_host_functions!(linker);
-
-        let instance = match linker.instantiate_and_start(&mut store, &module) {
-            Ok(i) => i,
-            Err(err) => panic!("Failed to instantiate module: {err:?}"),
-        };
-        let swap_func: Func = match instance.get_func(&mut store, "swap") {
-            Some(f) => f,
-            None => panic!("Failed to get function"),
-        };
-        match swap_func.call(&mut store, &[], &mut []) {
-            Ok(()) => (),
-            Err(err) => panic!("Failed to call function: {err:?}"),
-        };
-        let response = store.data_mut().response.take();
-        drop(store);
-        drop(linker);
 
         self.dex_storage.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -312,53 +333,23 @@ impl DexEngine {
         }
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let engine = Engine::default();
-        let module = match Module::new(&engine, code) {
-            Ok(module) => module,
-            Err(err) => panic!("Failed to load module: {err:?}"),
-        };
-
         let storage_usage_before = near_sdk::env::storage_usage();
         let request = DexCallRequest {
             args: args.0,
             attached_assets,
         };
-        let mut store = Store::new(
-            &engine,
-            RunnerData {
-                request: near_sdk::borsh::to_vec(&request).expect("Failed to serialize request"),
-                response: None,
-                registers: HashMap::new(),
-                call_type: CallType::Call {
-                    dex_storage_mut: &mut self.dex_storage,
-                    predecessor_id: predecessor.clone(),
-                    is_authorized: anon_swap_available_assets.is_none(),
-                },
-                dex_id: dex_id.clone(),
-                dex_storage_balances: &self.dex_storage_balances,
-                dex_storage_usage_before_transaction: storage_usage_before,
+        let response = Self::run_wasm_function(
+            code,
+            &dex_id,
+            CallType::Call {
+                dex_storage_mut: &mut self.dex_storage,
+                predecessor_id: predecessor.clone(),
+                is_authorized: anon_swap_available_assets.is_none(),
             },
+            near_sdk::borsh::to_vec(&request).expect("Failed to serialize request"),
+            &method,
+            &self.dex_storage_balances,
         );
-        let mut linker = Linker::new(&engine);
-
-        impl_supported_host_functions!(linker);
-        impl_unsupported_host_functions!(linker);
-
-        let instance = match linker.instantiate_and_start(&mut store, &module) {
-            Ok(i) => i,
-            Err(err) => panic!("Failed to instantiate module: {err:?}"),
-        };
-        let dex_call_func: Func = match instance.get_func(&mut store, method.as_str()) {
-            Some(f) => f,
-            None => panic!("Failed to get function"),
-        };
-        match dex_call_func.call(&mut store, &[], &mut []) {
-            Ok(()) => (),
-            Err(err) => panic!("Failed to call function: {err:?}"),
-        };
-        let response = store.data_mut().response.take();
-        drop(store);
-        drop(linker);
 
         let response: DexCallResponse = match response {
             Some(response) => near_sdk::borsh::from_slice(&response)
@@ -447,6 +438,54 @@ impl DexEngine {
         Base64VecU8::from(response.response)
     }
 
+    pub(crate) fn internal_simulate_swap_simple(
+        &self,
+        dex_id: DexId,
+        message: Base64VecU8,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapRequestAmount,
+    ) -> (U128, U128) {
+        let swap_request = SwapRequest {
+            message,
+            asset_in,
+            asset_out,
+            amount,
+        };
+
+        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
+        let response = Self::run_wasm_function(
+            code,
+            &dex_id,
+            CallType::TradeView {
+                dex_storage: &self.dex_storage,
+                ephemeral_storage_updates: HashMap::new(),
+            },
+            near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
+            "swap",
+            &self.dex_storage_balances,
+        );
+        let response: SwapResponse = match response {
+            Some(response) => {
+                near_sdk::borsh::from_slice(&response).expect("Failed to deserialize swap response")
+            }
+            None => panic!("No response from swap"),
+        };
+        match swap_request.amount {
+            SwapRequestAmount::ExactIn(exact_in) => {
+                expect!(exact_in == response.amount_in, "Amount in does not match");
+            }
+            SwapRequestAmount::ExactOut(exact_out) => {
+                expect!(
+                    exact_out == response.amount_out,
+                    "Amount out does not match"
+                );
+            }
+        }
+
+        (response.amount_in, response.amount_out)
+    }
+
     pub(crate) fn internal_dex_view(
         &self,
         dex_id: DexId,
@@ -459,47 +498,16 @@ impl DexEngine {
         );
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let engine = Engine::default();
-        let module = match Module::new(&engine, code) {
-            Ok(module) => module,
-            Err(err) => panic!("Failed to load module: {err:?}"),
-        };
-
-        let storage_usage_before = near_sdk::env::storage_usage();
-        let mut store = Store::new(
-            &engine,
-            RunnerData {
-                request: args.0,
-                response: None,
-                registers: HashMap::new(),
-                call_type: CallType::View {
-                    dex_storage: &self.dex_storage,
-                },
-                dex_id: dex_id.clone(),
-                dex_storage_balances: &self.dex_storage_balances,
-                dex_storage_usage_before_transaction: storage_usage_before,
+        let response = Self::run_wasm_function(
+            code,
+            &dex_id,
+            CallType::View {
+                dex_storage: &self.dex_storage,
             },
+            args.0,
+            &method,
+            &self.dex_storage_balances,
         );
-        let mut linker = Linker::new(&engine);
-
-        impl_supported_host_functions!(linker);
-        impl_unsupported_host_functions!(linker);
-
-        let instance = match linker.instantiate_and_start(&mut store, &module) {
-            Ok(i) => i,
-            Err(err) => panic!("Failed to instantiate module: {err:?}"),
-        };
-        let dex_call_func: Func = match instance.get_func(&mut store, method.as_str()) {
-            Some(f) => f,
-            None => panic!("Failed to get function"),
-        };
-        match dex_call_func.call(&mut store, &[], &mut []) {
-            Ok(()) => (),
-            Err(err) => panic!("Failed to call function: {err:?}"),
-        };
-        let response = store.data_mut().response.take();
-        drop(store);
-        drop(linker);
 
         Base64VecU8::from(response.unwrap_or_default())
     }

@@ -2525,6 +2525,237 @@ async fn test_swap_constraints() {
 }
 
 #[tokio::test]
+async fn test_simulate_swap_simple() {
+    let ft_total_supply = NearToken::from_near(1_000_000_000);
+    let storage_deposit_amount = NearToken::from_near(5);
+    let initial_near_deposit = NearToken::from_near(5);
+    let ft_deposit_amount = 1_000_000u128;
+    let pool_creation_fee = NearToken::from_millinear(10);
+    let lp_near_amount = NearToken::from_near(1);
+    let lp_ft_amount = 500_000u128;
+    let swap_amount_in = NearToken::from_millinear(1);
+
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        user1,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let wasms = get_compiled_wasms().await;
+    let dex_wasm = &wasms.simple_amm_dex_wasm;
+
+    let dex_id_string = "dex".to_string();
+    let dex_id = DexId {
+        deployer: user1.id().clone(),
+        id: dex_id_string.clone(),
+    };
+
+    ft_storage_deposit(&ft1, &user1).await;
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(ft_total_supply.as_yoctonear()),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "dex_storage_deposit")
+        .max_gas()
+        .deposit(engine_dex_storage_deposit())
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(storage_deposit_amount)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
+            "for": AccountOrDexId::Account(user1.id().clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near, AssetId::Nep141(ft1.id().clone())],
+            "for": AccountOrDexId::Dex(dex_id.clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    ft_storage_deposit_for(&ft1, &user1, dex_engine_contract.id()).await;
+
+    let result = user1
+        .call(dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": dex_id_string,
+            "code_base64": BASE64_STANDARD.encode(dex_wasm),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(initial_near_deposit)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(ft_deposit_amount),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    #[near(serializers=[borsh])]
+    struct CreatePoolArgs {
+        assets: (AssetId, AssetId),
+    }
+    #[near(serializers=[borsh])]
+    struct AddLiquidityArgs {
+        pool_id: u64,
+    }
+    #[near(serializers=[borsh])]
+    struct SwapArgs {
+        pool_id: u64,
+    }
+
+    let result = user1
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "method": "new",
+            "args": BASE64_STANDARD.encode([]),
+            "attached_assets": {},
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "method": "create_pool",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&CreatePoolArgs {
+                assets: (AssetId::Near, AssetId::Nep141(ft1.id().clone())),
+            }).unwrap()),
+            "attached_assets": {
+                "near": pool_creation_fee,
+            },
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "method": "add_liquidity",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 0 }).unwrap()),
+            "attached_assets": {
+                "near": U128(lp_near_amount.as_yoctonear()),
+                format!("nep141:{}", ft1.id()): U128(lp_ft_amount),
+            },
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let simulated_result = dex_engine_contract
+        .view("simulate_swap_simple")
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "asset_in": AssetId::Near,
+            "asset_out": AssetId::Nep141(ft1.id().clone()),
+            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+        }))
+        .await
+        .unwrap()
+        .json::<(U128, U128)>()
+        .unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "swap_simple")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "asset_in": AssetId::Near,
+            "asset_out": AssetId::Nep141(ft1.id().clone()),
+            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let actual_result: (U128, U128) = result.json().unwrap();
+
+    assert_eq!(
+        simulated_result, actual_result,
+        "Simulated swap result should match actual swap result"
+    );
+}
+
+#[tokio::test]
 async fn test_withdraw_at_least() {
     let storage_deposit_amount = NearToken::from_near(5);
     let initial_near_deposit = NearToken::from_near(3);
