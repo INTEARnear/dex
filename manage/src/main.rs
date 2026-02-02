@@ -2,8 +2,8 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use borsh::BorshSerialize;
 use clap::{Parser, Subcommand};
 use near_api::{
-    Contract, NearToken, NetworkConfig, RPCEndpoint, Signer,
-    types::{AccountId, PublicKey, json::U128},
+    Contract, NearGas, NearToken, NetworkConfig, RPCEndpoint, Signer, Transaction,
+    types::{AccountId, Action, PublicKey, json::U128, transaction::actions::FunctionCallAction},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
@@ -195,20 +195,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wasm =
                     std::fs::read("./target/wasm32-unknown-unknown/release/otc_dex.wasm").unwrap();
                 let wasm_base64 = BASE64_STANDARD.encode(&wasm);
-                let result = Contract(config.dex_contract_id.clone())
-                    .call_function(
-                        "deploy_dex_code",
-                        json!({
-                            "last_part_of_id": "otc",
-                            "code_base64": wasm_base64,
-                        }),
-                    )
-                    .transaction()
-                    .max_gas()
-                    .deposit(NearToken::from_yoctonear(1))
-                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
-                    .send_to(&network())
-                    .await?;
+
+                let result = Transaction::construct(
+                    config.deployer_id.clone(),
+                    config.dex_contract_id.clone(),
+                )
+                .add_action(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: "dex_storage_deposit".to_string(),
+                    args: serde_json::to_vec(&json!({
+                        "dex_id": format!("{}/{}", config.deployer_id, "otc"),
+                    }))
+                    .unwrap(),
+                    gas: NearGas::from_tgas(10),
+                    deposit: "5 NEAR".parse::<NearToken>().unwrap(),
+                })))
+                .add_action(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: "deploy_dex_code".to_string(),
+                    args: serde_json::to_vec(&json!({
+                        "last_part_of_id": "otc",
+                        "code_base64": wasm_base64,
+                    }))
+                    .unwrap(),
+                    gas: NearGas::from_tgas(290),
+                    deposit: NearToken::from_yoctonear(1),
+                })))
+                .with_signer(Arc::clone(&config.signer))
+                .send_to(&network())
+                .await?;
+
                 println!("Deployed. Result: {:?}", result.outcome());
             }
             OtcAction::SetAuthorizedKey { account_id, key } => {
@@ -331,20 +345,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wasm =
                     std::fs::read("./target/wasm32-unknown-unknown/release/xyk_dex.wasm").unwrap();
                 let wasm_base64 = BASE64_STANDARD.encode(&wasm);
-                let result = Contract(config.dex_contract_id.clone())
-                    .call_function(
-                        "deploy_dex_code",
-                        json!({
-                            "last_part_of_id": "xyk",
-                            "code_base64": wasm_base64,
-                        }),
-                    )
-                    .transaction()
-                    .max_gas()
-                    .deposit(NearToken::from_yoctonear(1))
-                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
-                    .send_to(&network())
-                    .await?;
+
+                let result = Transaction::construct(
+                    config.deployer_id.clone(),
+                    config.dex_contract_id.clone(),
+                )
+                .add_action(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: "dex_storage_deposit".to_string(),
+                    args: serde_json::to_vec(&json!({
+                        "dex_id": format!("{}/{}", config.deployer_id, "xyk"),
+                    }))
+                    .unwrap(),
+                    gas: NearGas::from_tgas(10),
+                    deposit: "5 NEAR".parse::<NearToken>().unwrap(),
+                })))
+                .add_action(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: "deploy_dex_code".to_string(),
+                    args: serde_json::to_vec(&json!({
+                        "last_part_of_id": "xyk",
+                        "code_base64": wasm_base64,
+                    }))
+                    .unwrap(),
+                    gas: NearGas::from_tgas(290),
+                    deposit: NearToken::from_yoctonear(1),
+                })))
+                .with_signer(Arc::clone(&config.signer))
+                .send_to(&network())
+                .await?;
+
                 println!("Deployed. Result: {:?}", result.outcome());
             }
             XykAction::CreatePool {
