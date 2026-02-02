@@ -987,8 +987,8 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pools(
         &self,
-        #[serializer(borsh)] start_index: u64,
-        #[serializer(borsh)] limit: u64,
+        #[serializer(borsh)] start_index: PoolId,
+        #[serializer(borsh)] limit: PoolId,
     ) -> Vec<PoolView> {
         self.pools
             .iter()
