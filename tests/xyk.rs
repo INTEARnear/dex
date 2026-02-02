@@ -21,25 +21,27 @@ struct CreatePoolArgs {
     is_public: bool,
 }
 
+type PoolId = u32;
+
 #[near(serializers=[borsh])]
 struct RegisterLiquidityArgs {
-    pool_id: u64,
+    pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
 struct AddLiquidityArgs {
-    pool_id: u64,
+    pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
 struct RemoveLiquidityArgs {
-    pool_id: u64,
+    pool_id: PoolId,
     shares_to_remove: Option<std::num::NonZeroU128>,
 }
 
 #[near(serializers=[borsh])]
 struct SwapArgs {
-    pool_id: u64,
+    pool_id: PoolId,
 }
 
 #[near(serializers=[borsh, json])]
@@ -55,12 +57,12 @@ enum FeeReceiver {
 
 #[near(serializers=[borsh])]
 struct CreatePoolResponse {
-    pool_id: u64,
+    pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
 struct GetPoolArgs {
-    pool_id: u64,
+    pool_id: PoolId,
 }
 
 #[derive(PartialEq, Debug)]
@@ -92,7 +94,7 @@ struct WithdrawFeesArgs {
 async fn get_pool(
     dex_engine_contract: &near_workspaces::Contract,
     dex_id: &DexId,
-    pool_id: u64,
+    pool_id: PoolId,
 ) -> Option<PoolView> {
     let result = dex_engine_contract
         .view("dex_view")
@@ -109,7 +111,7 @@ async fn get_pool(
 async fn get_pool_shares(
     dex_engine_contract: &near_workspaces::Contract,
     dex_id: &DexId,
-    pool_id: u64,
+    pool_id: PoolId,
     account_id: &AccountId,
 ) -> Option<U128> {
     let result = dex_engine_contract
@@ -133,7 +135,7 @@ async fn test_xyk_private_flow() {
     let swap_amount_ft1 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u64; // First pool will have ID 0
+    let first_pool_id = 0u32; // First pool will have ID 0
 
     let wasms = get_compiled_wasms().await;
 
@@ -384,7 +386,7 @@ async fn test_xyk_public_flow() {
     let swap_amount_ft1 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 4_000_000_000u128;
-    let first_pool_id = 0u64;
+    let first_pool_id = 0u32;
 
     let wasms = get_compiled_wasms().await;
 
@@ -825,7 +827,7 @@ async fn test_xyk_public_flow() {
 #[tokio::test]
 async fn test_xyk_multi_user_liquidity() {
     let storage_deposit_for_pool = NearToken::from_millinear(50);
-    let first_pool_id = 0u64;
+    let first_pool_id = 0u32;
 
     let user_liquidity = [
         (100_000_000u128, 200_000_000u128),
@@ -1101,7 +1103,7 @@ async fn test_xyk_fees() {
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
     let swap_amount_ft1 = 100_000_000u128;
-    let first_pool_id = 0u64;
+    let first_pool_id = 0u32;
 
     let fee_fraction = 10_000u32; // 1%
 
@@ -1315,7 +1317,7 @@ async fn test_xyk_exact_output() {
     let exact_output_ft2 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u64;
+    let first_pool_id = 0u32;
 
     let wasms = get_compiled_wasms().await;
 

@@ -8,8 +8,10 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto, json_types::U128,
-    near, store::LookupMap,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto,
+    json_types::U128,
+    near,
+    store::{LookupMap, Vector},
 };
 
 #[global_allocator]
@@ -28,14 +30,13 @@ enum StorageKey {
     FeesCollectedByUsers,
 }
 
-type PoolId = u64;
+type PoolId = u32;
 
-/// A production x*y=k pool with two assets
+/// A x*y=k pool with two assets
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct XykDex {
-    pools: LookupMap<PoolId, Pool>,
-    pool_counter: PoolId,
+    pools: Vector<Pool>,
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
 }
 
@@ -101,7 +102,7 @@ impl Dex for XykDex {
         let Ok(SwapArgs { pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
-        let Some(pool) = self.pools.get_mut(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
         let (assets, fees) = match pool {
@@ -157,9 +158,9 @@ impl Dex for XykDex {
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
                 fees_breakdown.push((receiver.clone(), U128(fee_amount)));
                 match receiver {
-                    FeeReceiver::User(user_id) => {
+                    FeeReceiver::Account(account_id) => {
                         fees_collected_by_users
-                            .entry((user_id.clone(), asset_in.clone()))
+                            .entry((account_id.clone(), asset_in.clone()))
                             .and_modify(|balance| {
                                 balance.0 = balance.0.checked_add(fee_amount).expect("Overflow")
                             })
@@ -286,8 +287,7 @@ impl XykDex {
     pub fn new() -> Self {
         assert_one_yocto();
         Self {
-            pools: LookupMap::new(StorageKey::Pools),
-            pool_counter: 0,
+            pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
         }
     }
@@ -318,22 +318,16 @@ impl XykDex {
         };
         expect!(assets.0 != assets.1, "Assets must be different");
 
-        let pool_id = self.pool_counter;
-        self.pool_counter = self
-            .pool_counter
-            .checked_add(1)
-            .expect("Pool counter overflow");
-
         fees.validate();
 
         for (fee_receiver, _) in fees.receivers.iter() {
             match fee_receiver {
-                FeeReceiver::User(user_id) => {
+                FeeReceiver::Account(account_id) => {
                     self.fees_collected_by_users
-                        .entry((user_id.clone(), assets.0.clone()))
+                        .entry((account_id.clone(), assets.0.clone()))
                         .or_default();
                     self.fees_collected_by_users
-                        .entry((user_id.clone(), assets.1.clone()))
+                        .entry((account_id.clone(), assets.1.clone()))
                         .or_default();
                 }
             }
@@ -341,45 +335,39 @@ impl XykDex {
         self.fees_collected_by_users.flush();
 
         let storage_usage_before = near_sdk::env::storage_usage();
-        let old_pool_with_same_id = self.pools.insert(
-            pool_id,
-            if is_public {
-                Pool::Public {
-                    assets: (
-                        AssetWithBalance {
-                            asset_id: assets.0.clone(),
-                            balance: U128(0),
-                        },
-                        AssetWithBalance {
-                            asset_id: assets.1.clone(),
-                            balance: U128(0),
-                        },
-                    ),
-                    fees: fees.clone(),
-                    user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                    total_shares: None,
-                }
-            } else {
-                Pool::Private {
-                    assets: (
-                        AssetWithBalance {
-                            asset_id: assets.0.clone(),
-                            balance: U128(0),
-                        },
-                        AssetWithBalance {
-                            asset_id: assets.1.clone(),
-                            balance: U128(0),
-                        },
-                    ),
-                    fees: fees.clone(),
-                    owner_id: near_sdk::env::predecessor_account_id(),
-                }
-            },
-        );
-        expect!(
-            old_pool_with_same_id.is_none(),
-            "Pool with same id somehow already exists"
-        );
+        let pool_id = self.pools.len();
+        self.pools.push(if is_public {
+            Pool::Public {
+                assets: (
+                    AssetWithBalance {
+                        asset_id: assets.0.clone(),
+                        balance: U128(0),
+                    },
+                    AssetWithBalance {
+                        asset_id: assets.1.clone(),
+                        balance: U128(0),
+                    },
+                ),
+                fees: fees.clone(),
+                user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
+                total_shares: None,
+            }
+        } else {
+            Pool::Private {
+                assets: (
+                    AssetWithBalance {
+                        asset_id: assets.0.clone(),
+                        balance: U128(0),
+                    },
+                    AssetWithBalance {
+                        asset_id: assets.1.clone(),
+                        balance: U128(0),
+                    },
+                ),
+                fees: fees.clone(),
+                owner_id: near_sdk::env::predecessor_account_id(),
+            }
+        });
         self.pools.flush();
 
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -461,7 +449,7 @@ impl XykDex {
         let Ok(RegisterLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
         let Pool::Public { user_shares, .. } = pool else {
@@ -523,7 +511,7 @@ impl XykDex {
         let Ok(AddLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
 
@@ -741,7 +729,7 @@ impl XykDex {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
-        let Some(pool) = self.pools.get_mut(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
 
@@ -893,7 +881,7 @@ impl XykDex {
         let Ok(EditFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(&pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
         let (assets, pool_fees) = match pool {
@@ -917,12 +905,12 @@ impl XykDex {
         let storage_usage_before = near_sdk::env::storage_usage();
         for (fee_receiver, _) in fees.receivers.iter() {
             match fee_receiver {
-                FeeReceiver::User(user_id) => {
+                FeeReceiver::Account(account_id) => {
                     self.fees_collected_by_users
-                        .entry((user_id.clone(), assets.0.asset_id.clone()))
+                        .entry((account_id.clone(), assets.0.asset_id.clone()))
                         .or_default();
                     self.fees_collected_by_users
-                        .entry((user_id.clone(), assets.1.asset_id.clone()))
+                        .entry((account_id.clone(), assets.1.asset_id.clone()))
                         .or_default();
                 }
             }
@@ -1023,7 +1011,21 @@ impl XykDex {
 
     #[result_serializer(borsh)]
     pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<PoolView> {
-        self.pools.get(&pool_id).map(|pool| pool.into())
+        self.pools.get(pool_id).map(|pool| pool.into())
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_pools(
+        &self,
+        #[serializer(borsh)] start_index: u64,
+        #[serializer(borsh)] limit: u64,
+    ) -> Vec<PoolView> {
+        self.pools
+            .iter()
+            .skip(start_index as usize)
+            .take(limit as usize)
+            .map(|pool| pool.into())
+            .collect()
     }
 
     #[result_serializer(borsh)]
@@ -1032,7 +1034,7 @@ impl XykDex {
         #[serializer(borsh)] pool_id: PoolId,
         #[serializer(borsh)] account_id: AccountId,
     ) -> Option<U128> {
-        let pool = self.pools.get(&pool_id)?;
+        let pool = self.pools.get(pool_id)?;
         match pool {
             Pool::Public { user_shares, .. } => user_shares
                 .get(&account_id)
@@ -1056,6 +1058,11 @@ impl XykDex {
                     .map(|balance| (asset_id, balance))
             })
             .collect()
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_pool_count(&self) -> PoolId {
+        self.pools.len()
     }
 }
 
@@ -1154,7 +1161,7 @@ impl FeeConfiguration {
 #[near(serializers=[borsh, json])]
 #[derive(PartialEq, Clone)]
 pub enum FeeReceiver {
-    User(AccountId),
+    Account(AccountId),
     // Pool, // unimplemented
 }
 

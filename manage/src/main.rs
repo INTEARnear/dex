@@ -726,7 +726,7 @@ struct AssetWithBalance {
     balance: U128,
 }
 
-type XykPoolId = u64;
+type XykPoolId = u32;
 
 async fn xyk_fetch_pool(
     dex_contract_id: AccountId,
