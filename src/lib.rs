@@ -438,4 +438,21 @@ impl DexEngine {
     ) -> (U128, U128) {
         self.internal_simulate_swap_simple(dex_id, message, asset_in, asset_out, amount, referrer)
     }
+
+    pub fn are_assets_registered(
+        &self,
+        asset_ids: Vec<AssetId>,
+        r#for: Option<AccountOrDexId>,
+    ) -> bool {
+        match r#for {
+            Some(AccountOrDexId::Account(account)) => asset_ids.into_iter().all(|asset_id| {
+                self.user_balances
+                    .contains_key(&(account.clone(), asset_id))
+            }),
+            Some(AccountOrDexId::Dex(dex_id)) => asset_ids
+                .into_iter()
+                .all(|asset_id| self.dex_balances.contains_key(&(dex_id.clone(), asset_id))),
+            None => false,
+        }
+    }
 }

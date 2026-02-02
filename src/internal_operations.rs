@@ -705,7 +705,8 @@ impl DexEngine {
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
         near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
         let mut last_output = None;
-        for operation in operations {
+        for (operation_index, operation) in operations.into_iter().enumerate() {
+            near_sdk::env::log_str(&format!("Executing operation {operation_index}"));
             match operation {
                 Operation::RegisterAssets { asset_ids, r#for } => {
                     if !fully_authorized {
