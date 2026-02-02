@@ -174,6 +174,9 @@ enum XykAction {
         /// Withdraw the output asset after the swap
         #[arg(long)]
         withdraw: bool,
+        /// Deposit the input asset before the swap (implies --withdraw)
+        #[arg(long)]
+        deposit: bool,
     },
 }
 
@@ -260,6 +263,154 @@ fn network() -> NetworkConfig {
         rpc_endpoints: vec![RPCEndpoint::new("https://rpc.intea.rs".parse().unwrap())],
         ..NetworkConfig::mainnet()
     }
+}
+
+async fn execute_operations_with_deposit(
+    dex_contract_id: AccountId,
+    operations: Vec<Operation>,
+    deposit: Option<(AssetId, u128)>,
+    account_id: AccountId,
+    account_signer: Arc<Signer>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match deposit {
+        Some((asset_id, amount)) => match asset_id {
+            AssetId::Near => {
+                let result = Contract(dex_contract_id)
+                    .call_function("deposit_near", json!({ "operations": operations }))
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(amount))
+                    .with_signer(account_id, account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!(
+                    "Deposit + operations executed. Result: {:?}",
+                    result.outcome()
+                );
+            }
+            AssetId::Nep141(token_contract_id) => {
+                let _ = Contract(token_contract_id.clone())
+                    .call_function(
+                        "storage_deposit",
+                        json!({
+                            "account_id": dex_contract_id,
+                        }),
+                    )
+                    .transaction()
+                    .gas(NearGas::from_tgas(10))
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), Arc::clone(&account_signer))
+                    .send_to(&network())
+                    .await;
+                let result = Contract(token_contract_id)
+                    .call_function(
+                        "ft_transfer_call",
+                        json!({
+                            "receiver_id": dex_contract_id,
+                            "amount": U128(amount),
+                            "msg": serde_json::to_string(&operations).unwrap(),
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id, account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!(
+                    "Deposit + operations executed. Result: {:?}",
+                    result.outcome()
+                );
+            }
+            AssetId::Nep171(nft_contract_id, token_id) => {
+                let _ = Contract(nft_contract_id.clone())
+                    .call_function(
+                        "storage_deposit",
+                        json!({
+                            "account_id": dex_contract_id,
+                        }),
+                    )
+                    .transaction()
+                    .gas(NearGas::from_tgas(10))
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), Arc::clone(&account_signer))
+                    .send_to(&network())
+                    .await;
+                let result = Contract(nft_contract_id)
+                    .call_function(
+                        "nft_transfer_call",
+                        json!({
+                            "receiver_id": dex_contract_id,
+                            "token_id": token_id,
+                            "msg": serde_json::to_string(&operations).unwrap(),
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id, account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!(
+                    "Deposit + operations executed. Result: {:?}",
+                    result.outcome()
+                );
+            }
+            AssetId::Nep245(mt_contract_id, token_id) => {
+                let _ = Contract(mt_contract_id.clone())
+                    .call_function(
+                        "storage_deposit",
+                        json!({
+                            "account_id": dex_contract_id,
+                        }),
+                    )
+                    .transaction()
+                    .gas(NearGas::from_tgas(10))
+                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .with_signer(account_id.clone(), Arc::clone(&account_signer))
+                    .send_to(&network())
+                    .await;
+                let result = Contract(mt_contract_id)
+                    .call_function(
+                        "mt_transfer_call",
+                        json!({
+                            "receiver_id": dex_contract_id,
+                            "token_id": token_id,
+                            "amount": U128(amount),
+                            "msg": serde_json::to_string(&operations).unwrap(),
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id, account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!(
+                    "Deposit + operations executed. Result: {:?}",
+                    result.outcome()
+                );
+            }
+        },
+        None => {
+            let result = Contract(dex_contract_id)
+                .call_function(
+                    "execute_operations",
+                    json!({
+                        "operations": operations,
+                        "referrer": null,
+                    }),
+                )
+                .transaction()
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .with_signer(account_id, account_signer)
+                .send_to(&network())
+                .await?;
+            println!("Operations executed. Result: {:?}", result.outcome());
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -844,6 +995,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 asset_in,
                 slippage,
                 withdraw,
+                deposit,
             } => {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
@@ -912,6 +1064,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None
                 };
 
+                // --deposit implies --withdraw
+                let should_withdraw = withdraw || deposit;
+
                 let mut operations = vec![Operation::SwapSimple {
                     dex_id: dex_id.clone(),
                     message: BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
@@ -921,7 +1076,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     constraint,
                 }];
 
-                if withdraw {
+                if should_withdraw {
                     operations.push(Operation::Withdraw {
                         asset_id: asset_out.clone(),
                         amount: WithdrawAmount::PreviousSwapOutput,
@@ -930,21 +1085,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
 
-                let result = Contract(config.dex_contract_id.clone())
-                    .call_function(
-                        "execute_operations",
-                        json!({
-                            "operations": operations,
-                            "referrer": null,
-                        }),
-                    )
-                    .transaction()
-                    .max_gas()
-                    .deposit(NearToken::from_yoctonear(1))
-                    .with_signer(account_id.clone(), account_signer)
-                    .send_to(&network())
-                    .await?;
-                println!("Swap executed. Result: {:?}", result.outcome());
+                let deposit_asset = if deposit {
+                    Some((asset_in.clone(), amount))
+                } else {
+                    None
+                };
+
+                execute_operations_with_deposit(
+                    config.dex_contract_id.clone(),
+                    operations,
+                    deposit_asset,
+                    account_id.clone(),
+                    account_signer,
+                )
+                .await?;
             }
         },
         Commands::RegisterAssets {
@@ -977,114 +1131,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let account_signer =
                 Signer::from_keystore_with_search_for_keys(account_id.clone(), &network()).await?;
-            match asset_id {
-                AssetId::Near => {
-                    let result = Contract(config.dex_contract_id.clone())
-                        .call_function("deposit_near", json!({}))
-                        .transaction()
-                        .max_gas()
-                        .deposit(NearToken::from_yoctonear(amount))
-                        .with_signer(account_id.clone(), account_signer)
-                        .send_to(&network())
-                        .await?;
-                    println!("NEAR deposited. Result: {:?}", result.outcome());
-                }
-                AssetId::Nep141(token_contract_id) => {
-                    let _ = Contract(token_contract_id.clone())
-                        .call_function(
-                            "storage_deposit",
-                            json!({
-                                "account_id": config.dex_contract_id,
-                            }),
-                        )
-                        .transaction()
-                        .gas(NearGas::from_tgas(10))
-                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
-                        .with_signer(account_id.clone(), account_signer.clone())
-                        .send_to(&network())
-                        .await;
-                    let result = Contract(token_contract_id.clone())
-                        .call_function(
-                            "ft_transfer_call",
-                            json!({
-                                "receiver_id": config.dex_contract_id,
-                                "amount": U128(amount),
-                                "msg": "",
-                            }),
-                        )
-                        .transaction()
-                        .max_gas()
-                        .deposit(NearToken::from_yoctonear(1))
-                        .with_signer(account_id.clone(), account_signer)
-                        .send_to(&network())
-                        .await?;
-                    println!("FT deposited. Result: {:?}", result.outcome());
-                }
-                AssetId::Nep171(nft_contract_id, token_id) => {
-                    assert_eq!(amount, 1, "NFTs can only be deposited in whole numbers");
-                    let _ = Contract(nft_contract_id.clone())
-                        .call_function(
-                            "storage_deposit",
-                            json!({
-                                "account_id": config.dex_contract_id,
-                            }),
-                        )
-                        .transaction()
-                        .gas(NearGas::from_tgas(10))
-                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
-                        .with_signer(account_id.clone(), account_signer.clone())
-                        .send_to(&network())
-                        .await;
-                    let result = Contract(nft_contract_id.clone())
-                        .call_function(
-                            "nft_transfer_call",
-                            json!({
-                                "receiver_id": config.dex_contract_id,
-                                "token_id": token_id,
-                                "msg": "",
-                            }),
-                        )
-                        .transaction()
-                        .max_gas()
-                        .deposit(NearToken::from_yoctonear(1))
-                        .with_signer(account_id.clone(), account_signer)
-                        .send_to(&network())
-                        .await?;
-                    println!("NFT deposited. Result: {:?}", result.outcome());
-                }
-                AssetId::Nep245(mt_contract_id, token_id) => {
-                    let _ = Contract(mt_contract_id.clone())
-                        .call_function(
-                            "storage_deposit",
-                            json!({
-                                "account_id": config.dex_contract_id,
-                            }),
-                        )
-                        .transaction()
-                        .gas(NearGas::from_tgas(10))
-                        .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
-                        .with_signer(account_id.clone(), account_signer.clone())
-                        .send_to(&network())
-                        .await;
-                    let result = Contract(mt_contract_id.clone())
-                        .call_function(
-                            "mt_transfer_call",
-                            json!({
-                                "receiver_id": config.dex_contract_id,
-                                "token_id": token_id,
-                                "amount": U128(amount),
-                                "msg": "",
-                            }),
-                        )
-                        .transaction()
-                        .max_gas()
-                        .deposit(NearToken::from_yoctonear(1))
-                        .with_signer(account_id.clone(), account_signer)
-                        .send_to(&network())
-                        .await?;
-                    println!("MT deposited. Result: {:?}", result.outcome());
-                }
-            }
+            execute_operations_with_deposit(
+                config.dex_contract_id.clone(),
+                vec![],
+                Some((asset_id, amount)),
+                account_id,
+                account_signer,
+            )
+            .await?;
         }
     }
 
