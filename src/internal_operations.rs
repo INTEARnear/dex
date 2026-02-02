@@ -96,7 +96,8 @@ pub enum Operation {
 }
 
 #[near(serializers=[json])]
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
 pub enum WithdrawAmount {
     Full { at_least: Option<U128> },
     Exact(U128),

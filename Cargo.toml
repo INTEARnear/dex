@@ -27,7 +27,7 @@ container_build_command = [
 near-sdk = { version = "5.23", default-features = false, features = [
     "unstable",
 ] }
-wasmi = { version = "1.0.4", default-features = false }
+wasmi = { version = "1.0.8", default-features = false }
 intear-dex-types = { path = "./intear-dex-types", features = ["json"] }
 near-contract-standards = "5.23"
 
