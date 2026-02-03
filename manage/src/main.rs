@@ -276,7 +276,16 @@ async fn execute_operations_with_deposit(
         Some((asset_id, amount)) => match asset_id {
             AssetId::Near => {
                 let result = Contract(dex_contract_id)
-                    .call_function("deposit_near", json!({ "operations": operations }))
+                    .call_function(
+                        "deposit_near",
+                        if operations.is_empty() {
+                            json!({})
+                        } else {
+                            json!({
+                                "operations": operations,
+                            })
+                        },
+                    )
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(amount))
@@ -308,7 +317,11 @@ async fn execute_operations_with_deposit(
                         json!({
                             "receiver_id": dex_contract_id,
                             "amount": U128(amount),
-                            "msg": serde_json::to_string(&operations).unwrap(),
+                            "msg": if operations.is_empty() {
+                                "".to_string()
+                            } else {
+                                serde_json::to_string(&operations).unwrap()
+                            },
                         }),
                     )
                     .transaction()
@@ -342,7 +355,11 @@ async fn execute_operations_with_deposit(
                         json!({
                             "receiver_id": dex_contract_id,
                             "token_id": token_id,
-                            "msg": serde_json::to_string(&operations).unwrap(),
+                            "msg": if operations.is_empty() {
+                                "".to_string()
+                            } else {
+                                serde_json::to_string(&operations).unwrap()
+                            },
                         }),
                     )
                     .transaction()
@@ -377,7 +394,10 @@ async fn execute_operations_with_deposit(
                             "receiver_id": dex_contract_id,
                             "token_id": token_id,
                             "amount": U128(amount),
-                            "msg": serde_json::to_string(&operations).unwrap(),
+                            "msg": if operations.is_empty() {
+                                "".to_string()
+                            } else {
+                                serde_json::to_string(&operations).unwrap() },
                         }),
                     )
                     .transaction()
