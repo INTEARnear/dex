@@ -163,10 +163,15 @@ impl CallType<'_> {
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
-            } => ephemeral_storage_updates
-                .get(&key)
-                .and_then(|value| value.as_ref())
-                .or_else(|| dex_storage.get(&(dex_id, key))),
+            } => {
+                if let Some(value) = ephemeral_storage_updates.get(&key) {
+                    value.as_ref()
+                } else if let Some(value) = dex_storage.get(&(dex_id, key)) {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
             CallType::View { dex_storage } => dex_storage.get(&(dex_id, key)),
             CallType::Call {
                 dex_storage_mut, ..
@@ -183,8 +188,11 @@ impl CallType<'_> {
                 dex_storage,
                 ephemeral_storage_updates,
             } => {
-                ephemeral_storage_updates.contains_key(&key)
-                    || dex_storage.contains_key(&(dex_id, key))
+                if let Some(value) = ephemeral_storage_updates.get(&key) {
+                    value.is_some()
+                } else {
+                    dex_storage.contains_key(&(dex_id, key))
+                }
             }
             CallType::View { dex_storage } => dex_storage.contains_key(&(dex_id, key)),
             CallType::Call {
@@ -214,6 +222,7 @@ impl CallType<'_> {
                     ephemeral_storage_updates.insert(key, Some(value));
                     Ok(Some(prev_value.clone()))
                 } else {
+                    ephemeral_storage_updates.insert(key, Some(value));
                     Ok(None)
                 }
             }
@@ -237,13 +246,10 @@ impl CallType<'_> {
                 dex_storage,
                 ephemeral_storage_updates,
             } => {
-                if let Some(prev_value) = ephemeral_storage_updates.remove(&key) {
+                if let Some(prev_value) = ephemeral_storage_updates.insert(key.clone(), None) {
                     Ok(prev_value)
-                } else if let Some(prev_value) = dex_storage.get(&(dex_id, key.clone())) {
-                    ephemeral_storage_updates.insert(key, None);
-                    Ok(Some(prev_value.clone()))
                 } else {
-                    Ok(None)
+                    Ok(dex_storage.get(&(dex_id, key.clone())).cloned())
                 }
             }
             CallType::View { .. } => Err(wasmi::Error::new("Cannot modify data in view-only mode")),

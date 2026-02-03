@@ -716,10 +716,12 @@ impl XykDex {
         struct RemoveLiquidityArgs {
             pool_id: PoolId,
             shares_to_remove: Option<SharesBalance>,
+            min_assets_received: Option<(U128, U128)>,
         }
         let Ok(RemoveLiquidityArgs {
             pool_id,
             shares_to_remove,
+            min_assets_received,
         }) = near_sdk::borsh::from_slice(&args)
         else {
             near_sdk::env::panic_str("Invalid args");
@@ -742,6 +744,10 @@ impl XykDex {
                 expect!(
                     shares_to_remove.is_none(),
                     "Shares must be None for private pools"
+                );
+                expect!(
+                    min_assets_received.is_none(),
+                    "Min assets received must not be specified for private pools"
                 );
                 let amount_0 = assets.0.balance.0;
                 let amount_1 = assets.1.balance.0;
@@ -801,6 +807,12 @@ impl XykDex {
                         .expect("Somehow not enough balance for asset 2 withdrawal");
                     (amount_0, amount_1)
                 };
+                if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
+                    expect!(
+                        amount_0 >= min_asset_0_received.0 && amount_1 >= min_asset_1_received.0,
+                        "Slippage error"
+                    );
+                }
                 *total_shares = NonZeroU128::new(
                     pool_total_shares
                         .get()
