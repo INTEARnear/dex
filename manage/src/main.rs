@@ -7,7 +7,7 @@ use near_api::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::json;
-use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fmt::Display, num::NonZeroU128, str::FromStr, sync::Arc};
 use tokio::process::Command;
 
 #[derive(Parser)]
@@ -772,13 +772,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 #[derive(BorshSerialize)]
                 struct AddLiquidityArgs {
                     pool_id: XykPoolId,
+                    min_shares_received: Option<NonZeroU128>,
                 }
 
                 let mut operations = vec![json!({
                     "DexCall": {
                         "dex_id": dex_id,
                         "method": "add_liquidity",
-                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap()),
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
                         "attached_assets": HashMap::<AssetId, U128>::from_iter([
                             (asset_0, U128(amount_0)),
                             (asset_1, U128(amount_1)),
@@ -822,7 +823,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 #[derive(BorshSerialize)]
                 struct RemoveLiquidityArgs {
                     pool_id: XykPoolId,
-                    shares_to_remove: Option<std::num::NonZeroU128>,
+                    shares_to_remove: Option<NonZeroU128>,
+                    min_assets_received: Option<(U128, U128)>,
                 }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
@@ -832,7 +834,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "method": "remove_liquidity",
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&RemoveLiquidityArgs {
                                     pool_id,
-                                    shares_to_remove: shares.and_then(std::num::NonZeroU128::new),
+                                    shares_to_remove: shares.and_then(NonZeroU128::new),
+                                    min_assets_received: None,
                                 }).unwrap()),
                                 "attached_assets": {},
                             }

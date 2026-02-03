@@ -28,15 +28,19 @@ struct RegisterLiquidityArgs {
     pool_id: PoolId,
 }
 
+type SharesBalance = U128;
+
 #[near(serializers=[borsh])]
 struct AddLiquidityArgs {
     pool_id: PoolId,
+    min_shares_received: Option<SharesBalance>,
 }
 
 #[near(serializers=[borsh])]
 struct RemoveLiquidityArgs {
     pool_id: PoolId,
-    shares_to_remove: Option<std::num::NonZeroU128>,
+    shares_to_remove: Option<SharesBalance>,
+    min_assets_received: Option<(U128, U128)>,
 }
 
 #[near(serializers=[borsh])]
@@ -82,7 +86,7 @@ enum PoolView {
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: FeeConfiguration,
-        total_shares: Option<U128>,
+        total_shares: Option<SharesBalance>,
     },
 }
 
@@ -227,7 +231,7 @@ async fn test_xyk_private_flow() {
                 Operation::DexCall {
                     dex_id: dex_id.clone(),
                     method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
                         (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
                         (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
@@ -336,6 +340,7 @@ async fn test_xyk_private_flow() {
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
                 pool_id: first_pool_id,
                 shares_to_remove: None,
+                min_assets_received: None,
             }).unwrap()),
             "attached_assets": {},
         }))
@@ -501,7 +506,7 @@ async fn test_xyk_public_flow() {
                 Operation::DexCall {
                     dex_id: dex_id.clone(),
                     method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
                         (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1_deployer)),
                         (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2_deployer)),
@@ -596,7 +601,7 @@ async fn test_xyk_public_flow() {
                 Operation::DexCall {
                     dex_id: dex_id.clone(),
                     method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
                         (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1_user1)),
                         (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2_user1)),
@@ -725,6 +730,7 @@ async fn test_xyk_public_flow() {
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
                 pool_id: first_pool_id,
                 shares_to_remove: None,
+                min_assets_received: None,
             }).unwrap()),
             "attached_assets": {},
         }))
@@ -743,6 +749,7 @@ async fn test_xyk_public_flow() {
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
                 pool_id: first_pool_id,
                 shares_to_remove: None,
+                min_assets_received: None,
             }).unwrap()),
             "attached_assets": {},
         }))
@@ -999,7 +1006,7 @@ async fn test_xyk_multi_user_liquidity() {
                     Operation::DexCall {
                         dex_id: dex_id.clone(),
                         method: "add_liquidity".to_string(),
-                        args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                        args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                         attached_assets: HashMap::from_iter([
                             (AssetId::Nep141(ft1.id().clone()), U128(ft1_amount)),
                             (AssetId::Nep141(ft2.id().clone()), U128(ft2_amount)),
@@ -1036,6 +1043,7 @@ async fn test_xyk_multi_user_liquidity() {
                 "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
                     pool_id: first_pool_id,
                     shares_to_remove: None,
+                    min_assets_received: None,
                 }).unwrap()),
                 "attached_assets": {},
             }))
@@ -1201,7 +1209,7 @@ async fn test_xyk_fees() {
                 Operation::DexCall {
                     dex_id: dex_id.clone(),
                     method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
                         (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
                         (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
@@ -1409,7 +1417,7 @@ async fn test_xyk_exact_output() {
                 Operation::DexCall {
                     dex_id: dex_id.clone(),
                     method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id }).unwrap()),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
                         (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
                         (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
