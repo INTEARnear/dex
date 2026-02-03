@@ -534,8 +534,7 @@ pub fn epoch_height(_caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error
 
 pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::Error> {
     caller.data_mut().call_type.dex_storage_flush();
-    let storage_usage_now = near_sdk::env::storage_usage();
-    let storage_usage_during_transaction = i64::try_from(storage_usage_now)
+    let storage_usage_during_transaction = i64::try_from(near_sdk::env::storage_usage())
         .map_err(|err| wasmi::Error::new(format!("Storage usage overflow: {err}")))?
         .checked_sub(
             i64::try_from(caller.data().dex_storage_usage_before_transaction)

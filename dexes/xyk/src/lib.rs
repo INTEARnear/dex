@@ -320,6 +320,7 @@ impl XykDex {
 
         fees.validate();
 
+        let storage_usage_before = near_sdk::env::storage_usage();
         for (fee_receiver, _) in fees.receivers.iter() {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
@@ -334,7 +335,6 @@ impl XykDex {
         }
         self.fees_collected_by_users.flush();
 
-        let storage_usage_before = near_sdk::env::storage_usage();
         let pool_id = self.pools.len();
         self.pools.push(if is_public {
             Pool::Public {
@@ -496,8 +496,13 @@ impl XykDex {
         #[near(serializers=[borsh])]
         struct AddLiquidityArgs {
             pool_id: PoolId,
+            min_shares_received: Option<SharesBalance>,
         }
-        let Ok(AddLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
+        let Ok(AddLiquidityArgs {
+            pool_id,
+            min_shares_received,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
             near_sdk::env::panic_str("Invalid args");
         };
         let Some(pool) = self.pools.get_mut(pool_id) else {
@@ -513,6 +518,10 @@ impl XykDex {
                 expect!(
                     *owner_id == near_sdk::env::predecessor_account_id(),
                     "Only pool owner can add liquidity"
+                );
+                expect!(
+                    min_shares_received.is_none(),
+                    "Min shares received must not be specified for private pools"
                 );
                 let asset_0_amount = attached_assets
                     .remove(&assets.0.asset_id)
@@ -566,6 +575,10 @@ impl XykDex {
                 let mut asset_withdraw_requests = Vec::new();
                 match total_shares {
                     None => {
+                        expect!(
+                            min_shares_received.is_none(),
+                            "Min shares received must not be specified for new pools"
+                        );
                         assets.0.balance.0 = assets
                             .0
                             .balance
@@ -609,6 +622,9 @@ impl XykDex {
                         ))
                         .expect("Can't mint zero shares");
                         let shares_to_mint = shares_from_asset_0.min(shares_from_asset_1);
+                        if let Some(min_shares_received) = min_shares_received {
+                            expect!(shares_to_mint >= min_shares_received, "Slippage error");
+                        }
 
                         let used_asset_0 =
                             shares_to_tokens(shares_to_mint, *total_shares, pool_balance_0)
@@ -1114,7 +1130,7 @@ const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
 
 impl FeeConfiguration {
     fn validate(&self) {
-        expect!(self.receivers.len() <= 100, "Too many fee receivers");
+        expect!(self.receivers.len() <= 42, "Too many fee receivers");
         expect!(
             self.receivers
                 .iter()

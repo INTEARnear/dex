@@ -934,6 +934,12 @@ impl DexEngine {
                             .0
                             .checked_sub(amount.0)
                             .expect("Not enough near balance in anonymous assets");
+                    } else {
+                        self.internal_decrease_assets(
+                            AccountOrDexId::Account(by.clone()),
+                            AssetId::Near,
+                            amount,
+                        );
                     }
                     match r#for {
                         Some(AccountOrDexId::Account(account)) => {

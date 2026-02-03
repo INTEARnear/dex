@@ -224,7 +224,7 @@ impl<'de> Deserialize<'de> for DexId {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::from_str(&s).unwrap())
+        Self::from_str(&s).map_err(near_sdk::serde::de::Error::custom)
     }
 }
 

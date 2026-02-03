@@ -236,6 +236,7 @@ impl DexEngine {
             Some(near_sdk::serde_json::from_str(&msg).expect("Failed to parse operations"))
         };
 
+        let mut attached_assets = HashMap::new();
         for (token_id, amount) in token_ids.iter().zip(amounts.iter()) {
             self.total_in_custody
                 .entry(AssetId::Nep245(contract_id.clone(), token_id.clone()))
@@ -254,23 +255,26 @@ impl DexEngine {
                         "Failed to deposit assets to contract tracked balance: asset not registered"
                     )
                 });
+            attached_assets
+                .entry(AssetId::Nep245(contract_id.clone(), token_id.clone()))
+                .and_modify(|b: &mut U128| {
+                    b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| {
+                        panic!(
+                            "Balance overflow for contract and asset Nep245: {} + {} > {}",
+                            b.0,
+                            amount.0,
+                            u128::MAX
+                        )
+                    })
+                })
+                .or_insert(*amount);
         }
 
         if let Some(message) = message {
             self.internal_execute_operations(
                 message.operations(),
                 sender_id,
-                Some(HashMap::from_iter(
-                    token_ids
-                        .iter()
-                        .zip(amounts.iter())
-                        .map(|(token_id, amount)| {
-                            (
-                                AssetId::Nep245(contract_id.clone(), token_id.clone()),
-                                *amount,
-                            )
-                        }),
-                )),
+                Some(attached_assets),
                 message.referrer(),
             );
         } else {

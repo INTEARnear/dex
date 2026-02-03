@@ -397,6 +397,25 @@ impl DexEngine {
                 AssetId::Near,
                 U128(near_sdk::env::attached_deposit().as_yoctonear()),
             );
+            self.total_in_custody
+                .entry(AssetId::Near)
+                .and_modify(|b| {
+                    b.0 =
+                        b.0.checked_add(near_sdk::env::attached_deposit().as_yoctonear())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "Balance overflow for contract and asset Near: {} + {} > {}",
+                                    b.0,
+                                    near_sdk::env::attached_deposit().as_yoctonear(),
+                                    u128::MAX
+                                )
+                            });
+                })
+                .or_insert_with(|| {
+                    panic!(
+                        "Failed to deposit assets to contract tracked balance: asset not registered"
+                    )
+                });
         }
         self.internal_execute_operations(
             operations,
