@@ -139,9 +139,10 @@ impl Dex for XykDex {
             asset_in: &AssetId,
             fees: &FeeConfiguration,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
-        ) -> (u128, Vec<(FeeReceiver, U128)>) {
+        ) -> (u128, u128, Vec<(FeeReceiver, U128)>) {
             let mut fees_breakdown = Vec::new();
             let mut total_fees = 0u128;
+            let mut pool_fee = 0u128;
             for (receiver, fee_fraction) in fees.receivers.iter() {
                 // MAX_FEE_FRACTION is constant, so no zero division; u128 * u128 can't
                 // overflow u256
@@ -161,10 +162,14 @@ impl Dex for XykDex {
                             })
                             .or_insert(U128(fee_amount));
                     }
+                    FeeReceiver::Pool => {
+                        pool_fee = pool_fee.checked_add(fee_amount).expect("Overflow");
+                    }
                 }
             }
             (
                 amount_in.checked_sub(total_fees).expect("Fee exceeds 100%"),
+                pool_fee,
                 fees_breakdown,
             )
         }
@@ -177,7 +182,7 @@ impl Dex for XykDex {
                 } else {
                     (&mut assets.1.balance.0, &mut assets.0.balance.0)
                 };
-                let (amount_in_after_fees, fees_breakdown) = collect_fees(
+                let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     exact_amount_in.0,
                     &request.asset_in,
                     fees,
@@ -191,6 +196,8 @@ impl Dex for XykDex {
                 );
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
+                    .expect("Overflow")
+                    .checked_add(pool_fee)
                     .expect("Overflow");
                 *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
                 (
@@ -241,7 +248,7 @@ impl Dex for XykDex {
                         + u128_to_u256(fee_denominator_minus_one))
                         / u128_to_u256(fee_denominator),
                 );
-                let (amount_in_after_fees, fees_breakdown) = collect_fees(
+                let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     amount_in,
                     &request.asset_in,
                     fees,
@@ -249,6 +256,8 @@ impl Dex for XykDex {
                 );
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
+                    .expect("Overflow")
+                    .checked_add(pool_fee)
                     .expect("Overflow");
                 *out_balance = out_balance
                     .checked_sub(exact_amount_out.0)
@@ -331,6 +340,7 @@ impl XykDex {
                         .entry((account_id.clone(), assets.1.clone()))
                         .or_default();
                 }
+                FeeReceiver::Pool => {}
             }
         }
         self.fees_collected_by_users.flush();
@@ -913,6 +923,7 @@ impl XykDex {
                         .entry((account_id.clone(), assets.1.asset_id.clone()))
                         .or_default();
                 }
+                FeeReceiver::Pool => {}
             }
         }
         self.fees_collected_by_users.flush();
@@ -1147,11 +1158,12 @@ impl FeeConfiguration {
             self.receivers
                 .iter()
                 .all(|(_, fee)| *fee < MAX_FEE_FRACTION),
-            "Fee must be less than 100% per receiver"
+            "Fee must be less than {MAX_FEE_FRACTION} per receiver"
         );
         expect!(
-            self.receivers.iter().map(|(_, fee)| *fee).sum::<u32>() < MAX_FEE_FRACTION,
-            "Fees must add up to less than 100%"
+            self.receivers.iter().map(|(_, fee)| *fee).sum::<u32>() < MAX_FEE_FRACTION / 2,
+            "Fees must add up to less than 50% ({})",
+            MAX_FEE_FRACTION / 2,
         );
     }
 }
@@ -1160,7 +1172,7 @@ impl FeeConfiguration {
 #[derive(PartialEq, Clone)]
 pub enum FeeReceiver {
     Account(AccountId),
-    // Pool, // unimplemented
+    Pool,
 }
 
 #[near(serializers=[borsh, json])]
