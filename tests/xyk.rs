@@ -1116,6 +1116,7 @@ async fn test_xyk_fees() {
     let first_pool_id = 0u32;
 
     let fee_fraction = 10_000u32; // 1%
+    let protocol_fee_fraction = 1_000u32; // 0.1%
 
     let wasms = get_compiled_wasms().await;
 
@@ -1271,9 +1272,10 @@ async fn test_xyk_fees() {
 
     // fee = swap_amount_ft1 * fee_fraction / 1_000_000 = 100_000_000 * 10_000 / 1_000_000 = 1_000_000
     let fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
-    let amount_after_fee = swap_amount_ft1 - fee_amount;
-    // out = (99_000_000 * 2_000_000_000) / (1_000_000_000 + 99_000_000) = 180_163_785
-    let expected_ft2_out = 180_163_785;
+    let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
+    let amount_after_fee = swap_amount_ft1 - fee_amount - protocol_fee_amount;
+    // out = (98_900_000 * 2_000_000_000) / (1_000_000_000 + 98_900_000) = 179_998_179
+    let expected_ft2_out = 179_998_179;
 
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
         .await
@@ -1286,7 +1288,7 @@ async fn test_xyk_fees() {
         PoolView::Private { assets, fees, .. } => {
             assert_eq!(assets.0.balance.0, add_liquidity_ft1 + amount_after_fee);
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
-            assert_eq!(fees.receivers.len(), 1);
+            assert_eq!(fees.receivers.len(), 2);
         }
         PoolView::Public { .. } => panic!("Expected private pool"),
     }
@@ -1541,6 +1543,7 @@ async fn test_xyk_pool_fees() {
     let first_pool_id = 0u32;
 
     let fee_fraction = 10_000u32; // 1%
+    let protocol_fee_fraction = 1_000u32; // 0.1%
 
     let wasms = get_compiled_wasms().await;
 
@@ -1720,10 +1723,11 @@ async fn test_xyk_pool_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // out = (99_000_000 * 2_000_000_000) / (1_000_000_000 + 99_000_000) = 180_163_785
-    let expected_ft2_out = 180_163_785u128;
+    // out = (98_900_000 * 2_000_000_000) / (1_000_000_000 + 98_900_000) = 179_998_179
+    let expected_ft2_out = 179_998_179u128;
+    let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
 
-    let pool_ft1_after_swap = add_liquidity_ft1 + swap_amount_ft1;
+    let pool_ft1_after_swap = add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount;
     let pool_ft2_after_swap = add_liquidity_ft2 - expected_ft2_out;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
@@ -1795,5 +1799,8 @@ async fn test_xyk_pool_fees() {
     .await
     .unwrap();
 
-    assert_eq!(pool_ft1_after_swap, add_liquidity_ft1 + swap_amount_ft1);
+    assert_eq!(
+        pool_ft1_after_swap,
+        add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount
+    );
 }

@@ -2723,6 +2723,7 @@ async fn test_simulate_swap_simple() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "trader": user1.id().clone(),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),

@@ -460,6 +460,7 @@ impl DexEngine {
         &self,
         dex_id: DexId,
         message: Base64VecU8,
+        trader: AccountId,
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
@@ -478,6 +479,7 @@ impl DexEngine {
             &dex_id,
             CallType::TradeView {
                 dex_storage: &self.dex_storage,
+                trader,
                 ephemeral_storage_updates: HashMap::new(),
             },
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),

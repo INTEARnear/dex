@@ -22,6 +22,12 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
 
+const MAX_FEE_FRACTION: FeeFraction = 1000000;
+const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
+const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
+const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
+const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNT: &str = "user.intear.near";
+
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
@@ -221,7 +227,7 @@ impl Dex for XykDex {
                 let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     exact_amount_in.0,
                     &request.asset_in,
-                    fees,
+                    &fees.with_protocol_fee(Some(near_sdk::env::predecessor_account_id())),
                     &mut self.fees_collected_by_users,
                 );
                 // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
@@ -265,6 +271,7 @@ impl Dex for XykDex {
                     .saturating_add(&U256::ONE),
                 );
                 let total_fee_fraction = fees
+                    .with_protocol_fee(Some(near_sdk::env::predecessor_account_id()))
                     .receivers
                     .iter()
                     .map(|(_, fee)| *fee as u128)
@@ -287,7 +294,7 @@ impl Dex for XykDex {
                 let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     amount_in,
                     &request.asset_in,
-                    fees,
+                    &fees.with_protocol_fee(Some(near_sdk::env::predecessor_account_id())),
                     &mut self.fees_collected_by_users,
                 );
                 *in_balance = in_balance
@@ -366,9 +373,20 @@ impl XykDex {
         fees.validate();
 
         let storage_usage_before = near_sdk::env::storage_usage();
+        let protocol_fee_receiver: AccountId = PROTOCOL_FEE_RECEIVER.parse().unwrap();
+        self.fees_collected_by_users
+            .entry((protocol_fee_receiver.clone(), assets.0.clone()))
+            .or_default();
+        self.fees_collected_by_users
+            .entry((protocol_fee_receiver, assets.1.clone()))
+            .or_default();
         for (fee_receiver, _) in fees.receivers.iter() {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
+                    expect!(
+                        account_id != PROTOCOL_FEE_RECEIVER,
+                        "Protocol fee receiver can't be changed",
+                    );
                     self.fees_collected_by_users
                         .entry((account_id.clone(), assets.0.clone()))
                         .or_default();
@@ -1103,6 +1121,10 @@ impl XykDex {
         for (fee_receiver, _) in fees.receivers.iter() {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
+                    expect!(
+                        account_id != PROTOCOL_FEE_RECEIVER,
+                        "Protocol fee receiver can't be changed",
+                    );
                     self.fees_collected_by_users
                         .entry((account_id.clone(), assets.0.asset_id.clone()))
                         .or_default();
@@ -1308,7 +1330,7 @@ impl From<&Pool> for PoolView {
                 fees,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: fees.clone(),
+                fees: fees.with_protocol_fee(None),
                 owner_id: owner_id.clone(),
             },
             Pool::Public {
@@ -1318,7 +1340,7 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: fees.clone(),
+                fees: fees.with_protocol_fee(None),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
         }
@@ -1343,9 +1365,6 @@ pub struct FeeConfiguration {
 /// 100% = 1000000
 type FeeFraction = u32;
 
-const MAX_FEE_FRACTION: FeeFraction = 1000000;
-const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
-
 impl FeeConfiguration {
     fn validate(&self) {
         expect!(self.receivers.len() <= 42, "Too many fee receivers");
@@ -1360,6 +1379,33 @@ impl FeeConfiguration {
             "Fees must add up to less than 50% ({})",
             MAX_FEE_FRACTION / 2,
         );
+        expect!(
+            !self.receivers.iter().any(|(receiver, _)| matches!(
+                receiver,
+                FeeReceiver::Account(account_id) if account_id.as_str() == PROTOCOL_FEE_RECEIVER
+            )),
+            "Protocol fee receiver can't be set by users"
+        );
+    }
+
+    fn with_protocol_fee(&self, trader_account_id: Option<AccountId>) -> Self {
+        let mut receivers = self.receivers.clone();
+        let protocol_fee_bypass_parent_account = PROTOCOL_FEE_BYPASS_PARENT_ACCOUNT
+            .parse::<AccountId>()
+            .unwrap();
+        let mut protocol_fee = PROTOCOL_FEE;
+        if receivers.is_empty() {
+            protocol_fee = 0;
+        } else if let Some(trader_account_id) = trader_account_id {
+            if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account) {
+                protocol_fee = 0;
+            }
+        }
+        receivers.push((
+            FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
+            protocol_fee,
+        ));
+        Self { receivers }
     }
 }
 

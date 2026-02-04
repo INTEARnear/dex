@@ -997,6 +997,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             json!({
                                 "dex_id": dex_id,
                                 "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                "trader": "simulate.near",
                                 "asset_in": asset_in,
                                 "asset_out": asset_out,
                                 "amount": swap_amount,
@@ -1055,6 +1056,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 json!({
                                     "dex_id": dex_id,
                                     "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                    "trader": account_id,
                                     "asset_in": asset_in,
                                     "asset_out": asset_out,
                                     "amount": swap_amount,

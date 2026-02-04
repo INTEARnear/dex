@@ -140,6 +140,7 @@ enum CallType<'a> {
     },
     TradeView {
         dex_storage: &'a DexStorage,
+        trader: AccountId,
         ephemeral_storage_updates: HashMap<Vec<u8>, Option<Vec<u8>>>,
     },
     View {
@@ -162,6 +163,7 @@ impl CallType<'_> {
             } => dex_storage_mut.get(&(dex_id, key)),
             CallType::TradeView {
                 dex_storage,
+                trader: _,
                 ephemeral_storage_updates,
             } => {
                 if let Some(value) = ephemeral_storage_updates.get(&key) {
@@ -187,6 +189,7 @@ impl CallType<'_> {
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
+                ..
             } => {
                 if let Some(value) = ephemeral_storage_updates.get(&key) {
                     value.is_some()
@@ -214,6 +217,7 @@ impl CallType<'_> {
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
+                ..
             } => {
                 if let Some(prev_value) = ephemeral_storage_updates.get(&key).cloned() {
                     ephemeral_storage_updates.insert(key, Some(value));
@@ -245,6 +249,7 @@ impl CallType<'_> {
             CallType::TradeView {
                 dex_storage,
                 ephemeral_storage_updates,
+                ..
             } => {
                 if let Some(prev_value) = ephemeral_storage_updates.insert(key.clone(), None) {
                     Ok(prev_value)
@@ -456,12 +461,15 @@ impl DexEngine {
         &self,
         dex_id: DexId,
         message: Base64VecU8,
+        trader: AccountId,
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
     ) -> (U128, U128) {
-        self.internal_simulate_swap_simple(dex_id, message, asset_in, asset_out, amount, referrer)
+        self.internal_simulate_swap_simple(
+            dex_id, message, trader, asset_in, asset_out, amount, referrer,
+        )
     }
 
     pub fn are_assets_registered(&self, asset_ids: Vec<AssetId>, r#for: AccountOrDexId) -> bool {

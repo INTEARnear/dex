@@ -351,9 +351,18 @@ pub fn predecessor_account_id(
     mut caller: Caller<'_, RunnerData>,
     register_id: u64,
 ) -> Result<(), wasmi::Error> {
-    let CallType::Call { predecessor_id, .. } = &caller.data().call_type else {
+    let (CallType::Call { predecessor_id, .. }
+    | CallType::Trade {
+        alleged_trader: predecessor_id,
+        ..
+    }
+    | CallType::TradeView {
+        trader: predecessor_id,
+        ..
+    }) = &caller.data().call_type
+    else {
         return Err(wasmi::Error::new(
-            "predecessor_account_id is only allowed in call functions",
+            "predecessor_account_id is only allowed in trades or call functions",
         ));
     };
     let buf = predecessor_id.to_string().into_bytes();
