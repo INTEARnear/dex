@@ -52,6 +52,42 @@ enum XykDexEvent {
         fees_breakdown: Vec<(FeeReceiver, U128)>,
         amount_out: U128,
     },
+    #[event_version("1.0.0")]
+    LiquidityAdded {
+        pool_id: PoolId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+
+        added_amount_0: U128,
+        added_amount_1: U128,
+        minted_shares: U128,
+
+        new_owned_asset_0: U128,
+        new_owned_asset_1: U128,
+        new_owned_shares: U128,
+
+        new_total_asset_0: U128,
+        new_total_asset_1: U128,
+        new_total_shares: U128,
+    },
+    #[event_version("1.0.0")]
+    LiquidityRemoved {
+        pool_id: PoolId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+
+        removed_amount_0: U128,
+        removed_amount_1: U128,
+        burned_shares: U128,
+
+        new_owned_asset_0: U128,
+        new_owned_asset_1: U128,
+        new_owned_shares: U128,
+
+        new_total_asset_0: U128,
+        new_total_asset_1: U128,
+        new_total_shares: U128,
+    },
 }
 
 fn u128_to_u256(value: u128) -> U256 {
@@ -519,7 +555,19 @@ impl XykDex {
             panic!("Pool not found");
         };
 
-        let asset_withdraw_requests = match pool {
+        let (
+            asset_withdraw_requests,
+            added_amount_0,
+            added_amount_1,
+            minted_shares,
+            new_owned_asset_0,
+            new_owned_asset_1,
+            new_owned_shares,
+            new_total_asset_0,
+            new_total_asset_1,
+            new_total_shares,
+            assets,
+        ) = match pool {
             Pool::Private {
                 assets,
                 owner_id,
@@ -533,10 +581,10 @@ impl XykDex {
                     min_shares_received.is_none(),
                     "Min shares received must not be specified for private pools"
                 );
-                let asset_0_amount = attached_assets
+                let attached_amount_0 = attached_assets
                     .remove(&assets.0.asset_id)
                     .expect("Asset 1 not found");
-                let asset_1_amount = attached_assets
+                let attached_amount_1 = attached_assets
                     .remove(&assets.1.asset_id)
                     .expect("Asset 2 not found");
                 expect!(
@@ -547,16 +595,28 @@ impl XykDex {
                     .0
                     .balance
                     .0
-                    .checked_add(asset_0_amount.0)
+                    .checked_add(attached_amount_0.0)
                     .expect("Overflow");
                 assets.1.balance.0 = assets
                     .1
                     .balance
                     .0
-                    .checked_add(asset_1_amount.0)
+                    .checked_add(attached_amount_1.0)
                     .expect("Overflow");
 
-                Vec::new()
+                (
+                    Vec::new(),
+                    attached_amount_0.0,
+                    attached_amount_1.0,
+                    0,
+                    assets.0.balance.0,
+                    assets.1.balance.0,
+                    0,
+                    assets.0.balance.0,
+                    assets.1.balance.0,
+                    0,
+                    assets,
+                )
             }
             Pool::Public {
                 assets,
@@ -564,10 +624,10 @@ impl XykDex {
                 user_shares,
                 total_shares,
             } => {
-                let asset_0_amount = attached_assets
+                let attached_amount_0 = attached_assets
                     .remove(&assets.0.asset_id)
                     .expect("Asset 1 not found");
-                let asset_1_amount = attached_assets
+                let attached_amount_1 = attached_assets
                     .remove(&assets.1.asset_id)
                     .expect("Asset 2 not found");
                 expect!(
@@ -575,7 +635,7 @@ impl XykDex {
                     "No assets other than the two pool assets should be attached"
                 );
                 expect!(
-                    asset_0_amount.0 > 0 && asset_1_amount.0 > 0,
+                    attached_amount_0.0 > 0 && attached_amount_1.0 > 0,
                     "Amounts must be greater than 0"
                 );
                 expect!(
@@ -583,121 +643,190 @@ impl XykDex {
                     "User has not registered using register_liquidity"
                 );
                 let mut asset_withdraw_requests = Vec::new();
-                match total_shares {
-                    None => {
-                        expect!(
-                            min_shares_received.is_none(),
-                            "Min shares received must not be specified for new pools"
-                        );
-                        assets.0.balance.0 = assets
-                            .0
-                            .balance
-                            .0
-                            .checked_add(asset_0_amount.0)
+                let (shares_to_mint, total_shares_after, added_amount_0, added_amount_1) =
+                    match total_shares {
+                        None => {
+                            expect!(
+                                min_shares_received.is_none(),
+                                "Min shares received must not be specified for new pools"
+                            );
+                            assets.0.balance.0 = assets
+                                .0
+                                .balance
+                                .0
+                                .checked_add(attached_amount_0.0)
+                                .expect("Overflow");
+                            assets.1.balance.0 = assets
+                                .1
+                                .balance
+                                .0
+                                .checked_add(attached_amount_1.0)
+                                .expect("Overflow");
+                            *total_shares = Some(INITIAL_SHARES);
+                            expect!(
+                                user_shares
+                                    .insert(
+                                        near_sdk::env::predecessor_account_id(),
+                                        Some(INITIAL_SHARES)
+                                    )
+                                    .is_some_and(|s| s.is_none()),
+                                "User already has shares but there are no total shares"
+                            );
+                            (
+                                INITIAL_SHARES,
+                                INITIAL_SHARES,
+                                attached_amount_0.0,
+                                attached_amount_1.0,
+                            )
+                        }
+                        Some(pool_total_shares) => {
+                            expect!(
+                                let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
+                                let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
+                                "Pool is empty"
+                            );
+
+                            let shares_mintable_from_0 = NonZeroU128::new(tokens_to_shares(
+                                attached_amount_0.0.checked_sub(1).expect("Underflow"),
+                                *pool_total_shares,
+                                pool_balance_0,
+                            ))
+                            .expect("Can't mint zero shares");
+                            let shares_mintable_from_1 = NonZeroU128::new(tokens_to_shares(
+                                attached_amount_1.0.checked_sub(1).expect("Underflow"),
+                                *pool_total_shares,
+                                pool_balance_1,
+                            ))
+                            .expect("Can't mint zero shares");
+                            let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
+                            if let Some(min_shares_received) = min_shares_received {
+                                expect!(shares_to_mint >= min_shares_received, "Slippage error");
+                            }
+
+                            let deposited_amount_0 = shares_to_tokens(
+                                shares_to_mint,
+                                *pool_total_shares,
+                                pool_balance_0,
+                            )
+                            .checked_add(1)
                             .expect("Overflow");
-                        assets.1.balance.0 = assets
-                            .1
-                            .balance
-                            .0
-                            .checked_add(asset_1_amount.0)
+                            let deposited_amount_1 = shares_to_tokens(
+                                shares_to_mint,
+                                *pool_total_shares,
+                                pool_balance_1,
+                            )
+                            .checked_add(1)
                             .expect("Overflow");
-                        *total_shares = Some(INITIAL_SHARES);
-                        expect!(
+
+                            assets.0.balance.0 = assets
+                                .0
+                                .balance
+                                .0
+                                .checked_add(deposited_amount_0)
+                                .expect("Overflow");
+                            assets.1.balance.0 = assets
+                                .1
+                                .balance
+                                .0
+                                .checked_add(deposited_amount_1)
+                                .expect("Overflow");
+
+                            *pool_total_shares = pool_total_shares
+                                .checked_add(shares_to_mint.get())
+                                .expect("Overflow");
                             user_shares
-                                .insert(
-                                    near_sdk::env::predecessor_account_id(),
-                                    Some(INITIAL_SHARES)
-                                )
-                                .is_some_and(|s| s.is_none()),
-                            "User already has shares but there are no total shares"
-                        );
-                    }
-                    Some(total_shares) => {
-                        expect!(
-                            let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
-                            let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
-                            "Pool is empty"
-                        );
+                                .entry(near_sdk::env::predecessor_account_id())
+                                .and_modify(|shares| match shares {
+                                    Some(shares) => {
+                                        *shares = shares
+                                            .checked_add(shares_to_mint.get())
+                                            .expect("Overflow");
+                                    }
+                                    None => {
+                                        *shares = Some(shares_to_mint);
+                                    }
+                                })
+                                .or_insert(Some(shares_to_mint));
 
-                        let shares_from_asset_0 = NonZeroU128::new(tokens_to_shares(
-                            asset_0_amount.0.checked_sub(1).expect("Underflow"),
-                            *total_shares,
-                            pool_balance_0,
-                        ))
-                        .expect("Can't mint zero shares");
-                        let shares_from_asset_1 = NonZeroU128::new(tokens_to_shares(
-                            asset_1_amount.0.checked_sub(1).expect("Underflow"),
-                            *total_shares,
-                            pool_balance_1,
-                        ))
-                        .expect("Can't mint zero shares");
-                        let shares_to_mint = shares_from_asset_0.min(shares_from_asset_1);
-                        if let Some(min_shares_received) = min_shares_received {
-                            expect!(shares_to_mint >= min_shares_received, "Slippage error");
+                            let refund_amount_0 =
+                                attached_amount_0.0.checked_sub(deposited_amount_0);
+                            if let Some(refund_amount_0) = refund_amount_0 {
+                                asset_withdraw_requests.push(AssetWithdrawRequest {
+                                    asset_id: assets.0.asset_id.clone(),
+                                    amount: U128(refund_amount_0),
+                                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                        near_sdk::env::predecessor_account_id(),
+                                    ),
+                                });
+                            }
+                            let refund_amount_1 =
+                                attached_amount_1.0.checked_sub(deposited_amount_1);
+                            if let Some(refund_amount_1) = refund_amount_1 {
+                                asset_withdraw_requests.push(AssetWithdrawRequest {
+                                    asset_id: assets.1.asset_id.clone(),
+                                    amount: U128(refund_amount_1),
+                                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                        near_sdk::env::predecessor_account_id(),
+                                    ),
+                                });
+                            }
+                            (
+                                shares_to_mint,
+                                *pool_total_shares,
+                                deposited_amount_0,
+                                deposited_amount_1,
+                            )
                         }
-
-                        let used_asset_0 =
-                            shares_to_tokens(shares_to_mint, *total_shares, pool_balance_0)
-                                .checked_add(1)
-                                .expect("Overflow");
-                        let used_asset_1 =
-                            shares_to_tokens(shares_to_mint, *total_shares, pool_balance_1)
-                                .checked_add(1)
-                                .expect("Overflow");
-
-                        assets.0.balance.0 = assets
-                            .0
-                            .balance
-                            .0
-                            .checked_add(used_asset_0)
-                            .expect("Overflow");
-                        assets.1.balance.0 = assets
-                            .1
-                            .balance
-                            .0
-                            .checked_add(used_asset_1)
-                            .expect("Overflow");
-
-                        *total_shares = total_shares
-                            .checked_add(shares_to_mint.get())
-                            .expect("Overflow");
-                        user_shares
-                            .entry(near_sdk::env::predecessor_account_id())
-                            .and_modify(|shares| match shares {
-                                Some(shares) => {
-                                    *shares =
-                                        shares.checked_add(shares_to_mint.get()).expect("Overflow");
-                                }
-                                None => {
-                                    *shares = Some(shares_to_mint);
-                                }
-                            })
-                            .or_insert(Some(shares_to_mint));
-
-                        if let Some(leftover) = asset_0_amount.0.checked_sub(used_asset_0) {
-                            asset_withdraw_requests.push(AssetWithdrawRequest {
-                                asset_id: assets.0.asset_id.clone(),
-                                amount: U128(leftover),
-                                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
-                                    near_sdk::env::predecessor_account_id(),
-                                ),
-                            });
-                        }
-                        if let Some(leftover) = asset_1_amount.0.checked_sub(used_asset_1) {
-                            asset_withdraw_requests.push(AssetWithdrawRequest {
-                                asset_id: assets.1.asset_id.clone(),
-                                amount: U128(leftover),
-                                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
-                                    near_sdk::env::predecessor_account_id(),
-                                ),
-                            });
-                        }
-                    }
-                }
-                asset_withdraw_requests
+                    };
+                let new_owned_shares = user_shares
+                    .get(&near_sdk::env::predecessor_account_id())
+                    .copied()
+                    .flatten()
+                    .expect("User has no shares after adding liquidity");
+                let new_owned_asset_0 = shares_to_tokens(
+                    new_owned_shares,
+                    total_shares_after,
+                    NonZeroU128::new(assets.0.balance.0).expect("Zero tokens in pool"),
+                );
+                let new_owned_asset_1 = shares_to_tokens(
+                    new_owned_shares,
+                    total_shares_after,
+                    NonZeroU128::new(assets.1.balance.0).expect("Zero tokens in pool"),
+                );
+                (
+                    asset_withdraw_requests,
+                    added_amount_0,
+                    added_amount_1,
+                    shares_to_mint.get(),
+                    new_owned_asset_0,
+                    new_owned_asset_1,
+                    new_owned_shares.get(),
+                    assets.0.balance.0,
+                    assets.1.balance.0,
+                    total_shares_after.get(),
+                    assets,
+                )
             }
         };
 
+        XykDexEvent::LiquidityAdded {
+            pool_id,
+            asset_0: assets.0.asset_id.clone(),
+            asset_1: assets.1.asset_id.clone(),
+
+            added_amount_0: U128(added_amount_0),
+            added_amount_1: U128(added_amount_1),
+            minted_shares: U128(minted_shares),
+
+            new_owned_asset_0: U128(new_owned_asset_0),
+            new_owned_asset_1: U128(new_owned_asset_1),
+            new_owned_shares: U128(new_owned_shares),
+
+            new_total_asset_0: U128(new_total_asset_0),
+            new_total_asset_1: U128(new_total_asset_1),
+            new_total_shares: U128(new_total_shares),
+        }
+        .emit();
         XykDexEvent::PoolUpdated {
             pool_id,
             pool: (&*pool).into(),
@@ -741,7 +870,18 @@ impl XykDex {
             panic!("Pool not found");
         };
 
-        let (withdraw_to, (asset_id_0, amount_0), (asset_id_1, amount_1)) = match pool {
+        let (
+            withdraw_to,
+            (asset_id_0, withdrawn_amount_0),
+            (asset_id_1, withdrawn_amount_1),
+            burned_shares,
+            new_owned_asset_0,
+            new_owned_asset_1,
+            new_owned_shares,
+            new_total_asset_0,
+            new_total_asset_1,
+            new_total_shares,
+        ) = match pool {
             Pool::Private {
                 assets,
                 owner_id,
@@ -759,14 +899,21 @@ impl XykDex {
                     min_assets_received.is_none(),
                     "Min assets received must not be specified for private pools"
                 );
-                let amount_0 = assets.0.balance.0;
-                let amount_1 = assets.1.balance.0;
+                let withdrawn_amount_0 = assets.0.balance.0;
+                let withdrawn_amount_1 = assets.1.balance.0;
                 assets.0.balance.0 = 0;
                 assets.1.balance.0 = 0;
                 (
                     owner_id.clone(),
-                    (assets.0.asset_id.clone(), amount_0),
-                    (assets.1.asset_id.clone(), amount_1),
+                    (assets.0.asset_id.clone(), withdrawn_amount_0),
+                    (assets.1.asset_id.clone(), withdrawn_amount_1),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
                 )
             }
             Pool::Public {
@@ -775,51 +922,53 @@ impl XykDex {
                 user_shares,
                 total_shares,
             } => {
-                let current_shares = user_shares
+                let user_shares_before = user_shares
                     .get(&near_sdk::env::predecessor_account_id())
                     .copied()
                     .flatten()
                     .expect("User has no shares");
-                let shares_to_remove = shares_to_remove.unwrap_or(current_shares);
+                let shares_to_remove = shares_to_remove.unwrap_or(user_shares_before);
                 expect!(
-                    shares_to_remove <= current_shares,
+                    shares_to_remove <= user_shares_before,
                     "Not enough shares to remove"
                 );
                 expect!(let Some(pool_total_shares) = total_shares, "Pool has no shares");
-                let (amount_0, amount_1) = if shares_to_remove == *pool_total_shares {
-                    let amount_0 = assets.0.balance.0;
-                    let amount_1 = assets.1.balance.0;
-                    assets.0.balance.0 = 0;
-                    assets.1.balance.0 = 0;
-                    (amount_0, amount_1)
-                } else {
-                    let amount_0 = NonZeroU128::new(assets.0.balance.0)
-                        .map(|balance| {
-                            shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
-                        })
-                        .unwrap_or_default();
-                    let amount_1 = NonZeroU128::new(assets.1.balance.0)
-                        .map(|balance| {
-                            shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
-                        })
-                        .unwrap_or_default();
-                    assets.0.balance.0 = assets
-                        .0
-                        .balance
-                        .0
-                        .checked_sub(amount_0)
-                        .expect("Somehow not enough balance for asset 1 withdrawal");
-                    assets.1.balance.0 = assets
-                        .1
-                        .balance
-                        .0
-                        .checked_sub(amount_1)
-                        .expect("Somehow not enough balance for asset 2 withdrawal");
-                    (amount_0, amount_1)
-                };
+                let (withdrawn_amount_0, withdrawn_amount_1) =
+                    if shares_to_remove == *pool_total_shares {
+                        let withdrawn_amount_0 = assets.0.balance.0;
+                        let withdrawn_amount_1 = assets.1.balance.0;
+                        assets.0.balance.0 = 0;
+                        assets.1.balance.0 = 0;
+                        (withdrawn_amount_0, withdrawn_amount_1)
+                    } else {
+                        let withdrawn_amount_0 = NonZeroU128::new(assets.0.balance.0)
+                            .map(|balance| {
+                                shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                            })
+                            .unwrap_or_default();
+                        let withdrawn_amount_1 = NonZeroU128::new(assets.1.balance.0)
+                            .map(|balance| {
+                                shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                            })
+                            .unwrap_or_default();
+                        assets.0.balance.0 = assets
+                            .0
+                            .balance
+                            .0
+                            .checked_sub(withdrawn_amount_0)
+                            .expect("Somehow not enough balance for asset 1 withdrawal");
+                        assets.1.balance.0 = assets
+                            .1
+                            .balance
+                            .0
+                            .checked_sub(withdrawn_amount_1)
+                            .expect("Somehow not enough balance for asset 2 withdrawal");
+                        (withdrawn_amount_0, withdrawn_amount_1)
+                    };
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
                     expect!(
-                        amount_0 >= min_asset_0_received.0 && amount_1 >= min_asset_1_received.0,
+                        withdrawn_amount_0 >= min_asset_0_received.0
+                            && withdrawn_amount_1 >= min_asset_1_received.0,
                         "Slippage error"
                     );
                 }
@@ -829,21 +978,59 @@ impl XykDex {
                         .checked_sub(shares_to_remove.get())
                         .expect("Underflow"),
                 );
-                let updated_shares = NonZeroU128::new(
-                    current_shares
+                let user_shares_after = NonZeroU128::new(
+                    user_shares_before
                         .get()
                         .checked_sub(shares_to_remove.get())
                         .expect("Underflow"),
                 );
-                user_shares.insert(near_sdk::env::predecessor_account_id(), updated_shares);
+                user_shares.insert(near_sdk::env::predecessor_account_id(), user_shares_after);
+                let total_shares_after = total_shares.map(|s| s.get()).unwrap_or_default();
+                let (new_owned_asset_0, new_owned_asset_1) = match (
+                    user_shares_after,
+                    *total_shares,
+                    NonZeroU128::new(assets.0.balance.0),
+                    NonZeroU128::new(assets.1.balance.0),
+                ) {
+                    (Some(shares), Some(total), Some(balance_0), Some(balance_1)) => (
+                        shares_to_tokens(shares, total, balance_0),
+                        shares_to_tokens(shares, total, balance_1),
+                    ),
+                    _ => (0, 0),
+                };
                 (
                     near_sdk::env::predecessor_account_id(),
-                    (assets.0.asset_id.clone(), amount_0),
-                    (assets.1.asset_id.clone(), amount_1),
+                    (assets.0.asset_id.clone(), withdrawn_amount_0),
+                    (assets.1.asset_id.clone(), withdrawn_amount_1),
+                    shares_to_remove.get(),
+                    new_owned_asset_0,
+                    new_owned_asset_1,
+                    user_shares_after.map(|s| s.get()).unwrap_or_default(),
+                    assets.0.balance.0,
+                    assets.1.balance.0,
+                    total_shares_after,
                 )
             }
         };
 
+        XykDexEvent::LiquidityRemoved {
+            pool_id,
+            asset_0: asset_id_0.clone(),
+            asset_1: asset_id_1.clone(),
+
+            removed_amount_0: U128(withdrawn_amount_0),
+            removed_amount_1: U128(withdrawn_amount_1),
+            burned_shares: U128(burned_shares),
+
+            new_owned_asset_0: U128(new_owned_asset_0),
+            new_owned_asset_1: U128(new_owned_asset_1),
+            new_owned_shares: U128(new_owned_shares),
+
+            new_total_asset_0: U128(new_total_asset_0),
+            new_total_asset_1: U128(new_total_asset_1),
+            new_total_shares: U128(new_total_shares),
+        }
+        .emit();
         XykDexEvent::PoolUpdated {
             pool_id,
             pool: (&*pool).into(),
@@ -857,14 +1044,14 @@ impl XykDex {
             asset_withdraw_requests: vec![
                 AssetWithdrawRequest {
                     asset_id: asset_id_0,
-                    amount: U128(amount_0),
+                    amount: U128(withdrawn_amount_0),
                     withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
                         withdraw_to.clone(),
                     ),
                 },
                 AssetWithdrawRequest {
                     asset_id: asset_id_1,
-                    amount: U128(amount_1),
+                    amount: U128(withdrawn_amount_1),
                     withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(withdraw_to),
                 },
             ],
@@ -1040,16 +1227,24 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pool_shares(
         &self,
-        #[serializer(borsh)] pool_id: PoolId,
+        #[serializer(borsh)] pool_ids: Vec<PoolId>,
         #[serializer(borsh)] account_id: AccountId,
-    ) -> Option<U128> {
-        let pool = self.pools.get(pool_id)?;
-        match pool {
-            Pool::Public { user_shares, .. } => user_shares
-                .get(&account_id)
-                .map(|shares| shares.map(|shares| U128(shares.get())).unwrap_or_default()),
-            Pool::Private { .. } => None,
-        }
+    ) -> Vec<Option<U128>> {
+        pool_ids
+            .into_iter()
+            .map(|pool_id| {
+                let pool = self
+                    .pools
+                    .get(pool_id)
+                    .unwrap_or_else(|| panic!("Pool {pool_id} not found"));
+                match pool {
+                    Pool::Public { user_shares, .. } => user_shares
+                        .get(&account_id)
+                        .map(|shares| shares.map(|shares| U128(shares.get())).unwrap_or_default()),
+                    Pool::Private { .. } => None,
+                }
+            })
+            .collect()
     }
 
     #[result_serializer(borsh)]

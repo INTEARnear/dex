@@ -124,11 +124,12 @@ async fn get_pool_shares(
         .args_json(json!({
             "dex_id": dex_id,
             "method": "get_pool_shares",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&(pool_id, account_id.clone())).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&(vec![pool_id], account_id.clone())).unwrap()),
         }))
         .await
         .unwrap();
-    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+    near_sdk::borsh::from_slice::<Vec<Option<U128>>>(&result.json::<Base64VecU8>().unwrap().0)
+        .unwrap()[0]
 }
 
 #[tokio::test]
