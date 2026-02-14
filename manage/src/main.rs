@@ -1,5 +1,5 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::{BorshDeserialize, BorshSchema, BorshSerialize};
 use clap::{Parser, Subcommand};
 use near_api::{
     Contract, NearGas, NearToken, NetworkConfig, RPCEndpoint, Signer, Transaction,
@@ -40,6 +40,7 @@ enum Commands {
         asset_id: AssetId,
         amount: u128,
     },
+    GenerateSchema,
 }
 
 #[derive(Clone, Debug)]
@@ -441,6 +442,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded config: deployer_id = {}", config.deployer_id);
 
     match cli.command {
+        Commands::GenerateSchema => {
+            let schema = borsh::schema_container_of::<XykCreatePoolArgs>();
+            println!("XykCreatePoolArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykEditFeesArgs>();
+            println!("XykEditFeesArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykGetPendingFeesArgs>();
+            println!("XykGetPendingFeesArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykWithdrawFeesArgs>();
+            println!("XykWithdrawFeesArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykSwapArgs>();
+            println!("XykSwapArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykRegisterLiquidityArgs>();
+            println!("XykRegisterLiquidityArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykAddLiquidityArgs>();
+            println!("XykAddLiquidityArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykRemoveLiquidityArgs>();
+            println!("XykRemoveLiquidityArgs: {schema:#?}");
+        }
         Commands::Otc { action } => match action {
             OtcAction::Deploy => {
                 println!("Compiling otc-dex");
@@ -707,19 +726,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
-                #[derive(BorshSerialize)]
-                struct CreatePoolArgs {
-                    assets: (AssetId, AssetId),
-                    fees: XykFeeConfiguration,
-                    is_public: bool,
-                }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
                             "DexCall": {
                                 "dex_id": dex_id,
                                 "method": "create_pool",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&CreatePoolArgs {
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
                                     assets: (asset_0, asset_1),
                                     fees: XykFeeConfiguration {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
@@ -765,21 +778,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                #[derive(BorshSerialize)]
-                struct RegisterLiquidityArgs {
-                    pool_id: XykPoolId,
-                }
-                #[derive(BorshSerialize)]
-                struct AddLiquidityArgs {
-                    pool_id: XykPoolId,
-                    min_shares_received: Option<NonZeroU128>,
-                }
-
                 let mut operations = vec![json!({
                     "DexCall": {
                         "dex_id": dex_id,
                         "method": "add_liquidity",
-                        "args": BASE64_STANDARD.encode(borsh::to_vec(&AddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykAddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
                         "attached_assets": HashMap::<AssetId, U128>::from_iter([
                             (asset_0, U128(amount_0)),
                             (asset_1, U128(amount_1)),
@@ -791,7 +794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "DexCall": {
                             "dex_id": dex_id,
                             "method": "register_liquidity",
-                            "args": BASE64_STANDARD.encode(borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap()),
+                            "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRegisterLiquidityArgs { pool_id }).unwrap()),
                             "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
                         }
                     }));
@@ -820,19 +823,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
-                #[derive(BorshSerialize)]
-                struct RemoveLiquidityArgs {
-                    pool_id: XykPoolId,
-                    shares_to_remove: Option<NonZeroU128>,
-                    min_assets_received: Option<(U128, U128)>,
-                }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
                             "DexCall": {
                                 "dex_id": dex_id,
                                 "method": "remove_liquidity",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&RemoveLiquidityArgs {
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRemoveLiquidityArgs {
                                     pool_id,
                                     shares_to_remove: shares.and_then(NonZeroU128::new),
                                     min_assets_received: None,
@@ -858,18 +855,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
-                #[derive(BorshSerialize)]
-                struct EditFeesArgs {
-                    pool_id: XykPoolId,
-                    fees: XykFeeConfiguration,
-                }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
                             "DexCall": {
                                 "dex_id": dex_id,
                                 "method": "edit_fees",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&EditFeesArgs {
+                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
                                     pool_id,
                                     fees: XykFeeConfiguration {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
@@ -892,27 +884,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 asset_ids,
             } => {
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
-                #[derive(BorshSerialize)]
-                struct GetPendingFeesArgs {
-                    account_id: AccountId,
-                    asset_ids: Vec<AssetId>,
-                }
-                let result: near_api::Data<serde_json::Value> =
-                    Contract(config.dex_contract_id.clone())
-                        .call_function(
-                            "dex_view",
-                            json!({
-                                "dex_id": dex_id,
-                                "method": "get_pending_fees",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&GetPendingFeesArgs {
-                                    account_id,
-                                    asset_ids,
-                                }).unwrap()),
-                            }),
-                        )
-                        .read_only()
-                        .fetch_from(&network())
-                        .await?;
+                let result: near_api::Data<serde_json::Value> = Contract(
+                    config.dex_contract_id.clone(),
+                )
+                .call_function(
+                    "dex_view",
+                    json!({
+                        "dex_id": dex_id,
+                        "method": "get_pending_fees",
+                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykGetPendingFeesArgs {
+                            account_id,
+                            asset_ids,
+                        }).unwrap()),
+                    }),
+                )
+                .read_only()
+                .fetch_from(&network())
+                .await?;
                 let response_base64 = result.data.as_str().expect("Expected base64 response");
                 let response_bytes = BASE64_STANDARD.decode(response_base64)?;
                 let pending_fees: Vec<(AssetId, U128)> = borsh::from_slice(&response_bytes)?;
@@ -933,10 +921,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
-                #[derive(BorshSerialize)]
-                struct WithdrawFeesArgs {
-                    assets: Vec<AssetId>,
-                }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "execute_operations",
@@ -945,7 +929,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "DexCall": {
                                     "dex_id": dex_id,
                                     "method": "withdraw_fees",
-                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&WithdrawFeesArgs {
+                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&XykWithdrawFeesArgs {
                                         assets: asset_ids,
                                     }).unwrap()),
                                     "attached_assets": {},
@@ -982,10 +966,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     panic!("Asset in not found in pool");
                 };
-                #[derive(BorshSerialize)]
-                struct SwapArgs {
-                    pool_id: XykPoolId,
-                }
                 let swap_amount = match direction {
                     TradeDirection::ExactIn => SwapRequestAmount::ExactIn(U128(amount)),
                     TradeDirection::ExactOut => SwapRequestAmount::ExactOut(U128(amount)),
@@ -996,7 +976,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "simulate_swap_simple",
                             json!({
                                 "dex_id": dex_id,
-                                "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                "message": BASE64_STANDARD.encode(borsh::to_vec(&XykSwapArgs { pool_id }).unwrap()),
                                 "trader": "simulate.near",
                                 "asset_in": asset_in,
                                 "asset_out": asset_out,
@@ -1039,10 +1019,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     panic!("Asset in not found in pool");
                 };
-                #[derive(BorshSerialize)]
-                struct SwapArgs {
-                    pool_id: XykPoolId,
-                }
                 let swap_amount = match direction {
                     TradeDirection::ExactIn => SwapRequestAmount::ExactIn(U128(amount)),
                     TradeDirection::ExactOut => SwapRequestAmount::ExactOut(U128(amount)),
@@ -1055,7 +1031,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "simulate_swap_simple",
                                 json!({
                                     "dex_id": dex_id,
-                                    "message": BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                                    "message": BASE64_STANDARD.encode(borsh::to_vec(&XykSwapArgs { pool_id }).unwrap()),
                                     "trader": account_id,
                                     "asset_in": asset_in,
                                     "asset_out": asset_out,
@@ -1094,7 +1070,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut operations = vec![Operation::SwapSimple {
                     dex_id: dex_id.clone(),
-                    message: BASE64_STANDARD.encode(borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+                    message: BASE64_STANDARD
+                        .encode(borsh::to_vec(&XykSwapArgs { pool_id }).unwrap()),
                     asset_in: asset_in.clone(),
                     asset_out: asset_out.clone(),
                     amount: SwapOperationAmount::Amount(swap_amount),
@@ -1170,7 +1147,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug, BorshSerialize, BorshDeserialize)]
+#[derive(
+    PartialEq,
+    Eq,
+    Hash,
+    Clone,
+    PartialOrd,
+    Ord,
+    Debug,
+    BorshSerialize,
+    BorshDeserialize,
+    BorshSchema,
+)]
 pub enum AssetId {
     Near,
     Nep141(AccountId),
@@ -1249,7 +1237,7 @@ impl<'de> Deserialize<'de> for AssetId {
     }
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
 struct XykFeeConfiguration {
     receivers: Vec<(XykFeeReceiver, u32)>,
 }
@@ -1314,9 +1302,10 @@ enum WithdrawAmount {
     PreviousSwapOutput,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
 enum XykFeeReceiver {
     User(AccountId),
+    Pool,
 }
 
 #[allow(dead_code)]
@@ -1335,13 +1324,60 @@ enum XykPoolView {
 }
 
 #[allow(dead_code)]
-#[derive(BorshDeserialize, Clone, Debug)]
+#[derive(BorshDeserialize, Clone, Debug, BorshSchema)]
 struct AssetWithBalance {
     asset_id: AssetId,
-    balance: U128,
+    balance: u128,
 }
 
 type XykPoolId = u32;
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykCreatePoolArgs {
+    assets: (AssetId, AssetId),
+    fees: XykFeeConfiguration,
+    is_public: bool,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykEditFeesArgs {
+    pool_id: XykPoolId,
+    fees: XykFeeConfiguration,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykGetPendingFeesArgs {
+    account_id: AccountId,
+    asset_ids: Vec<AssetId>,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykWithdrawFeesArgs {
+    assets: Vec<AssetId>,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykSwapArgs {
+    pool_id: XykPoolId,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykRegisterLiquidityArgs {
+    pool_id: XykPoolId,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykAddLiquidityArgs {
+    pool_id: XykPoolId,
+    min_shares_received: Option<NonZeroU128>,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykRemoveLiquidityArgs {
+    pool_id: XykPoolId,
+    shares_to_remove: Option<NonZeroU128>,
+    min_assets_received: Option<(u128, u128)>,
+}
 
 async fn xyk_fetch_pool(
     dex_contract_id: AccountId,

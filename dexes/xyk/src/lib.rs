@@ -369,6 +369,20 @@ impl XykDex {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(assets.0 != assets.1, "Assets must be different");
+        expect!(
+            matches!(
+                assets.0,
+                AssetId::Near | AssetId::Nep141(_) | AssetId::Nep245(_, _)
+            ),
+            "Only NEAR, NEP-141, and NEP-245 assets are supported"
+        );
+        expect!(
+            matches!(
+                assets.1,
+                AssetId::Near | AssetId::Nep141(_) | AssetId::Nep245(_, _)
+            ),
+            "Only NEAR, NEP-141, and NEP-245 assets are supported"
+        );
 
         fees.validate();
 
@@ -1063,14 +1077,14 @@ impl XykDex {
                 AssetWithdrawRequest {
                     asset_id: asset_id_0,
                     amount: U128(withdrawn_amount_0),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         withdraw_to.clone(),
                     ),
                 },
                 AssetWithdrawRequest {
                     asset_id: asset_id_1,
                     amount: U128(withdrawn_amount_1),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(withdraw_to),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(withdraw_to),
                 },
             ],
             response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),

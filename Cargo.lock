@@ -1914,6 +1914,7 @@ dependencies = [
  "borsh",
  "clap",
  "dotenvy",
+ "near-account-id",
  "near-api",
  "serde",
  "serde_json",

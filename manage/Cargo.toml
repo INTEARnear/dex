@@ -12,3 +12,4 @@ tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 borsh = "1.6"
 serde = { version = "1", features = ["derive"] }
+near-account-id = { version = "2", features = ["abi"] }
