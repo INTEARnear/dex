@@ -24,7 +24,8 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
 
 const MAX_FEE_FRACTION: FeeFraction = 1000000;
 const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
-const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
+// const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
+const PROTOCOL_FEE: FeeFraction = 1; // 0.0001%
 const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
 const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNT: &str = "user.intear.near";
 
