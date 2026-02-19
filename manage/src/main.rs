@@ -121,14 +121,8 @@ enum XykAction {
     },
     Initialize,
     CreatePool {
-        account_id: AccountId,
-        asset_0: AssetId,
-        asset_1: AssetId,
-        #[arg(long)]
-        public: bool,
-        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
-        #[arg(long, value_delimiter = ',')]
-        fees: Vec<FeeReceiverArg>,
+        #[command(subcommand)]
+        action: XykCreatePoolAction,
     },
     GetPool {
         pool_id: XykPoolId,
@@ -216,6 +210,40 @@ impl FromStr for SlippagePercent {
 enum TradeDirection {
     ExactIn,
     ExactOut,
+}
+
+#[derive(Subcommand)]
+enum XykCreatePoolAction {
+    Private {
+        account_id: AccountId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
+        #[arg(long, value_delimiter = ',')]
+        fees: Vec<FeeReceiverArg>,
+    },
+    Public {
+        account_id: AccountId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
+        #[arg(long, value_delimiter = ',')]
+        fees: Vec<FeeReceiverArg>,
+    },
+    Launch {
+        account_id: AccountId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+        /// Synthetic NEAR depth used in launch pricing.
+        #[arg(long)]
+        phantom_liquidity_near: u128,
+        /// Amount of asset_1 to seed the pool with.
+        #[arg(long)]
+        launched_asset_amount: u128,
+        /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
+        #[arg(long, value_delimiter = ',')]
+        fees: Vec<FeeReceiverArg>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -737,13 +765,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
                 println!("Initialized XYK dex. Result: {:?}", result.outcome());
             }
-            XykAction::CreatePool {
-                account_id,
-                asset_0,
-                asset_1,
-                public,
-                fees,
-            } => {
+            XykAction::CreatePool { action } => {
+                let (account_id, asset_0, asset_1, pool_type, fees, attached_assets) = match action
+                {
+                    XykCreatePoolAction::Private {
+                        account_id,
+                        asset_0,
+                        asset_1,
+                        fees,
+                    } => (
+                        account_id,
+                        asset_0,
+                        asset_1,
+                        XykPoolType::Private,
+                        fees,
+                        HashMap::<AssetId, U128>::from_iter([(
+                            AssetId::Near,
+                            U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
+                        )]),
+                    ),
+                    XykCreatePoolAction::Public {
+                        account_id,
+                        asset_0,
+                        asset_1,
+                        fees,
+                    } => (
+                        account_id,
+                        asset_0,
+                        asset_1,
+                        XykPoolType::Public,
+                        fees,
+                        HashMap::<AssetId, U128>::from_iter([(
+                            AssetId::Near,
+                            U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
+                        )]),
+                    ),
+                    XykCreatePoolAction::Launch {
+                        account_id,
+                        asset_0,
+                        asset_1,
+                        phantom_liquidity_near,
+                        launched_asset_amount,
+                        fees,
+                    } => {
+                        assert!(
+                            asset_0 == AssetId::Near,
+                            "Launch pools require asset_0 to be NEAR",
+                        );
+                        assert!(
+                            phantom_liquidity_near > 0,
+                            "--phantom-liquidity-near must be greater than 0",
+                        );
+                        (
+                            account_id,
+                            asset_0,
+                            asset_1.clone(),
+                            XykPoolType::Launch {
+                                phantom_liquidity_near,
+                            },
+                            fees,
+                            HashMap::<AssetId, U128>::from_iter([
+                                (
+                                    AssetId::Near,
+                                    U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
+                                ),
+                                (asset_1, U128(launched_asset_amount)),
+                            ]),
+                        )
+                    }
+                };
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
@@ -759,9 +849,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     fees: XykFeeConfiguration {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
                                     },
-                                    is_public: public,
+                                    pool_type,
                                 }).unwrap()),
-                                "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
+                                "attached_assets": attached_assets,
                             }
                         }]
                     }))
@@ -793,10 +883,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
                 let pool = pool.expect("Pool not found");
-                let is_public = matches!(pool, XykPoolView::Public { .. });
-                let (asset_0, asset_1) = match pool {
-                    XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
-                        (assets.0.asset_id, assets.1.asset_id)
+                let (asset_0, asset_1, should_register_liquidity) = match pool {
+                    XykPoolView::Private { assets, .. } => {
+                        (assets.0.asset_id, assets.1.asset_id, false)
+                    }
+                    XykPoolView::Public { assets, .. } => {
+                        (assets.0.asset_id, assets.1.asset_id, true)
+                    }
+                    XykPoolView::Launch { .. } => {
+                        panic!("Launch pools don't support adding liquidity after creation")
                     }
                 };
 
@@ -811,7 +906,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ]),
                     }
                 })];
-                if is_public {
+                if should_register_liquidity {
                     operations.push(json!({
                         "DexCall": {
                             "dex_id": dex_id,
@@ -980,6 +1075,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
                         (assets.0.asset_id.clone(), assets.1.asset_id.clone())
                     }
+                    XykPoolView::Launch { launched_asset, .. } => {
+                        (AssetId::Near, launched_asset.asset_id.clone())
+                    }
                 };
                 let asset_out = if asset_in == asset_0 {
                     asset_1
@@ -1032,6 +1130,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (asset_0, asset_1) = match &pool {
                     XykPoolView::Private { assets, .. } | XykPoolView::Public { assets, .. } => {
                         (assets.0.asset_id.clone(), assets.1.asset_id.clone())
+                    }
+                    XykPoolView::Launch { launched_asset, .. } => {
+                        (AssetId::Near, launched_asset.asset_id.clone())
                     }
                 };
                 let asset_out = if asset_in == asset_0 {
@@ -1343,6 +1444,12 @@ enum XykPoolView {
         fees: XykFeeConfiguration,
         total_shares: Option<U128>,
     },
+    Launch {
+        near_amount: U128,
+        launched_asset: AssetWithBalance,
+        fees: XykFeeConfiguration,
+        phantom_liquidity_near: U128,
+    },
 }
 
 #[allow(dead_code)]
@@ -1355,10 +1462,17 @@ struct AssetWithBalance {
 type XykPoolId = u32;
 
 #[derive(BorshSerialize, BorshSchema)]
+enum XykPoolType {
+    Private,
+    Public,
+    Launch { phantom_liquidity_near: u128 },
+}
+
+#[derive(BorshSerialize, BorshSchema)]
 struct XykCreatePoolArgs {
     assets: (AssetId, AssetId),
     fees: XykFeeConfiguration,
-    is_public: bool,
+    pool_type: XykPoolType,
 }
 
 #[derive(BorshSerialize, BorshSchema)]

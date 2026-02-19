@@ -540,6 +540,10 @@ impl XykDex {
                     assets.0 == AssetId::Near,
                     "First asset in Launch pools must be NEAR"
                 );
+                expect!(
+                    phantom_liquidity_near.0 > 0,
+                    "Phantom liquidity NEAR must be greater than 0"
+                );
                 let attached_launched_asset = attached_assets
                     .remove(&assets.1)
                     .expect("Launched asset not found");
@@ -1495,7 +1499,10 @@ impl From<&Pool> for PoolView {
             } => PoolView::Launch {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
-                fees: fees.clone(),
+                fees: fees.with_protocol_fee(
+                    None,
+                    asset_account_ids(&[AssetId::Near, launched_asset.asset_id.clone()]),
+                ),
                 phantom_liquidity_near: *phantom_liquidity_near,
             },
         }
