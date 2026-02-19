@@ -1127,18 +1127,39 @@ impl XykDex {
                     *owner_id == near_sdk::env::predecessor_account_id(),
                     "Only pool owner can remove liquidity"
                 );
+                let shares_to_remove = shares_to_remove.unwrap_or(INITIAL_SHARES);
                 expect!(
-                    shares_to_remove.is_none(),
-                    "Shares must be None for private pools"
+                    shares_to_remove.get() <= INITIAL_SHARES.get(),
+                    "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
                 expect!(
                     min_assets_received.is_none(),
                     "Min assets received must not be specified for private pools"
                 );
-                let withdrawn_amount_0 = assets.0.balance.0;
-                let withdrawn_amount_1 = assets.1.balance.0;
-                assets.0.balance.0 = 0;
-                assets.1.balance.0 = 0;
+                #[allow(clippy::arithmetic_side_effects)]
+                // u128 * u128 can't overflow; INITIAL_SHARES is not 0
+                let withdrawn_amount_0 = u256_to_u128(
+                    u128_to_u256(assets.0.balance.0) * u128_to_u256(shares_to_remove.get())
+                        / u128_to_u256(INITIAL_SHARES.get()),
+                );
+                #[allow(clippy::arithmetic_side_effects)]
+                // u128 * u128 can't overflow; INITIAL_SHARES is not 0
+                let withdrawn_amount_1 = u256_to_u128(
+                    u128_to_u256(assets.1.balance.0) * u128_to_u256(shares_to_remove.get())
+                        / u128_to_u256(INITIAL_SHARES.get()),
+                );
+                assets.0.balance.0 = assets
+                    .0
+                    .balance
+                    .0
+                    .checked_sub(withdrawn_amount_0)
+                    .expect("Underflow");
+                assets.1.balance.0 = assets
+                    .1
+                    .balance
+                    .0
+                    .checked_sub(withdrawn_amount_1)
+                    .expect("Underflow");
                 (
                     owner_id.clone(),
                     (assets.0.asset_id.clone(), withdrawn_amount_0),
@@ -1344,8 +1365,12 @@ impl XykDex {
                 panic!("Fees cannot be edited for launch pools");
             }
             Pool::PrivateV2 {
-                assets, owner_id, ..
+                assets,
+                owner_id,
+                locked,
+                ..
             } => {
+                expect!(!*locked, "Pool is locked");
                 expect!(
                     *owner_id == near_sdk::env::predecessor_account_id(),
                     "Only pool owner can edit fees"
