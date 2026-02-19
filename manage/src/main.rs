@@ -847,7 +847,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
                                     assets: (asset_0, asset_1),
                                     fees: XykFeeConfiguration {
-                                        receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
+                                        receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
                                     },
                                     pool_type,
                                 }).unwrap()),
@@ -981,7 +981,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
                                     pool_id,
                                     fees: XykFeeConfiguration {
-                                        receivers: fees.iter().map(|f| (XykFeeReceiver::User(f.account_id.clone()), f.fee_fraction)).collect(),
+                                        receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
                                     },
                                 }).unwrap()),
                                 "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
@@ -1427,7 +1427,7 @@ enum WithdrawAmount {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
 enum XykFeeReceiver {
-    User(AccountId),
+    Account(AccountId),
     Pool,
 }
 
