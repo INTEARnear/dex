@@ -1,5 +1,6 @@
 #![deny(clippy::arithmetic_side_effects)]
 
+use core::panic;
 use std::{collections::HashMap, num::NonZeroU128};
 
 use crypto_bigint::U256;
@@ -24,10 +25,18 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
 
 const MAX_FEE_FRACTION: FeeFraction = 1000000;
 const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
-// const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
-const PROTOCOL_FEE: FeeFraction = 1; // 0.0001%
+const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
 const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
-const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNT: &str = "user.intear.near";
+const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS: &[&str] = &["user.intear.near"];
+const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&str] = &[
+    "omft.near",
+    "wrap.near",
+    "near",
+    "omni.hot.tg",
+    "tether-token.near",
+    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+];
+const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -129,6 +138,18 @@ fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: Non
     )
 }
 
+fn asset_account_ids(asset_ids: &[AssetId]) -> Vec<AccountId> {
+    asset_ids
+        .iter()
+        .map(|asset_id| match asset_id {
+            AssetId::Near => "near".parse::<AccountId>().unwrap(),
+            AssetId::Nep141(account_id) => account_id.clone(),
+            AssetId::Nep171(_, _) => panic!("Nep171 assets are not supported"),
+            AssetId::Nep245(account_id, _) => account_id.clone(),
+        })
+        .collect()
+}
+
 #[near]
 impl Dex for XykDex {
     #[result_serializer(borsh)]
@@ -228,7 +249,10 @@ impl Dex for XykDex {
                 let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     exact_amount_in.0,
                     &request.asset_in,
-                    &fees.with_protocol_fee(Some(near_sdk::env::predecessor_account_id())),
+                    &fees.with_protocol_fee(
+                        Some(near_sdk::env::predecessor_account_id()),
+                        asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
+                    ),
                     &mut self.fees_collected_by_users,
                 );
                 // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
@@ -272,7 +296,10 @@ impl Dex for XykDex {
                     .saturating_add(&U256::ONE),
                 );
                 let total_fee_fraction = fees
-                    .with_protocol_fee(Some(near_sdk::env::predecessor_account_id()))
+                    .with_protocol_fee(
+                        Some(near_sdk::env::predecessor_account_id()),
+                        asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
+                    )
                     .receivers
                     .iter()
                     .map(|(_, fee)| *fee as u128)
@@ -295,7 +322,10 @@ impl Dex for XykDex {
                 let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     amount_in,
                     &request.asset_in,
-                    &fees.with_protocol_fee(Some(near_sdk::env::predecessor_account_id())),
+                    &fees.with_protocol_fee(
+                        Some(near_sdk::env::predecessor_account_id()),
+                        asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
+                    ),
                     &mut self.fees_collected_by_users,
                 );
                 *in_balance = in_balance
@@ -1345,7 +1375,10 @@ impl From<&Pool> for PoolView {
                 fees,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(None),
+                fees: fees.with_protocol_fee(
+                    None,
+                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
+                ),
                 owner_id: owner_id.clone(),
             },
             Pool::Public {
@@ -1355,7 +1388,10 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(None),
+                fees: fees.with_protocol_fee(
+                    None,
+                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
+                ),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
         }
@@ -1403,17 +1439,35 @@ impl FeeConfiguration {
         );
     }
 
-    fn with_protocol_fee(&self, trader_account_id: Option<AccountId>) -> Self {
+    fn with_protocol_fee(
+        &self,
+        trader_account_id: Option<AccountId>,
+        asset_account_ids: Vec<AccountId>,
+    ) -> Self {
         let mut receivers = self.receivers.clone();
-        let protocol_fee_bypass_parent_account = PROTOCOL_FEE_BYPASS_PARENT_ACCOUNT
-            .parse::<AccountId>()
-            .unwrap();
         let mut protocol_fee = PROTOCOL_FEE;
         if receivers.is_empty() {
             protocol_fee = 0;
         } else if let Some(trader_account_id) = trader_account_id {
-            if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account) {
-                protocol_fee = 0;
+            for asset_account_id in asset_account_ids {
+                for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
+                    let protocol_fee_bypass_asset_parent_account =
+                        bypass_asset_parent_account.parse::<AccountId>().unwrap();
+                    if asset_account_id.is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
+                        || asset_account_id == protocol_fee_bypass_asset_parent_account
+                    {
+                        protocol_fee = PROTOCOL_FEE_REDUCED;
+                        break;
+                    }
+                }
+            }
+            for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
+                let protocol_fee_bypass_parent_account =
+                    bypass_parent_account.parse::<AccountId>().unwrap();
+                if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account) {
+                    protocol_fee = 0;
+                    break;
+                }
             }
         }
         receivers.push((
