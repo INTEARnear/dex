@@ -777,7 +777,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         account_id,
                         asset_0,
                         asset_1,
-                        XykPoolType::Private,
+                        XykPoolType::PrivateLatest,
                         fees,
                         HashMap::<AssetId, U128>::from_iter([(
                             AssetId::Near,
@@ -793,7 +793,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         account_id,
                         asset_0,
                         asset_1,
-                        XykPoolType::Public,
+                        XykPoolType::PublicLatest,
                         fees,
                         HashMap::<AssetId, U128>::from_iter([(
                             AssetId::Near,
@@ -820,8 +820,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             account_id,
                             asset_0,
                             asset_1.clone(),
-                            XykPoolType::Launch {
-                                phantom_liquidity_near,
+                            XykPoolType::LaunchLatest {
+                                phantom_liquidity_near: U128(phantom_liquidity_near),
                             },
                             fees,
                             HashMap::<AssetId, U128>::from_iter([
@@ -846,9 +846,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "method": "create_pool",
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
                                     assets: (asset_0, asset_1),
-                                    fees: XykFeeConfiguration {
+                                    fees: XykFeeConfiguration::V1(XykSimpleFeeConfiguration {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
-                                    },
+                                    }),
                                     pool_type,
                                 }).unwrap()),
                                 "attached_assets": attached_assets,
@@ -980,9 +980,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "method": "edit_fees",
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
                                     pool_id,
-                                    fees: XykFeeConfiguration {
+                                    fees: XykFeeConfiguration::V1(XykSimpleFeeConfiguration {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
-                                    },
+                                    }),
                                 }).unwrap()),
                                 "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
                             }
@@ -1361,8 +1361,38 @@ impl<'de> Deserialize<'de> for AssetId {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
-struct XykFeeConfiguration {
+enum XykFeeConfiguration {
+    V1(XykSimpleFeeConfiguration),
+    V2(XykV1FeeConfiguration),
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
+struct XykSimpleFeeConfiguration {
     receivers: Vec<(XykFeeReceiver, u32)>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
+struct XykV1FeeConfiguration {
+    receivers: Vec<(XykFeeReceiver, XykFeeAmount)>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, BorshSchema)]
+enum XykFeeAmount {
+    Fixed(u32),
+    Scheduled {
+        start: (u64, u32),
+        end: (u64, u32),
+        curve: XykScheduledFeeCurve,
+    },
+    Dynamic {
+        min: u32,
+        max: u32,
+    },
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, BorshSchema)]
+enum XykScheduledFeeCurve {
+    Linear,
 }
 
 #[derive(BorshSerialize, Serialize, Clone, Debug)]
@@ -1436,18 +1466,19 @@ enum XykFeeReceiver {
 enum XykPoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: XykFeeConfiguration,
+        fees: XykSimpleFeeConfiguration,
         owner_id: AccountId,
+        locked: bool,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: XykFeeConfiguration,
+        fees: XykSimpleFeeConfiguration,
         total_shares: Option<U128>,
     },
     Launch {
         near_amount: U128,
         launched_asset: AssetWithBalance,
-        fees: XykFeeConfiguration,
+        fees: XykSimpleFeeConfiguration,
         phantom_liquidity_near: U128,
     },
 }
@@ -1463,9 +1494,14 @@ type XykPoolId = u32;
 
 #[derive(BorshSerialize, BorshSchema)]
 enum XykPoolType {
-    Private,
-    Public,
-    Launch { phantom_liquidity_near: u128 },
+    PrivateLatest,
+    PublicLatest,
+    LaunchLatest { phantom_liquidity_near: U128 },
+    LaunchV1 { phantom_liquidity_near: U128 },
+    PrivateV1,
+    PublicV1,
+    PrivateV2,
+    PublicV2,
 }
 
 #[derive(BorshSerialize, BorshSchema)]

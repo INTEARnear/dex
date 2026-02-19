@@ -1960,7 +1960,12 @@ impl FeeConfiguration {
             "Fee must be less than {MAX_FEE_FRACTION} per receiver"
         );
         expect!(
-            receivers.iter().map(|(_, fee)| *fee).sum::<u32>() < MAX_FEE_FRACTION / 2,
+            receivers
+                .iter()
+                .map(|(_, fee)| *fee)
+                .try_fold(0u32, |acc, fee| acc.checked_add(fee))
+                .unwrap()
+                < MAX_FEE_FRACTION / 2,
             "Fees must add up to less than 50% ({})",
             MAX_FEE_FRACTION / 2,
         );
