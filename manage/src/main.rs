@@ -821,7 +821,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             asset_0,
                             asset_1.clone(),
                             XykPoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity_near,
                             },
                             fees,
                             HashMap::<AssetId, U128>::from_iter([
@@ -1493,11 +1493,12 @@ struct AssetWithBalance {
 type XykPoolId = u32;
 
 #[derive(BorshSerialize, BorshSchema)]
+#[allow(dead_code)]
 enum XykPoolType {
     PrivateLatest,
     PublicLatest,
-    LaunchLatest { phantom_liquidity_near: U128 },
-    LaunchV1 { phantom_liquidity_near: U128 },
+    LaunchLatest { phantom_liquidity_near: u128 },
+    LaunchV1 { phantom_liquidity_near: u128 },
     PrivateV1,
     PublicV1,
     PrivateV2,
