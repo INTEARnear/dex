@@ -28,13 +28,11 @@ const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
 const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
 const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
 const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS: &[&str] = &["user.intear.near"];
-const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&str] = &[
-    "omft.near",
-    "wrap.near",
-    "near",
-    "omni.hot.tg",
-    "tether-token.near",
+const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&str] =
+    &["omft.near", "omni.hot.tg", "tether-token.near"];
+const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&str] = &[
     "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+    "near",
 ];
 const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 
@@ -150,6 +148,13 @@ fn asset_account_ids(asset_ids: &[AssetId]) -> Vec<AccountId> {
         .collect()
 }
 
+#[near(serializers=[borsh])]
+pub enum PoolType {
+    Private,
+    Public,
+    Launch { phantom_liquidity_near: U128 },
+}
+
 #[near]
 impl Dex for XykDex {
     #[result_serializer(borsh)]
@@ -164,34 +169,55 @@ impl Dex for XykDex {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
-        let (assets, fees) = match pool {
+        let (asset0_id, asset0_balance, asset1_id, asset1_balance, fees) = match pool {
             Pool::Private {
                 assets,
                 owner_id: _,
                 fees,
-            } => (assets, fees),
+            } => (
+                assets.0.asset_id.clone(),
+                &mut assets.0.balance.0,
+                assets.1.asset_id.clone(),
+                &mut assets.1.balance.0,
+                fees,
+            ),
             Pool::Public {
                 assets,
                 fees,
                 user_shares: _,
                 total_shares: _,
-            } => (assets, fees),
+            } => (
+                assets.0.asset_id.clone(),
+                &mut assets.0.balance.0,
+                assets.1.asset_id.clone(),
+                &mut assets.1.balance.0,
+                fees,
+            ),
+            Pool::Launch {
+                near_amount,
+                launched_asset,
+                fees,
+                phantom_liquidity_near: _,
+            } => (
+                AssetId::Near,
+                &mut near_amount.0,
+                launched_asset.asset_id.clone(),
+                &mut launched_asset.balance.0,
+                fees,
+            ),
         };
         expect!(
-            assets.0.asset_id == request.asset_in || assets.1.asset_id == request.asset_in,
+            asset0_id == request.asset_in || asset1_id == request.asset_in,
             "Invalid asset in"
         );
         expect!(
-            assets.0.asset_id == request.asset_out || assets.1.asset_id == request.asset_out,
+            asset0_id == request.asset_out || asset1_id == request.asset_out,
             "Invalid asset out"
         );
-        expect!(
-            assets.0.balance.0 > 0 && assets.1.balance.0 > 0,
-            "Pool is empty"
-        );
+        expect!(*asset0_balance > 0 && *asset1_balance > 0, "Pool is empty");
         let first_in = match (
-            assets.0.asset_id == request.asset_in && assets.1.asset_id == request.asset_out,
-            assets.1.asset_id == request.asset_in && assets.0.asset_id == request.asset_out,
+            asset0_id == request.asset_in && asset1_id == request.asset_out,
+            asset1_id == request.asset_in && asset0_id == request.asset_out,
         ) {
             (true, false) => true,
             (false, true) => false,
@@ -242,9 +268,9 @@ impl Dex for XykDex {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
                 expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
                 let (in_balance, out_balance) = if first_in {
-                    (&mut assets.0.balance.0, &mut assets.1.balance.0)
+                    (asset0_balance, asset1_balance)
                 } else {
-                    (&mut assets.1.balance.0, &mut assets.0.balance.0)
+                    (asset1_balance, asset0_balance)
                 };
                 let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
                     exact_amount_in.0,
@@ -278,9 +304,9 @@ impl Dex for XykDex {
             SwapRequestAmount::ExactOut(exact_amount_out) => {
                 expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
                 let (in_balance, out_balance) = if first_in {
-                    (&mut assets.0.balance.0, &mut assets.1.balance.0)
+                    (asset0_balance, asset1_balance)
                 } else {
-                    (&mut assets.1.balance.0, &mut assets.0.balance.0)
+                    (asset1_balance, asset0_balance)
                 };
                 expect!(
                     exact_amount_out.0 < *out_balance,
@@ -346,6 +372,19 @@ impl Dex for XykDex {
             }
         };
         self.fees_collected_by_users.flush();
+
+        if let Pool::Launch {
+            near_amount,
+            phantom_liquidity_near,
+            ..
+        } = pool
+        {
+            expect!(
+                near_amount.0 >= phantom_liquidity_near.0,
+                "NEAR liquidity can't go lower than the initial phantom liquidity"
+            );
+        }
+
         XykDexEvent::PoolUpdated {
             pool_id,
             pool: (&*pool).into(),
@@ -389,12 +428,12 @@ impl XykDex {
         struct CreatePoolArgs {
             assets: (AssetId, AssetId),
             fees: FeeConfiguration,
-            is_public: bool,
+            pool_type: PoolType,
         }
         let Ok(CreatePoolArgs {
             assets,
             fees,
-            is_public,
+            pool_type,
         }) = near_sdk::borsh::from_slice(&args)
         else {
             near_sdk::env::panic_str("Invalid args");
@@ -444,37 +483,79 @@ impl XykDex {
         }
         self.fees_collected_by_users.flush();
 
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .expect("Near should be attached for storage")
+                .0,
+        );
+
         let pool_id = self.pools.len();
-        self.pools.push(if is_public {
-            Pool::Public {
-                assets: (
-                    AssetWithBalance {
-                        asset_id: assets.0.clone(),
-                        balance: U128(0),
-                    },
-                    AssetWithBalance {
-                        asset_id: assets.1.clone(),
-                        balance: U128(0),
-                    },
-                ),
-                fees: fees.clone(),
-                user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                total_shares: None,
+        self.pools.push(match pool_type {
+            PoolType::Public => {
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than NEAR should be attached"
+                );
+                Pool::Public {
+                    assets: (
+                        AssetWithBalance {
+                            asset_id: assets.0.clone(),
+                            balance: U128(0),
+                        },
+                        AssetWithBalance {
+                            asset_id: assets.1.clone(),
+                            balance: U128(0),
+                        },
+                    ),
+                    fees: fees.clone(),
+                    user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
+                    total_shares: None,
+                }
             }
-        } else {
-            Pool::Private {
-                assets: (
-                    AssetWithBalance {
-                        asset_id: assets.0.clone(),
-                        balance: U128(0),
-                    },
-                    AssetWithBalance {
+            PoolType::Private => {
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than NEAR should be attached"
+                );
+                Pool::Private {
+                    assets: (
+                        AssetWithBalance {
+                            asset_id: assets.0.clone(),
+                            balance: U128(0),
+                        },
+                        AssetWithBalance {
+                            asset_id: assets.1.clone(),
+                            balance: U128(0),
+                        },
+                    ),
+                    fees: fees.clone(),
+                    owner_id: near_sdk::env::predecessor_account_id(),
+                }
+            }
+            PoolType::Launch {
+                phantom_liquidity_near,
+            } => {
+                expect!(
+                    assets.0 == AssetId::Near,
+                    "First asset in Launch pools must be NEAR"
+                );
+                let attached_launched_asset = attached_assets
+                    .remove(&assets.1)
+                    .expect("Launched asset not found");
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than NEAR and launched asset should be attached"
+                );
+                Pool::Launch {
+                    near_amount: phantom_liquidity_near,
+                    launched_asset: AssetWithBalance {
                         asset_id: assets.1.clone(),
-                        balance: U128(0),
+                        balance: U128(attached_launched_asset.0),
                     },
-                ),
-                fees: fees.clone(),
-                owner_id: near_sdk::env::predecessor_account_id(),
+                    fees: fees.clone(),
+                    phantom_liquidity_near,
+                }
             }
         });
         self.pools.flush();
@@ -486,19 +567,9 @@ impl XykDex {
                 .expect("Can't possibly be lower after inserting"),
         );
 
-        let attached_near = NearToken::from_yoctonear(
-            attached_assets
-                .remove(&AssetId::Near)
-                .expect("Near should be attached for storage")
-                .0,
-        );
         expect!(
             attached_near >= storage_cost,
             "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
-        );
-        expect!(
-            attached_assets.is_empty(),
-            "No assets other than NEAR should be attached"
         );
 
         XykDexEvent::PoolUpdated {
@@ -870,6 +941,9 @@ impl XykDex {
                     assets,
                 )
             }
+            Pool::Launch { .. } => {
+                panic!("Launch pools don't support adding liquidity after creation");
+            }
         };
 
         XykDexEvent::LiquidityAdded {
@@ -1074,6 +1148,9 @@ impl XykDex {
                     total_shares_after,
                 )
             }
+            Pool::Launch { .. } => {
+                panic!("Launch pools don't support removing liquidity after creation");
+            }
         };
 
         XykDexEvent::LiquidityRemoved {
@@ -1158,6 +1235,9 @@ impl XykDex {
             }
             Pool::Public { .. } => {
                 panic!("Fees cannot be edited for public pools");
+            }
+            Pool::Launch { .. } => {
+                panic!("Fees cannot be edited for launch pools");
             }
         };
         fees.validate();
@@ -1309,6 +1389,7 @@ impl XykDex {
                         .get(&account_id)
                         .map(|shares| shares.map(|shares| U128(shares.get())).unwrap_or_default()),
                     Pool::Private { .. } => None,
+                    Pool::Launch { .. } => None,
                 }
             })
             .collect()
@@ -1350,6 +1431,12 @@ pub enum Pool {
         user_shares: LookupMap<AccountId, Option<SharesBalance>>,
         total_shares: Option<SharesBalance>,
     },
+    Launch {
+        near_amount: U128,
+        launched_asset: AssetWithBalance,
+        fees: FeeConfiguration,
+        phantom_liquidity_near: U128,
+    },
 }
 
 #[near(serializers=[borsh, json])]
@@ -1363,6 +1450,12 @@ pub enum PoolView {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: FeeConfiguration,
         total_shares: Option<U128>,
+    },
+    Launch {
+        near_amount: U128,
+        launched_asset: AssetWithBalance,
+        fees: FeeConfiguration,
+        phantom_liquidity_near: U128,
     },
 }
 
@@ -1393,6 +1486,17 @@ impl From<&Pool> for PoolView {
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
                 total_shares: total_shares.map(|s| U128(s.get())),
+            },
+            Pool::Launch {
+                near_amount,
+                launched_asset,
+                fees,
+                phantom_liquidity_near,
+            } => PoolView::Launch {
+                near_amount: *near_amount,
+                launched_asset: launched_asset.clone(),
+                fees: fees.clone(),
+                phantom_liquidity_near: *phantom_liquidity_near,
             },
         }
     }
@@ -1449,17 +1553,26 @@ impl FeeConfiguration {
         if receivers.is_empty() {
             protocol_fee = 0;
         } else if let Some(trader_account_id) = trader_account_id {
-            for asset_account_id in asset_account_ids {
+            let mut has_non_stable_assets = false;
+            'assets: for asset_account_id in asset_account_ids {
+                for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
+                    if asset_account_id == *reduce_asset_account {
+                        continue 'assets;
+                    }
+                }
                 for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
                     let protocol_fee_bypass_asset_parent_account =
                         bypass_asset_parent_account.parse::<AccountId>().unwrap();
                     if asset_account_id.is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
-                        || asset_account_id == protocol_fee_bypass_asset_parent_account
                     {
-                        protocol_fee = PROTOCOL_FEE_REDUCED;
-                        break;
+                        continue 'assets;
                     }
                 }
+                // If not matched by either of the above, it's a non-stable asset
+                has_non_stable_assets = true;
+            }
+            if !has_non_stable_assets {
+                protocol_fee = PROTOCOL_FEE_REDUCED;
             }
             for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
                 let protocol_fee_bypass_parent_account =
