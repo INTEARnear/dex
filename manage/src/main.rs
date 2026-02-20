@@ -127,6 +127,10 @@ enum XykAction {
     GetPool {
         pool_id: XykPoolId,
     },
+    UpgradePool {
+        account_id: AccountId,
+        pool_id: XykPoolId,
+    },
     AddLiquidity {
         account_id: AccountId,
         pool_id: XykPoolId,
@@ -495,6 +499,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("XykAddLiquidityArgs: {schema:#?}");
             let schema = borsh::schema_container_of::<XykRemoveLiquidityArgs>();
             println!("XykRemoveLiquidityArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykUpgradePoolArgs>();
+            println!("XykUpgradePoolArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykPoolNeedsUpgradeArgs>();
+            println!("XykPoolNeedsUpgradeArgs: {schema:#?}");
+            let schema = borsh::schema_container_of::<XykUpgradePoolArgs>();
+            println!("XykUpgradePoolArgs: {schema:#?}");
         }
         Commands::Otc { action } => match action {
             OtcAction::Deploy { storage } => {
@@ -866,9 +876,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             XykAction::GetPool { pool_id } => {
                 let dex_id = format!("{}/{}", config.deployer_id, "xyk");
                 match xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await? {
-                    Some(pool) => println!("Pool: {:#?}", pool),
+                    Some(pool) => {
+                        println!("Pool: {:#?}", pool);
+                        let needs_upgrade = xyk_pool_needs_upgrade(
+                            config.dex_contract_id.clone(),
+                            &dex_id,
+                            pool_id,
+                        )
+                        .await?;
+                        if needs_upgrade {
+                            println!("\n⚠️  This pool needs an upgrade to the latest version.");
+                            println!("   Run: xyk upgrade-pool <account_id> {pool_id}");
+                        }
+                    }
                     None => println!("Pool not found"),
                 }
+            }
+            XykAction::UpgradePool {
+                account_id,
+                pool_id,
+            } => {
+                let account_signer =
+                    Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                        .await?;
+                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "execute_operations",
+                        json!({
+                            "operations": [{
+                                "DexCall": {
+                                    "dex_id": dex_id,
+                                    "method": "upgrade_pool",
+                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&XykUpgradePoolArgs {
+                                        pool_id,
+                                    }).unwrap()),
+                                    "attached_assets": {},
+                                }
+                            }]
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(account_id.clone(), account_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Pool upgraded. Result: {:?}", result.outcome());
             }
             XykAction::AddLiquidity {
                 account_id,
@@ -1567,6 +1621,38 @@ async fn xyk_fetch_pool(
                 "dex_id": dex_id,
                 "method": "get_pool",
                 "args": BASE64_STANDARD.encode(borsh::to_vec(&pool_id).unwrap()),
+            }),
+        )
+        .read_only()
+        .fetch_from(&network())
+        .await?
+        .data;
+    let response_bytes = BASE64_STANDARD.decode(&result)?;
+    Ok(borsh::from_slice(&response_bytes)?)
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykUpgradePoolArgs {
+    pool_id: XykPoolId,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykPoolNeedsUpgradeArgs {
+    pool_id: XykPoolId,
+}
+
+async fn xyk_pool_needs_upgrade(
+    dex_contract_id: AccountId,
+    dex_id: &str,
+    pool_id: XykPoolId,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let result: String = Contract(dex_contract_id)
+        .call_function(
+            "dex_view",
+            json!({
+                "dex_id": dex_id,
+                "method": "pool_needs_upgrade",
+                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykPoolNeedsUpgradeArgs { pool_id }).unwrap()),
             }),
         )
         .read_only()

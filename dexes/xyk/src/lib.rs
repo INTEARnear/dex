@@ -1684,6 +1684,17 @@ impl XykDex {
     pub fn get_pool_count(&self) -> PoolId {
         self.pools.len()
     }
+
+    #[result_serializer(borsh)]
+    pub fn pool_needs_upgrade(&self, #[serializer(borsh)] pool_id: PoolId) -> bool {
+        let Some(pool) = self.pools.get(pool_id) else {
+            panic!("Pool {pool_id} not found");
+        };
+        match pool {
+            Pool::PrivateV1 { .. } | Pool::PublicV1 { .. } => true,
+            Pool::LaunchV1 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => false,
+        }
+    }
 }
 
 #[near(serializers=[borsh])]
