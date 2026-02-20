@@ -846,7 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "method": "create_pool",
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
                                     assets: (asset_0, asset_1),
-                                    fees: XykFeeConfiguration::V1(XykSimpleFeeConfiguration {
+                                    fees: XykFeeConfiguration::V1(XykCurrentFees {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
                                     }),
                                     pool_type,
@@ -980,7 +980,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "method": "edit_fees",
                                 "args": BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
                                     pool_id,
-                                    fees: XykFeeConfiguration::V1(XykSimpleFeeConfiguration {
+                                    fees: XykFeeConfiguration::V1(XykCurrentFees {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
                                     }),
                                 }).unwrap()),
@@ -1362,12 +1362,12 @@ impl<'de> Deserialize<'de> for AssetId {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
 enum XykFeeConfiguration {
-    V1(XykSimpleFeeConfiguration),
+    V1(XykCurrentFees),
     V2(XykV1FeeConfiguration),
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, BorshSchema)]
-struct XykSimpleFeeConfiguration {
+struct XykCurrentFees {
     receivers: Vec<(XykFeeReceiver, u32)>,
 }
 
@@ -1466,19 +1466,22 @@ enum XykFeeReceiver {
 enum XykPoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: XykSimpleFeeConfiguration,
+        fees: XykCurrentFees,
+        fee_configuration: XykFeeConfiguration,
         owner_id: AccountId,
         locked: bool,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: XykSimpleFeeConfiguration,
+        fees: XykCurrentFees,
+        fee_configuration: XykFeeConfiguration,
         total_shares: Option<U128>,
     },
     Launch {
         near_amount: U128,
         launched_asset: AssetWithBalance,
-        fees: XykSimpleFeeConfiguration,
+        fees: XykCurrentFees,
+        fee_configuration: XykFeeConfiguration,
         phantom_liquidity_near: U128,
     },
 }

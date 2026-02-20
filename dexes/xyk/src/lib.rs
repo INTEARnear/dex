@@ -245,7 +245,7 @@ impl Dex for XykDex {
         fn collect_fees(
             amount_in: u128,
             asset_in: &AssetId,
-            fees: &SimpleFeeConfiguration,
+            fees: &CurrentFees,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
         ) -> (u128, u128, Vec<(FeeReceiver, U128)>) {
             let mut fees_breakdown = Vec::new();
@@ -1691,11 +1691,11 @@ pub enum Pool {
     PrivateV1 {
         assets: (AssetWithBalance, AssetWithBalance),
         owner_id: AccountId,
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
     },
     PublicV1 {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
         user_shares: LookupMap<AccountId, Option<SharesBalance>>,
         total_shares: Option<SharesBalance>,
     },
@@ -1723,19 +1723,22 @@ pub enum Pool {
 pub enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
         owner_id: AccountId,
         locked: bool,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
         total_shares: Option<U128>,
     },
     Launch {
         near_amount: U128,
         launched_asset: AssetWithBalance,
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
         phantom_liquidity_near: U128,
     },
 }
@@ -1753,6 +1756,7 @@ impl From<&Pool> for PoolView {
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
+                fee_configuration: FeeConfiguration::V1(fees.clone()),
                 owner_id: owner_id.clone(),
                 locked: false,
             },
@@ -1767,6 +1771,7 @@ impl From<&Pool> for PoolView {
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
+                fee_configuration: FeeConfiguration::V1(fees.clone()),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
             Pool::LaunchV1 {
@@ -1777,10 +1782,11 @@ impl From<&Pool> for PoolView {
             } => PoolView::Launch {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
-                fees: SimpleFeeConfiguration::from(fees).with_protocol_fee(
+                fees: CurrentFees::from(fees).with_protocol_fee(
                     None,
                     asset_account_ids(&[AssetId::Near, launched_asset.asset_id.clone()]),
                 ),
+                fee_configuration: fees.clone(),
                 phantom_liquidity_near: *phantom_liquidity_near,
             },
             Pool::PrivateV2 {
@@ -1790,10 +1796,11 @@ impl From<&Pool> for PoolView {
                 locked,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: SimpleFeeConfiguration::from(fees).with_protocol_fee(
+                fees: CurrentFees::from(fees).with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
+                fee_configuration: fees.clone(),
                 owner_id: owner_id.clone(),
                 locked: *locked,
             },
@@ -1804,10 +1811,11 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: SimpleFeeConfiguration::from(fees).with_protocol_fee(
+                fees: CurrentFees::from(fees).with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
+                fee_configuration: fees.clone(),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
         }
@@ -1827,13 +1835,13 @@ type SharesBalance = NonZeroU128;
 #[derive(Clone)]
 #[serde(untagged)]
 pub enum FeeConfiguration {
-    V1(SimpleFeeConfiguration),
+    V1(CurrentFees),
     V2(V1FeeConfiguration),
 }
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
-pub struct SimpleFeeConfiguration {
+pub struct CurrentFees {
     receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
 
@@ -2004,7 +2012,7 @@ impl FeeConfiguration {
     }
 }
 
-impl From<&FeeConfiguration> for SimpleFeeConfiguration {
+impl From<&FeeConfiguration> for CurrentFees {
     fn from(fee_configuration: &FeeConfiguration) -> Self {
         Self {
             receivers: fee_configuration.receivers(),
@@ -2012,12 +2020,12 @@ impl From<&FeeConfiguration> for SimpleFeeConfiguration {
     }
 }
 
-impl SimpleFeeConfiguration {
+impl CurrentFees {
     fn with_protocol_fee(
         &self,
         trader_account_id: Option<AccountId>,
         asset_account_ids: Vec<AccountId>,
-    ) -> SimpleFeeConfiguration {
+    ) -> CurrentFees {
         let mut receivers = self.receivers.clone();
         let mut protocol_fee = PROTOCOL_FEE;
         if receivers.is_empty() {

@@ -72,12 +72,12 @@ struct SwapArgs {
 
 #[near(serializers=[borsh, json])]
 enum FeeConfiguration {
-    V1(SimpleFeeConfiguration),
+    V1(CurrentFees),
     V2(V1FeeConfiguration),
 }
 
 #[near(serializers=[borsh, json])]
-struct SimpleFeeConfiguration {
+struct CurrentFees {
     receivers: Vec<(FeeReceiver, u32)>,
 }
 
@@ -135,19 +135,22 @@ struct AssetWithBalance {
 enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
         owner_id: AccountId,
         locked: bool,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
-        fees: SimpleFeeConfiguration,
-        total_shares: Option<SharesBalance>,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
+        total_shares: Option<U128>,
     },
     Launch {
         near_amount: U128,
         launched_asset: AssetWithBalance,
-        fees: SimpleFeeConfiguration,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
         phantom_liquidity_near: U128,
     },
 }
@@ -290,7 +293,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type,
@@ -552,7 +555,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type,
@@ -1020,7 +1023,7 @@ async fn test_xyk_upgrade_private_v1() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration { receivers: vec![] }),
+                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
                             pool_type: PoolType::PrivateV1,
                         })
                         .unwrap(),
@@ -1232,7 +1235,7 @@ async fn test_xyk_upgrade_public_v1() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration { receivers: vec![] }),
+                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
                             pool_type: PoolType::PublicV1,
                         })
                         .unwrap(),
@@ -1460,7 +1463,7 @@ async fn test_xyk_lock_pool() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration { receivers: vec![] }),
+                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
                             pool_type: PoolType::PrivateLatest,
                         })
                         .unwrap(),
@@ -1602,7 +1605,7 @@ async fn test_xyk_multi_user_liquidity() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::PublicLatest,
@@ -1894,7 +1897,7 @@ async fn test_xyk_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![(
                                     FeeReceiver::Account(user2.id().clone()),
                                     fee_fraction,
@@ -2360,7 +2363,7 @@ async fn test_xyk_exact_output() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::PrivateLatest,
@@ -2574,7 +2577,7 @@ async fn test_xyk_pool_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![(
                                     FeeReceiver::Pool,
                                     fee_fraction,
@@ -2828,7 +2831,7 @@ async fn test_xyk_launch_pool_flow() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::LaunchLatest {
@@ -3005,7 +3008,7 @@ async fn test_xyk_launch_pool_restrictions() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(SimpleFeeConfiguration {
+                            fees: FeeConfiguration::V1(CurrentFees {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::LaunchLatest {
