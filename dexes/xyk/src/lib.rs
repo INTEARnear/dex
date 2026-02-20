@@ -1132,10 +1132,6 @@ impl XykDex {
                     shares_to_remove.get() <= INITIAL_SHARES.get(),
                     "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
-                expect!(
-                    min_assets_received.is_none(),
-                    "Min assets received must not be specified for private pools"
-                );
                 #[allow(clippy::arithmetic_side_effects)]
                 // u128 * u128 can't overflow; INITIAL_SHARES is not 0
                 let withdrawn_amount_0 = u256_to_u128(
@@ -1148,6 +1144,13 @@ impl XykDex {
                     u128_to_u256(assets.1.balance.0) * u128_to_u256(shares_to_remove.get())
                         / u128_to_u256(INITIAL_SHARES.get()),
                 );
+                if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
+                    expect!(
+                        withdrawn_amount_0 >= min_asset_0_received.0
+                            && withdrawn_amount_1 >= min_asset_1_received.0,
+                        "Slippage error"
+                    );
+                }
                 assets.0.balance.0 = assets
                     .0
                     .balance
