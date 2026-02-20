@@ -661,7 +661,7 @@ impl XykDex {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         near_sdk::env::predecessor_account_id(),
                     ),
                 }]
@@ -724,7 +724,7 @@ impl XykDex {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         near_sdk::env::predecessor_account_id(),
                     ),
                 }]
@@ -973,7 +973,7 @@ impl XykDex {
                                 asset_withdraw_requests.push(AssetWithdrawRequest {
                                     asset_id: assets.0.asset_id.clone(),
                                     amount: U128(refund_amount_0),
-                                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                                         near_sdk::env::predecessor_account_id(),
                                     ),
                                 });
@@ -984,7 +984,7 @@ impl XykDex {
                                 asset_withdraw_requests.push(AssetWithdrawRequest {
                                     asset_id: assets.1.asset_id.clone(),
                                     amount: U128(refund_amount_1),
-                                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                                         near_sdk::env::predecessor_account_id(),
                                     ),
                                 });
@@ -1459,7 +1459,7 @@ impl XykDex {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         near_sdk::env::predecessor_account_id(),
                     ),
                 }]
@@ -1523,7 +1523,9 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn upgrade_pool(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[allow(unused_mut)]
+        #[serializer(borsh)]
+        mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
@@ -1534,11 +1536,14 @@ impl XykDex {
         let Ok(UpgradePoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
         expect!(attached_assets.is_empty(), "No assets should be attached");
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool {pool_id} not found");
         };
         // Anyone can upgrade any pool, even not owned by them
+        let storage_usage_before = near_sdk::env::storage_usage();
         let new_pool = match pool {
             Pool::PrivateV1 {
                 assets,
@@ -1572,7 +1577,29 @@ impl XykDex {
         }
         .emit();
         self.pools.flush();
-        DexCallResponse::default()
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+        expect!(
+            let Some(leftover) = attached_near.checked_sub(storage_cost),
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        DexCallResponse {
+            asset_withdraw_requests: if !leftover.is_zero() {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
     }
 
     #[payable]
@@ -1850,7 +1877,7 @@ type SharesBalance = NonZeroU128;
 #[serde(untagged)]
 pub enum FeeConfiguration {
     V1(CurrentFees),
-    V2(V1FeeConfiguration),
+    V2(V2FeeConfiguration),
 }
 
 #[near(serializers=[borsh, json])]
@@ -1861,7 +1888,7 @@ pub struct CurrentFees {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
-pub struct V1FeeConfiguration {
+pub struct V2FeeConfiguration {
     receivers: Vec<(FeeReceiver, FeeAmount)>,
 }
 

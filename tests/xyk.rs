@@ -904,14 +904,12 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
         &dex_engine_contract,
         AccountOrDexId::Account(user1.id().clone()),
         AssetId::Nep141(ft2.id().clone()),
-        // +1 due to rounding in add_liquidity
-        Some(U128(
-            add_liquidity_ft2_user1 - added_liquidity_ft2_user1 + 1,
-        )),
+        Some(U128(0)),
     )
     .await
     .unwrap();
 
+    let user1_ft2_add_liquidity_refund = add_liquidity_ft2_user1 - added_liquidity_ft2_user1;
     assert_ft_balance(
         &user1,
         ft1.clone(),
@@ -922,7 +920,11 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
     assert_ft_balance(
         &user1,
         ft2.clone(),
-        U128((ft2_initial_deposit - add_liquidity_ft2_user1) + user1_ft2_expected_received - 1),
+        U128(
+            (ft2_initial_deposit - add_liquidity_ft2_user1)
+                + user1_ft2_add_liquidity_refund
+                + user1_ft2_expected_received,
+        ),
     )
     .await
     .unwrap();
@@ -947,6 +949,7 @@ async fn test_xyk_upgrade_private_v1() {
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
     let first_pool_id = 0u32;
+    let storage_deposit_for_upgrade = NearToken::from_millinear(5);
 
     let wasms = get_compiled_wasms().await;
 
@@ -1053,16 +1056,23 @@ async fn test_xyk_upgrade_private_v1() {
     assert_success(&result).unwrap();
 
     let upgrade_result = user1
-        .call(dex_engine_contract.id(), "dex_call")
+        .call(dex_engine_contract.id(), "execute_operations")
         .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
+        .deposit(storage_deposit_for_upgrade)
         .args_json(json!({
-            "dex_id": dex_id.clone(),
-            "method": "upgrade_pool",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&UpgradePoolArgs {
-                pool_id: first_pool_id,
-            }).unwrap()),
-            "attached_assets": {},
+            "operations": vec![
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "upgrade_pool".to_string(),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&UpgradePoolArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        U128(storage_deposit_for_upgrade.as_yoctonear()),
+                    )]),
+                },
+            ],
         }))
         .transact()
         .await
@@ -1159,6 +1169,7 @@ async fn test_xyk_upgrade_public_v1() {
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 4_000_000_000u128;
     let first_pool_id = 0u32;
+    let storage_deposit_for_upgrade = NearToken::from_millinear(5);
 
     let wasms = get_compiled_wasms().await;
 
@@ -1289,16 +1300,23 @@ async fn test_xyk_upgrade_public_v1() {
             .unwrap();
 
     let upgrade_result = user2
-        .call(dex_engine_contract.id(), "dex_call")
+        .call(dex_engine_contract.id(), "execute_operations")
         .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
+        .deposit(storage_deposit_for_upgrade)
         .args_json(json!({
-            "dex_id": dex_id.clone(),
-            "method": "upgrade_pool",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&UpgradePoolArgs {
-                pool_id: first_pool_id,
-            }).unwrap()),
-            "attached_assets": {},
+            "operations": vec![
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "upgrade_pool".to_string(),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&UpgradePoolArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        U128(storage_deposit_for_upgrade.as_yoctonear()),
+                    )]),
+                },
+            ],
         }))
         .transact()
         .await
@@ -1804,9 +1822,8 @@ async fn test_xyk_multi_user_liquidity() {
         withdrawn_ft2 += ft2_balance.0;
     }
 
-    // I guess rounding errors?
-    assert_eq!(withdrawn_ft1, total_ft1 - 3);
-    assert_eq!(withdrawn_ft2, total_ft2 - 8);
+    assert_eq!(withdrawn_ft1, total_ft1);
+    assert_eq!(withdrawn_ft2, total_ft2);
 }
 
 #[tokio::test]
