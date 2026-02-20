@@ -7,9 +7,7 @@ use near_api::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::json;
-use std::{
-    collections::HashMap, fmt::Display, num::NonZeroU128, process::Stdio, str::FromStr, sync::Arc,
-};
+use std::{collections::HashMap, fmt::Display, num::NonZeroU128, str::FromStr, sync::Arc};
 use tokio::process::Command;
 
 #[derive(Parser)]
@@ -511,20 +509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::fs::create_dir_all("./schemas").await?;
             for (name, schema) in schemas {
-                let schema_serialized = borsh::to_vec(&schema).unwrap();
-                tokio::fs::write(format!("./schemas/{name}.borsh"), schema_serialized).await?;
-                Command::new("zorsh-schema-gen")
-                    .args([
-                        "generate",
-                        &format!("schemas/{name}.borsh"),
-                        "-o",
-                        &format!("schemas/{name}.ts"),
-                        "--prettier",
-                    ])
-                    .stdout(Stdio::null())
-                    .status()
-                    .await?;
-                println!("Generated schemas/{name}.borsh and schemas/{name}.ts");
+                println!("{name}: {schema:#?}");
             }
         }
         Commands::Otc { action } => match action {
