@@ -2030,14 +2030,9 @@ async fn test_xyk_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(user2.id().clone()),
-        AssetId::Nep141(ft1.id().clone()),
-        Some(U128(fee_amount)),
-    )
-    .await
-    .unwrap();
+    assert_ft_balance(&user2, ft1.clone(), U128(fee_amount))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2248,16 +2243,12 @@ async fn test_xyk_scheduled_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let user2_fee_balance = dex_engine_contract
-        .view("asset_balance_of")
-        .args_json(json!({
-            "of": AccountOrDexId::Account(user2.id().clone()),
-            "asset_id": AssetId::Nep141(ft1.id().clone()),
-        }))
+    let user2_fee_balance = ft1
+        .view("ft_balance_of")
+        .args_json(json!({"account_id": user2.id()}))
         .await
         .unwrap()
-        .json::<Option<U128>>()
-        .unwrap()
+        .json::<U128>()
         .unwrap()
         .0;
     let min_fee_fraction = expected_fee_fraction_after_fast_forward as u128 * 95 / 100;

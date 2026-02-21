@@ -1080,7 +1080,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
                 let response_base64 = result.data.as_str().expect("Expected base64 response");
                 let response_bytes = BASE64_STANDARD.decode(response_base64)?;
-                let pending_fees: Vec<(AssetId, U128)> = borsh::from_slice(&response_bytes)?;
+                let pending_fees: HashMap<AssetId, U128> = borsh::from_slice(&response_bytes)?;
                 if pending_fees.is_empty() {
                     println!("No pending fees");
                 } else {

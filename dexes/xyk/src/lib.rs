@@ -1507,7 +1507,7 @@ impl XykDex {
             asset_withdraw_requests.push(AssetWithdrawRequest {
                 asset_id,
                 amount: balance,
-                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
+                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                     near_sdk::env::predecessor_account_id(),
                 ),
             });
@@ -1698,7 +1698,7 @@ impl XykDex {
         &self,
         #[serializer(borsh)] account_id: AccountId,
         #[serializer(borsh)] asset_ids: Vec<AssetId>,
-    ) -> Vec<(AssetId, U128)> {
+    ) -> HashMap<AssetId, U128> {
         asset_ids
             .into_iter()
             .filter_map(|asset_id| {
