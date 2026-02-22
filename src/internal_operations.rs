@@ -737,13 +737,17 @@ impl DexEngine {
                             .expect("Asset to withdraw not found in anonymous assets");
                         let amount = match amount {
                             WithdrawAmount::Full { at_least } => {
-                                if *asset_balance >= at_least.unwrap_or_default() {
-                                    *asset_balance
+                                if let Some(at_least) = at_least {
+                                    if *asset_balance >= at_least {
+                                        *asset_balance
+                                    } else {
+                                        panic!(
+                                            "Not enough balance for withdrawal of {asset_id}: {} < {:?}",
+                                            asset_balance.0, at_least,
+                                        );
+                                    }
                                 } else {
-                                    panic!(
-                                        "Not enough balance for withdraw {asset_id}: {} < {:?}",
-                                        asset_balance.0, at_least,
-                                    );
+                                    *asset_balance
                                 }
                             }
                             WithdrawAmount::Exact(amount) => amount,
@@ -762,27 +766,28 @@ impl DexEngine {
                                 ),
                             },
                         };
-                        asset_balance.0 = asset_balance
-                            .0
-                            .checked_sub(amount.0)
-                            .expect("Not enough balance in anonymous assets");
-                        let rescue_address = if self.asset_is_registered(
-                            AccountOrDexId::Account(by.clone()),
-                            asset_id.clone(),
-                        ) {
-                            by.clone()
-                        } else if let Some(rescue_address) = rescue_address {
-                            self.assert_asset_registered(
-                                AccountOrDexId::Account(rescue_address.clone()),
+                        if amount.0 > 0 {
+                            asset_balance.0 = asset_balance
+                                .0
+                                .checked_sub(amount.0)
+                                .expect("Not enough balance in anonymous assets");
+                            let rescue_address = if self.asset_is_registered(
+                                AccountOrDexId::Account(by.clone()),
                                 asset_id.clone(),
-                            );
-                            rescue_address.clone()
-                        } else {
-                            panic!(
-                                "No rescue address provided and user doesn't have a registered balance for this asset"
-                            );
-                        };
-                        self.total_in_custody
+                            ) {
+                                by.clone()
+                            } else if let Some(rescue_address) = rescue_address {
+                                self.assert_asset_registered(
+                                    AccountOrDexId::Account(rescue_address.clone()),
+                                    asset_id.clone(),
+                                );
+                                rescue_address.clone()
+                            } else {
+                                panic!(
+                                    "No rescue address provided and user doesn't have a registered balance for this asset"
+                                );
+                            };
+                            self.total_in_custody
                             .entry(asset_id.clone())
                             .and_modify(|b| {
                                 b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
@@ -799,7 +804,6 @@ impl DexEngine {
                                     "Failed to withdraw assets from contract tracked balance: asset not registered"
                                 )
                             });
-                        if amount.0 > 0 {
                             self.internal_withdraw_unchecked(
                                 asset_id,
                                 amount,
@@ -968,7 +972,8 @@ impl DexEngine {
         for (asset_id, amount) in anon_swap_available_assets.unwrap_or_default() {
             expect!(
                 amount.0 == 0,
-                "Sandboxed assets must be empty after execution. Did you forget to withdraw {asset_id}?"
+                "Sandboxed assets must be empty after execution. Did you forget to withdraw {} {asset_id}?",
+                amount.0
             );
         }
     }
