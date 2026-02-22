@@ -199,7 +199,7 @@ impl DexEngine {
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
-        mut trader: TradeAccount,
+        trader: TradeAccount,
         referrer: Option<AccountId>,
         constraint: Option<U128>,
     ) -> (U128, U128) {
@@ -212,15 +212,16 @@ impl DexEngine {
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
         let storage_usage_before = near_sdk::env::storage_usage();
+        let alleged_trader = match &trader {
+            TradeAccount::User(account) => account.clone(),
+            TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader.clone(),
+        };
         let response = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::Trade {
                 dex_storage_mut: &mut self.dex_storage,
-                alleged_trader: match &trader {
-                    TradeAccount::User(account) => account.clone(),
-                    TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader.clone(),
-                },
+                alleged_trader: alleged_trader.clone(),
             },
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
             "swap",
@@ -263,7 +264,7 @@ impl DexEngine {
             }
         }
 
-        match &mut trader {
+        match trader {
             TradeAccount::User(user_trader) => {
                 // asset in
                 self.internal_transfer_asset(
@@ -313,10 +314,7 @@ impl DexEngine {
             request: swap_request,
             amount_in: response.amount_in,
             amount_out: response.amount_out,
-            trader: match trader {
-                TradeAccount::User(account) => account,
-                TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader,
-            },
+            trader: alleged_trader,
             referrer,
         }
         .emit();
