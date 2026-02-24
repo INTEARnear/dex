@@ -92,11 +92,14 @@ impl Serialize for AccountOrDexId {
 #[derive(Subcommand)]
 enum OtcAction {
     Deploy {
+        deployer_id: AccountId,
         /// Include storage deposit (5 NEAR) in the deployment transaction
         #[arg(long)]
         storage: bool,
     },
-    Initialize,
+    Initialize {
+        deployer_id: AccountId,
+    },
     SetAuthorizedKey {
         account_id: AccountId,
         key: PublicKey,
@@ -115,11 +118,21 @@ enum OtcAction {
 #[derive(Subcommand)]
 enum XykAction {
     Deploy {
+        deployer_id: AccountId,
         /// Include storage deposit (5 NEAR) in the deployment transaction
         #[arg(long)]
         storage: bool,
     },
-    Initialize,
+    Initialize {
+        deployer_id: AccountId,
+    },
+    Migrate {
+        deployer_id: AccountId,
+    },
+    Referrers {
+        #[command(subcommand)]
+        action: XykReferrerAction,
+    },
     CreatePool {
         #[command(subcommand)]
         action: XykCreatePoolAction,
@@ -250,6 +263,26 @@ enum XykCreatePoolAction {
     },
 }
 
+#[derive(Subcommand)]
+enum XykReferrerAction {
+    SetSettings {
+        account_id: AccountId,
+        fee_fraction: u32,
+        fee_fraction_reduced: u32,
+        /// NEAR attached for storage costs.
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
+    },
+    RegisterFeeAssets {
+        account_id: AccountId,
+        #[arg(value_delimiter = ',')]
+        asset_ids: Vec<AssetId>,
+        /// NEAR attached for storage costs.
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
+    },
+}
+
 #[derive(Clone, Debug)]
 struct FeeReceiverArg {
     account_id: AccountId,
@@ -274,28 +307,24 @@ impl FromStr for FeeReceiverArg {
 }
 
 struct Config {
-    deployer_id: AccountId,
-    signer: Arc<Signer>,
     dex_contract_id: AccountId,
+    otc_dex_id: String,
+    xyk_dex_id: String,
 }
 
 async fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let deployer_id =
-        std::env::var("DEPLOYER_ID").map_err(|_| "DEPLOYER_ID environment variable not set")?;
-    let deployer_id =
-        AccountId::from_str(&deployer_id).map_err(|e| format!("Invalid DEPLOYER_ID: {}", e))?;
-    let signer =
-        Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network()).await?;
     let dex_contract_id = std::env::var("DEX_CONTRACT_ID").unwrap_or("dex.intear.near".to_string());
     let dex_contract_id = AccountId::from_str(&dex_contract_id)
         .map_err(|e| format!("Invalid DEX_CONTRACT_ID: {}", e))?;
+    let otc_dex_id = std::env::var("OTC_DEX_ID").unwrap_or("slimedragon.near/otc".to_string());
+    let xyk_dex_id = std::env::var("XYK_DEX_ID").unwrap_or("slimedragon.near/xyk".to_string());
 
     Ok(Config {
-        deployer_id,
-        signer,
         dex_contract_id,
+        otc_dex_id,
+        xyk_dex_id,
     })
 }
 
@@ -479,7 +508,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = load_config().await?;
 
-    println!("Loaded config: deployer_id = {}", config.deployer_id);
+    println!(
+        "Loaded config: dex_contract_id = {}, otc_dex_id = {}, xyk_dex_id = {}",
+        config.dex_contract_id, config.otc_dex_id, config.xyk_dex_id
+    );
 
     match cli.command {
         Commands::GenerateSchema => {
@@ -506,6 +538,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             schemas.insert("XykPoolNeedsUpgradeArgs", schema);
             let schema = borsh::schema_container_of::<XykUpgradePoolArgs>();
             schemas.insert("XykUpgradePoolArgs", schema);
+            let schema = borsh::schema_container_of::<XykSetReferrerSettingsArgs>();
+            schemas.insert("XykSetReferrerSettingsArgs", schema);
+            let schema = borsh::schema_container_of::<XykRegisterFeeAssetsArgs>();
+            schemas.insert("XykRegisterFeeAssetsArgs", schema);
 
             tokio::fs::create_dir_all("./schemas").await?;
             for (name, schema) in schemas {
@@ -513,7 +549,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Otc { action } => match action {
-            OtcAction::Deploy { storage } => {
+            OtcAction::Deploy {
+                deployer_id,
+                storage,
+            } => {
                 println!("Compiling otc-dex");
                 assert!(
                     Command::new("cargo")
@@ -547,18 +586,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wasm =
                     std::fs::read("./target/wasm32-unknown-unknown/release/otc_dex.wasm").unwrap();
                 let wasm_base64 = BASE64_STANDARD.encode(&wasm);
+                let deployer_signer =
+                    Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network())
+                        .await?;
 
-                let mut transaction = Transaction::construct(
-                    config.deployer_id.clone(),
-                    config.dex_contract_id.clone(),
-                );
+                let mut transaction =
+                    Transaction::construct(deployer_id.clone(), config.dex_contract_id.clone());
 
                 if storage {
                     transaction = transaction.add_action(Action::FunctionCall(Box::new(
                         FunctionCallAction {
                             method_name: "dex_storage_deposit".to_string(),
                             args: serde_json::to_vec(&json!({
-                                "dex_id": format!("{}/{}", config.deployer_id, "otc"),
+                                "dex_id": config.otc_dex_id.clone(),
                             }))
                             .unwrap(),
                             gas: NearGas::from_tgas(10),
@@ -578,14 +618,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gas: NearGas::from_tgas(290),
                         deposit: NearToken::from_yoctonear(1),
                     })))
-                    .with_signer(Arc::clone(&config.signer))
+                    .with_signer(deployer_signer)
                     .send_to(&network())
                     .await?;
 
                 println!("Deployed. Result: {:?}", result.outcome());
             }
-            OtcAction::Initialize => {
-                let dex_id = format!("{}/{}", config.deployer_id, "otc");
+            OtcAction::Initialize { deployer_id } => {
+                let deployer_signer =
+                    Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network())
+                        .await?;
+                let dex_id = config.otc_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
@@ -599,7 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
-                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
+                    .with_signer(deployer_id.clone(), deployer_signer)
                     .send_to(&network())
                     .await?;
                 println!("Initialized OTC dex. Result: {:?}", result.outcome());
@@ -608,7 +651,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "otc");
+                let dex_id = config.otc_dex_id.clone();
                 #[derive(BorshSerialize)]
                 struct OtcSetAuthorizedKeyArgs {
                     key_bytes: Vec<u8>,
@@ -637,7 +680,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "otc");
+                let dex_id = config.otc_dex_id.clone();
                 #[derive(BorshSerialize)]
                 struct OtcStorageDepositArgs;
                 let result = Contract(config.dex_contract_id.clone())
@@ -669,7 +712,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "otc");
+                let dex_id = config.otc_dex_id.clone();
                 #[derive(BorshSerialize)]
                 struct OtcDepositAssetsArgs;
                 // U128 serializes as a number
@@ -690,7 +733,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Commands::Xyk { action } => match action {
-            XykAction::Deploy { storage } => {
+            XykAction::Deploy {
+                deployer_id,
+                storage,
+            } => {
                 println!("Compiling xyk-dex");
                 assert!(
                     Command::new("cargo")
@@ -724,18 +770,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wasm =
                     std::fs::read("./target/wasm32-unknown-unknown/release/xyk_dex.wasm").unwrap();
                 let wasm_base64 = BASE64_STANDARD.encode(&wasm);
+                let deployer_signer =
+                    Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network())
+                        .await?;
 
-                let mut transaction = Transaction::construct(
-                    config.deployer_id.clone(),
-                    config.dex_contract_id.clone(),
-                );
+                let mut transaction =
+                    Transaction::construct(deployer_id.clone(), config.dex_contract_id.clone());
 
                 if storage {
                     transaction = transaction.add_action(Action::FunctionCall(Box::new(
                         FunctionCallAction {
                             method_name: "dex_storage_deposit".to_string(),
                             args: serde_json::to_vec(&json!({
-                                "dex_id": format!("{}/{}", config.deployer_id, "xyk"),
+                                "dex_id": config.xyk_dex_id.clone(),
                             }))
                             .unwrap(),
                             gas: NearGas::from_tgas(10),
@@ -755,14 +802,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gas: NearGas::from_tgas(290),
                         deposit: NearToken::from_yoctonear(1),
                     })))
-                    .with_signer(Arc::clone(&config.signer))
+                    .with_signer(deployer_signer)
                     .send_to(&network())
                     .await?;
 
                 println!("Deployed. Result: {:?}", result.outcome());
             }
-            XykAction::Initialize => {
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+            XykAction::Initialize { deployer_id } => {
+                let deployer_signer =
+                    Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network())
+                        .await?;
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
@@ -776,11 +826,115 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
-                    .with_signer(config.deployer_id.clone(), Arc::clone(&config.signer))
+                    .with_signer(deployer_id.clone(), deployer_signer)
                     .send_to(&network())
                     .await?;
                 println!("Initialized XYK dex. Result: {:?}", result.outcome());
             }
+            XykAction::Migrate { deployer_id } => {
+                let deployer_signer =
+                    Signer::from_keystore_with_search_for_keys(deployer_id.clone(), &network())
+                        .await?;
+                let dex_id = config.xyk_dex_id.clone();
+                let result = Contract(config.dex_contract_id.clone())
+                    .call_function(
+                        "dex_call",
+                        json!({
+                            "dex_id": dex_id,
+                            "method": "migrate",
+                            "args": "",
+                            "attached_assets": {},
+                        }),
+                    )
+                    .transaction()
+                    .max_gas()
+                    .deposit(NearToken::from_yoctonear(1))
+                    .with_signer(deployer_id.clone(), deployer_signer)
+                    .send_to(&network())
+                    .await?;
+                println!("Migrated XYK dex. Result: {:?}", result.outcome());
+            }
+            XykAction::Referrers { action } => match action {
+                XykReferrerAction::SetSettings {
+                    account_id,
+                    fee_fraction,
+                    fee_fraction_reduced,
+                    storage_deposit,
+                } => {
+                    let account_signer =
+                        Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                            .await?;
+                    let dex_id = config.xyk_dex_id.clone();
+                    let result = Contract(config.dex_contract_id.clone())
+                        .call_function(
+                            "execute_operations",
+                            json!({
+                                "operations": [{
+                                    "DexCall": {
+                                        "dex_id": dex_id,
+                                        "method": "set_referrer_settings",
+                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykSetReferrerSettingsArgs {
+                                            new_settings: XykReferralSettings::V1 {
+                                                fee_fraction,
+                                                fee_fraction_reduced,
+                                            },
+                                        }).unwrap()),
+                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(
+                                            AssetId::Near,
+                                            U128(storage_deposit.as_yoctonear()),
+                                        )]),
+                                    }
+                                }]
+                            }),
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("Referrer settings updated. Result: {:?}", result.outcome());
+                }
+                XykReferrerAction::RegisterFeeAssets {
+                    account_id,
+                    asset_ids,
+                    storage_deposit,
+                } => {
+                    let account_signer =
+                        Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
+                            .await?;
+                    let dex_id = config.xyk_dex_id.clone();
+                    let result = Contract(config.dex_contract_id.clone())
+                        .call_function(
+                            "execute_operations",
+                            json!({
+                                "operations": [{
+                                    "DexCall": {
+                                        "dex_id": dex_id,
+                                        "method": "register_fee_assets",
+                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRegisterFeeAssetsArgs {
+                                            asset_ids,
+                                        }).unwrap()),
+                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(
+                                            AssetId::Near,
+                                            U128(storage_deposit.as_yoctonear()),
+                                        )]),
+                                    }
+                                }]
+                            }),
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(account_id.clone(), account_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!(
+                        "Fee assets registered for referrer. Result: {:?}",
+                        result.outcome()
+                    );
+                }
+            },
             XykAction::CreatePool { action } => {
                 let (account_id, asset_0, asset_1, pool_type, fees, attached_assets) = match action
                 {
@@ -853,7 +1007,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
@@ -880,7 +1034,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Pool created. Result: {:?}", result.outcome());
             }
             XykAction::GetPool { pool_id } => {
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 match xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await? {
                     Some(pool) => {
                         println!("Pool: {:#?}", pool);
@@ -905,7 +1059,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "execute_operations",
@@ -939,7 +1093,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
 
                 let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
                 let pool = pool.expect("Pool not found");
@@ -999,7 +1153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
@@ -1031,7 +1185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
                         "operations": [{
@@ -1060,7 +1214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 account_id,
                 asset_ids,
             } => {
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result: near_api::Data<serde_json::Value> = Contract(
                     config.dex_contract_id.clone(),
                 )
@@ -1097,7 +1251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "execute_operations",
@@ -1128,7 +1282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pool_id,
                 asset_in,
             } => {
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
                 let pool = pool.expect("Pool not found");
                 let (asset_0, asset_1) = match &pool {
@@ -1184,7 +1338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
                         .await?;
-                let dex_id = format!("{}/{}", config.deployer_id, "xyk");
+                let dex_id = config.xyk_dex_id.clone();
                 let pool = xyk_fetch_pool(config.dex_contract_id.clone(), &dex_id, pool_id).await?;
                 let pool = pool.expect("Pool not found");
                 let (asset_0, asset_1) = match &pool {
@@ -1590,6 +1744,24 @@ struct XykGetPendingFeesArgs {
 #[derive(BorshSerialize, BorshSchema)]
 struct XykWithdrawFeesArgs {
     assets: Vec<AssetId>,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+enum XykReferralSettings {
+    V1 {
+        fee_fraction: u32,
+        fee_fraction_reduced: u32,
+    },
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykSetReferrerSettingsArgs {
+    new_settings: XykReferralSettings,
+}
+
+#[derive(BorshSerialize, BorshSchema)]
+struct XykRegisterFeeAssetsArgs {
+    asset_ids: Vec<AssetId>,
 }
 
 #[derive(BorshSerialize, BorshSchema)]
