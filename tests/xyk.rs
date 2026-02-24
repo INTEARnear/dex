@@ -196,6 +196,24 @@ async fn get_pool_shares(
         .unwrap()[0]
 }
 
+async fn get_pending_fees(
+    dex_engine_contract: &near_workspaces::Contract,
+    dex_id: &DexId,
+    account_id: &AccountId,
+    asset_ids: Vec<AssetId>,
+) -> HashMap<AssetId, U128> {
+    let result = dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_pending_fees",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&(account_id.clone(), asset_ids)).unwrap()),
+        }))
+        .await
+        .unwrap();
+    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+}
+
 async fn get_ft_balance(token: &near_workspaces::Contract, account_id: &AccountId) -> U128 {
     token
         .view("ft_balance_of")
@@ -2970,6 +2988,282 @@ async fn test_xyk_launch_pool_flow() {
         }
         _ => panic!("Expected launch pool"),
     }
+}
+
+#[tokio::test]
+async fn test_xyk_launch_pool_sell_fees_are_in_near() {
+    let initial_near_deposit = NearToken::from_near(20);
+    let storage_deposit_for_pool = NearToken::from_millinear(50);
+    let launch_liquidity_ft2 = 2_000_000_000u128;
+    let phantom_liquidity_near = 1_000_000_000u128;
+    let near_swap_in = 100_000_000u128;
+    let sell_amount_ft2 = 50_000_000u128;
+    let first_pool_id = 0u32;
+    let fee_fraction = 10_000u32; // 1%
+    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let protocol_fee_receiver: AccountId = "plach.intear.near".parse().unwrap();
+
+    let wasms = get_compiled_wasms().await;
+
+    let TestContext {
+        dex_engine_contract,
+        ft2,
+        deployer,
+        user1,
+        user2,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.xyk_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(initial_near_deposit)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(ft2.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(launch_liquidity_ft2),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
+                            fees: FeeConfiguration::V1(CurrentFees {
+                                receivers: vec![(
+                                    FeeReceiver::Account(user2.id().clone()),
+                                    fee_fraction,
+                                )],
+                            }),
+                            pool_type: PoolType::LaunchLatest {
+                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                            },
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([
+                        (
+                            AssetId::Near,
+                            U128(storage_deposit_for_pool.as_yoctonear()),
+                        ),
+                        (
+                            AssetId::Nep141(ft2.id().clone()),
+                            U128(launch_liquidity_ft2),
+                        ),
+                    ]),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(near_swap_in))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    asset_in: AssetId::Near,
+                    asset_out: AssetId::Nep141(ft2.id().clone()),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
+                    constraint: None,
+                },
+                Operation::Withdraw {
+                    asset_id: AssetId::Nep141(ft2.id().clone()),
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: None,
+                    rescue_address: None,
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let launched_asset_id = AssetId::Nep141(ft2.id().clone());
+    let tracked_assets = vec![AssetId::Near, launched_asset_id.clone()];
+    let user2_fees_before = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        user2.id(),
+        tracked_assets.clone(),
+    )
+    .await;
+    let protocol_fees_before = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        &protocol_fee_receiver,
+        tracked_assets.clone(),
+    )
+    .await;
+
+    let buy_user_fee_near = near_swap_in * fee_fraction as u128 / 1_000_000;
+    let buy_protocol_fee_near = near_swap_in * protocol_fee_fraction as u128 / 1_000_000;
+    let buy_amount_after_fees = near_swap_in
+        .checked_sub(buy_user_fee_near)
+        .unwrap()
+        .checked_sub(buy_protocol_fee_near)
+        .unwrap();
+    let buy_token_out = buy_amount_after_fees * launch_liquidity_ft2
+        / (phantom_liquidity_near + buy_amount_after_fees);
+    let near_reserve_after_buy = phantom_liquidity_near + buy_amount_after_fees;
+    let token_reserve_after_buy = launch_liquidity_ft2 - buy_token_out;
+
+    let sell_user_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
+    let sell_protocol_fee_token = sell_amount_ft2 * protocol_fee_fraction as u128 / 1_000_000;
+    let sell_amount_after_fees = sell_amount_ft2
+        .checked_sub(sell_user_fee_token)
+        .unwrap()
+        .checked_sub(sell_protocol_fee_token)
+        .unwrap();
+    let sell_trader_near_out = sell_amount_after_fees * near_reserve_after_buy
+        / (token_reserve_after_buy + sell_amount_after_fees);
+    let token_reserve_post_swap = token_reserve_after_buy + sell_amount_after_fees;
+    let near_reserve_post_swap = near_reserve_after_buy - sell_trader_near_out;
+    let sell_user_fee_near = sell_user_fee_token * near_reserve_post_swap
+        / (token_reserve_post_swap + sell_user_fee_token);
+    let token_reserve_after_user_fee = token_reserve_post_swap + sell_user_fee_token;
+    let near_reserve_after_user_fee = near_reserve_post_swap - sell_user_fee_near;
+    let sell_protocol_fee_near = sell_protocol_fee_token * near_reserve_after_user_fee
+        / (token_reserve_after_user_fee + sell_protocol_fee_token);
+
+    let expected_user2_near_before = buy_user_fee_near;
+    let expected_user2_near_after = expected_user2_near_before + sell_user_fee_near;
+    let expected_protocol_near_before = buy_protocol_fee_near;
+    let expected_protocol_near_after = expected_protocol_near_before + sell_protocol_fee_near;
+
+    let result = user1
+        .call(ft2.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(sell_amount_ft2),
+            "msg": near_sdk::serde_json::to_string(&vec![
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    asset_in: launched_asset_id.clone(),
+                    asset_out: AssetId::Near,
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(sell_amount_ft2))),
+                    constraint: None,
+                },
+                Operation::Withdraw {
+                    asset_id: AssetId::Near,
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: None,
+                    rescue_address: None,
+                },
+            ]).unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let user2_fees_after = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        user2.id(),
+        tracked_assets.clone(),
+    )
+    .await;
+    let protocol_fees_after = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        &protocol_fee_receiver,
+        tracked_assets,
+    )
+    .await;
+
+    assert_eq!(
+        user2_fees_before.get(&AssetId::Near).cloned(),
+        Some(U128(expected_user2_near_before))
+    );
+    assert_eq!(
+        user2_fees_before.get(&launched_asset_id).cloned(),
+        Some(U128(0))
+    );
+    assert_eq!(
+        user2_fees_after.get(&AssetId::Near).cloned(),
+        Some(U128(expected_user2_near_after))
+    );
+    assert_eq!(
+        user2_fees_after.get(&launched_asset_id).cloned(),
+        Some(U128(0))
+    );
+
+    assert_eq!(
+        protocol_fees_before.get(&AssetId::Near).cloned(),
+        Some(U128(expected_protocol_near_before))
+    );
+    assert_eq!(
+        protocol_fees_before.get(&launched_asset_id).cloned(),
+        Some(U128(0))
+    );
+    assert_eq!(
+        protocol_fees_after.get(&AssetId::Near).cloned(),
+        Some(U128(expected_protocol_near_after))
+    );
+    assert_eq!(
+        protocol_fees_after.get(&launched_asset_id).cloned(),
+        Some(U128(0))
+    );
 }
 
 #[tokio::test]

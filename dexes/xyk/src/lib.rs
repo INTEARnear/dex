@@ -63,7 +63,7 @@ enum XykDexEvent {
         pool_id: PoolId,
         request: SwapRequest,
         amount_in: U128,
-        fees_breakdown: Vec<(FeeReceiver, U128)>,
+        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
         amount_out: U128,
     },
     #[event_version("1.0.0")]
@@ -175,6 +175,8 @@ impl Dex for XykDex {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
+        let should_convert_fees_to_near =
+            matches!(pool, Pool::LaunchV1 { .. }) && request.asset_out == AssetId::Near;
         let (asset0_id, asset0_balance, asset1_id, asset1_balance, fees) = match pool {
             Pool::PrivateV1 {
                 assets,
@@ -242,12 +244,32 @@ impl Dex for XykDex {
             _ => panic!("Invalid assets or pool ID"),
         };
 
+        #[derive(Clone)]
+        enum FeeBreakdownEntry {
+            Normal {
+                receiver: FeeReceiver,
+                asset_id: AssetId,
+                amount: U128,
+            },
+            DeferredForConvertionToNear {
+                receiver: AccountId,
+                amount_token: U128,
+            },
+        }
+
+        struct CollectFeesReturn {
+            amount_in_after_fees: u128,
+            pool_fee: u128,
+            fees_breakdown: Vec<FeeBreakdownEntry>,
+        }
+
         fn collect_fees(
             amount_in: u128,
             asset_in: &AssetId,
             fees: &CurrentFees,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
-        ) -> (u128, u128, Vec<(FeeReceiver, U128)>) {
+            convert_to_near: bool,
+        ) -> CollectFeesReturn {
             let mut fees_breakdown = Vec::new();
             let mut total_fees = 0u128;
             let mut pool_fee = 0u128;
@@ -260,26 +282,78 @@ impl Dex for XykDex {
                         / u128_to_u256(MAX_FEE_FRACTION as u128),
                 );
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
-                fees_breakdown.push((receiver.clone(), U128(fee_amount)));
+                fees_breakdown.push(
+                    if let (FeeReceiver::Account(account_id), true) = (receiver, convert_to_near) {
+                        FeeBreakdownEntry::DeferredForConvertionToNear {
+                            receiver: account_id.clone(),
+                            amount_token: U128(fee_amount),
+                        }
+                    } else {
+                        FeeBreakdownEntry::Normal {
+                            receiver: receiver.clone(),
+                            asset_id: asset_in.clone(),
+                            amount: U128(fee_amount),
+                        }
+                    },
+                );
                 match receiver {
                     FeeReceiver::Account(account_id) => {
-                        fees_collected_by_users
-                            .entry((account_id.clone(), asset_in.clone()))
-                            .and_modify(|balance| {
-                                balance.0 = balance.0.checked_add(fee_amount).expect("Overflow")
-                            })
-                            .or_insert(U128(fee_amount));
+                        if !convert_to_near {
+                            fees_collected_by_users
+                                .entry((account_id.clone(), asset_in.clone()))
+                                .and_modify(|balance| {
+                                    balance.0 = balance.0.checked_add(fee_amount).expect("Overflow")
+                                })
+                                .or_insert(U128(fee_amount));
+                        }
                     }
                     FeeReceiver::Pool => {
                         pool_fee = pool_fee.checked_add(fee_amount).expect("Overflow");
                     }
                 }
             }
-            (
-                amount_in.checked_sub(total_fees).expect("Fee exceeds 100%"),
+            CollectFeesReturn {
+                amount_in_after_fees: amount_in.checked_sub(total_fees).expect("Fee exceeds 100%"),
                 pool_fee,
-                fees_breakdown,
-            )
+                fees_breakdown: fees_breakdown.clone(),
+            }
+        }
+
+        fn covert_fees_to_near(
+            in_balance: &mut u128,
+            out_balance: &mut u128,
+            fees_breakdown: &mut Vec<FeeBreakdownEntry>,
+            fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
+        ) {
+            for entry in fees_breakdown {
+                let FeeBreakdownEntry::DeferredForConvertionToNear {
+                    receiver,
+                    amount_token,
+                } = entry
+                else {
+                    continue;
+                };
+                // u128 * u128 and u128 + u128 can't overflow u256;
+                // in denominator in_balance or amount can't either be zero.
+                #[allow(clippy::arithmetic_side_effects)]
+                let fee_amount_near = u256_to_u128(
+                    u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
+                        / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
+                );
+                *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
+                *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
+                fees_collected_by_users
+                    .entry((receiver.clone(), AssetId::Near))
+                    .and_modify(|balance| {
+                        balance.0 = balance.0.checked_add(fee_amount_near).expect("Overflow")
+                    })
+                    .or_insert(U128(fee_amount_near));
+                *entry = FeeBreakdownEntry::Normal {
+                    receiver: FeeReceiver::Account(receiver.clone()),
+                    asset_id: AssetId::Near,
+                    amount: U128(fee_amount_near),
+                };
+            }
         }
 
         let (fees_breakdown, response) = match request.amount {
@@ -290,7 +364,11 @@ impl Dex for XykDex {
                 } else {
                     (asset1_balance, asset0_balance)
                 };
-                let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
+                let CollectFeesReturn {
+                    amount_in_after_fees,
+                    pool_fee,
+                    mut fees_breakdown,
+                } = collect_fees(
                     exact_amount_in.0,
                     &request.asset_in,
                     &fees.with_protocol_fee(
@@ -298,6 +376,7 @@ impl Dex for XykDex {
                         asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
                     ),
                     &mut self.fees_collected_by_users,
+                    should_convert_fees_to_near,
                 );
                 // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
                 #[allow(clippy::arithmetic_side_effects)]
@@ -311,6 +390,14 @@ impl Dex for XykDex {
                     .checked_add(pool_fee)
                     .expect("Overflow");
                 *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
+                if should_convert_fees_to_near {
+                    covert_fees_to_near(
+                        in_balance,
+                        out_balance,
+                        &mut fees_breakdown,
+                        &mut self.fees_collected_by_users,
+                    );
+                }
                 (
                     fees_breakdown,
                     SwapResponse {
@@ -363,11 +450,16 @@ impl Dex for XykDex {
                         + u128_to_u256(fee_denominator_minus_one))
                         / u128_to_u256(fee_denominator),
                 );
-                let (amount_in_after_fees, pool_fee, fees_breakdown) = collect_fees(
+                let CollectFeesReturn {
+                    amount_in_after_fees,
+                    pool_fee,
+                    mut fees_breakdown,
+                } = collect_fees(
                     amount_in,
                     &request.asset_in,
                     &fees_with_protocol_fee,
                     &mut self.fees_collected_by_users,
+                    should_convert_fees_to_near,
                 );
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
@@ -377,6 +469,14 @@ impl Dex for XykDex {
                 *out_balance = out_balance
                     .checked_sub(exact_amount_out.0)
                     .expect("Underflow");
+                if should_convert_fees_to_near {
+                    covert_fees_to_near(
+                        in_balance,
+                        out_balance,
+                        &mut fees_breakdown,
+                        &mut self.fees_collected_by_users,
+                    );
+                }
                 (
                     fees_breakdown,
                     SwapResponse {
@@ -410,7 +510,15 @@ impl Dex for XykDex {
             request,
             amount_in: response.amount_in,
             amount_out: response.amount_out,
-            fees_breakdown,
+            fees_breakdown: fees_breakdown
+                .into_iter()
+                .map(|entry| {
+                    expect!(let FeeBreakdownEntry::Normal { receiver, asset_id, amount } = entry,
+                        "Fee breakdown entry is not a normal entry"
+                    );
+                    (receiver.clone(), asset_id.clone(), amount.clone())
+                })
+                .collect(),
         }
         .emit();
         response
