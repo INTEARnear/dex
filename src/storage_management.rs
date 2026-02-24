@@ -177,32 +177,8 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
         (*storage_used).into()
     }
 
-    pub fn storage_unregister(&mut self, account_id: K, force: Option<bool>) -> bool {
-        if force.is_some_and(|f| f) {
-            panic!("Force unregistration is not supported");
-        }
-
-        let storage_usage_before = near_sdk::env::storage_usage();
-        let Some(storage_used) = self.storage_balances.remove(&account_id) else {
-            return false;
-        };
-        self.storage_balances.flush();
-        let storage_usage_after = near_sdk::env::storage_usage();
-        let storage_freed = near_sdk::env::storage_byte_cost().saturating_mul(
-            (storage_usage_before as u128)
-                .checked_sub(storage_usage_after as u128)
-                .expect("Storage somehow grew after removing data"),
-        );
-        if let Some(leftover) = storage_used.used.checked_sub(storage_freed) {
-            if !leftover.is_zero() {
-                panic!("User is using {leftover} worth of storage")
-            } else {
-                true
-            }
-        } else {
-            // freed up more than needed, but it's ok
-            true
-        }
+    pub fn storage_unregister(&mut self, _account_id: K, _force: Option<bool>) -> bool {
+        unimplemented!("Storage unregistration is not supported");
     }
 
     pub const fn storage_balance_bounds(&self) -> StorageBalanceBounds {

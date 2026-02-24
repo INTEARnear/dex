@@ -191,7 +191,7 @@ impl Dex for XykDex {
                 &mut assets.0.balance.0,
                 assets.1.asset_id.clone(),
                 &mut assets.1.balance.0,
-                fees.clone(),
+                FeeConfiguration::V1(fees.clone()),
             ),
             Pool::LaunchV1 {
                 near_amount,
@@ -203,7 +203,7 @@ impl Dex for XykDex {
                 &mut near_amount.0,
                 launched_asset.asset_id.clone(),
                 &mut launched_asset.balance.0,
-                (&*fees).into(),
+                fees.clone(),
             ),
             Pool::PrivateV2 {
                 assets,
@@ -221,7 +221,7 @@ impl Dex for XykDex {
                 &mut assets.0.balance.0,
                 assets.1.asset_id.clone(),
                 &mut assets.1.balance.0,
-                (&*fees).into(),
+                fees.clone(),
             ),
         };
         expect!(
@@ -1793,7 +1793,7 @@ impl From<&Pool> for PoolView {
                 fees,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
@@ -1808,7 +1808,7 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
@@ -1823,7 +1823,7 @@ impl From<&Pool> for PoolView {
             } => PoolView::Launch {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
-                fees: CurrentFees::from(fees).with_protocol_fee(
+                fees: fees.with_protocol_fee(
                     None,
                     asset_account_ids(&[AssetId::Near, launched_asset.asset_id.clone()]),
                 ),
@@ -1837,7 +1837,7 @@ impl From<&Pool> for PoolView {
                 locked,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: CurrentFees::from(fees).with_protocol_fee(
+                fees: fees.with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
@@ -1852,7 +1852,7 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: CurrentFees::from(fees).with_protocol_fee(
+                fees: fees.with_protocol_fee(
                     None,
                     asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
                 ),
@@ -2061,52 +2061,135 @@ impl From<&FeeConfiguration> for CurrentFees {
     }
 }
 
-impl CurrentFees {
+impl FeeConfiguration {
     fn with_protocol_fee(
         &self,
         trader_account_id: Option<AccountId>,
         asset_account_ids: Vec<AccountId>,
     ) -> CurrentFees {
-        let mut receivers = self.receivers.clone();
-        let mut protocol_fee = PROTOCOL_FEE;
-        if receivers.is_empty() {
-            protocol_fee = 0;
-        } else if let Some(trader_account_id) = trader_account_id {
-            let mut has_non_stable_assets = false;
-            'assets: for asset_account_id in asset_account_ids {
-                for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
-                    if asset_account_id == *reduce_asset_account {
-                        continue 'assets;
-                    }
-                }
-                for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
-                    let protocol_fee_bypass_asset_parent_account =
-                        bypass_asset_parent_account.parse::<AccountId>().unwrap();
-                    if asset_account_id.is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
-                    {
-                        continue 'assets;
-                    }
-                }
-                // If not matched by either of the above, it's a non-stable asset
-                has_non_stable_assets = true;
-            }
-            if !has_non_stable_assets {
-                protocol_fee = PROTOCOL_FEE_REDUCED;
-            }
-            for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
-                let protocol_fee_bypass_parent_account =
-                    bypass_parent_account.parse::<AccountId>().unwrap();
-                if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account) {
+        match self {
+            FeeConfiguration::V1(fees) => {
+                let mut receivers = fees.receivers.clone();
+                let mut protocol_fee = PROTOCOL_FEE;
+                if receivers.is_empty() {
                     protocol_fee = 0;
-                    break;
+                } else if let Some(trader_account_id) = trader_account_id {
+                    let mut has_non_stable_assets = false;
+                    'assets: for asset_account_id in asset_account_ids {
+                        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
+                            if asset_account_id == *reduce_asset_account {
+                                continue 'assets;
+                            }
+                        }
+                        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS
+                        {
+                            let protocol_fee_bypass_asset_parent_account =
+                                bypass_asset_parent_account.parse::<AccountId>().unwrap();
+                            if asset_account_id
+                                .is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
+                            {
+                                continue 'assets;
+                            }
+                        }
+                        // If not matched by either of the above, it's a non-stable asset
+                        has_non_stable_assets = true;
+                    }
+                    if !has_non_stable_assets {
+                        protocol_fee = PROTOCOL_FEE_REDUCED;
+                    }
+                    for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
+                        let protocol_fee_bypass_parent_account =
+                            bypass_parent_account.parse::<AccountId>().unwrap();
+                        if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account)
+                        {
+                            protocol_fee = 0;
+                            break;
+                        }
+                    }
                 }
+                receivers.push((
+                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
+                    protocol_fee,
+                ));
+                CurrentFees { receivers }
+            }
+            FeeConfiguration::V2(fees) => {
+                let mut receivers = Vec::new();
+                let mut protocol_fee = if fees.receivers.is_empty() {
+                    0
+                } else if let Some(trader_account_id) = trader_account_id {
+                    let mut has_non_stable_assets = false;
+                    'assets: for asset_account_id in asset_account_ids {
+                        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
+                            if asset_account_id == *reduce_asset_account {
+                                continue 'assets;
+                            }
+                        }
+                        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS
+                        {
+                            let protocol_fee_bypass_asset_parent_account =
+                                bypass_asset_parent_account.parse::<AccountId>().unwrap();
+                            if asset_account_id
+                                .is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
+                            {
+                                continue 'assets;
+                            }
+                        }
+                        // If not matched by either of the above, it's a non-stable asset
+                        has_non_stable_assets = true;
+                    }
+                    if !has_non_stable_assets {
+                        PROTOCOL_FEE_REDUCED
+                    } else {
+                        let mut protocol_fee = PROTOCOL_FEE;
+                        for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
+                            let protocol_fee_bypass_parent_account =
+                                bypass_parent_account.parse::<AccountId>().unwrap();
+                            if trader_account_id
+                                .is_sub_account_of(&protocol_fee_bypass_parent_account)
+                            {
+                                protocol_fee = 0;
+                                break;
+                            }
+                        }
+                        protocol_fee
+                    }
+                } else {
+                    PROTOCOL_FEE
+                };
+                for (receiver, amount) in fees.receivers.iter() {
+                    match amount {
+                        FeeAmount::Fixed(fee_fraction) => {
+                            receivers.push((receiver.clone(), *fee_fraction));
+                        }
+                        FeeAmount::Scheduled {
+                            end: (end_time, _), ..
+                        } => {
+                            let mut fraction = amount.get_fee_fraction();
+                            if near_sdk::env::block_timestamp() < *end_time {
+                                const PROTOCOL_SHARE_PERCENT: u32 = 5;
+                                let protocol_share = fraction
+                                    .checked_mul(PROTOCOL_SHARE_PERCENT)
+                                    .unwrap()
+                                    .checked_div(100)
+                                    .unwrap();
+                                fraction = fraction.checked_sub(protocol_share).unwrap();
+                                protocol_fee = protocol_fee.checked_add(protocol_share).unwrap();
+                            }
+                            receivers.push((receiver.clone(), fraction));
+                        }
+                        FeeAmount::Dynamic { .. } => {
+                            unimplemented!("Dynamic fee configuration is not implemented yet");
+                        }
+                    }
+                }
+                receivers.push((
+                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
+                    protocol_fee,
+                ));
+                CurrentFees { receivers }
             }
         }
-        receivers.push((
-            FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
-            protocol_fee,
-        ));
-        Self { receivers }
     }
 }
 

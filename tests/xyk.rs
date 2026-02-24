@@ -2224,6 +2224,7 @@ async fn test_xyk_scheduled_fees() {
         .transact()
         .await
         .unwrap();
+    println!("{result:#?}");
     assert_success(&result).unwrap();
 
     let result = user2
@@ -2251,10 +2252,18 @@ async fn test_xyk_scheduled_fees() {
         .json::<U128>()
         .unwrap()
         .0;
-    let min_fee_fraction = expected_fee_fraction_after_fast_forward as u128 * 95 / 100;
-    let max_fee_fraction = expected_fee_fraction_after_fast_forward as u128 * 105 / 100;
+    // 5% protocol fee
+    let expected_fee_fraction_after_fast_forward =
+        expected_fee_fraction_after_fast_forward as u128 * 95 / 100;
+    // +/- 1% to account for fast_forward time inconsistency
+    const TIME_INCONSISTENCY_PERCENT: u128 = 1;
+    let min_fee_fraction =
+        expected_fee_fraction_after_fast_forward as u128 * (100 - TIME_INCONSISTENCY_PERCENT) / 100;
+    let max_fee_fraction =
+        expected_fee_fraction_after_fast_forward as u128 * (100 + TIME_INCONSISTENCY_PERCENT) / 100;
     let min_fee_amount = swap_amount_ft1 * min_fee_fraction / 1_000_000;
     let max_fee_amount = swap_amount_ft1 * max_fee_fraction / 1_000_000;
+    println!("user2_fee_balance: {}", user2_fee_balance);
     assert!(
         (min_fee_amount..=max_fee_amount).contains(&user2_fee_balance),
         "Scheduled fee {} out of expected range [{}, {}]",
@@ -2264,7 +2273,22 @@ async fn test_xyk_scheduled_fees() {
     );
 
     let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
-    let amount_after_fee = swap_amount_ft1 - user2_fee_balance - protocol_fee_amount;
+    let user_fee_fraction_from_balance = user2_fee_balance
+        .checked_mul(1_000_000)
+        .unwrap()
+        .checked_div(swap_amount_ft1)
+        .unwrap();
+    let scheduled_total_fee_fraction = user_fee_fraction_from_balance * 100 / 95;
+    let scheduled_protocol_fee_fraction = scheduled_total_fee_fraction * 5 / 100;
+    let scheduled_protocol_fee_amount =
+        swap_amount_ft1 * scheduled_protocol_fee_fraction / 1_000_000;
+    let amount_after_fee = swap_amount_ft1
+        .checked_sub(user2_fee_balance)
+        .unwrap()
+        .checked_sub(protocol_fee_amount)
+        .unwrap()
+        .checked_sub(scheduled_protocol_fee_amount)
+        .unwrap();
     let expected_ft2_out =
         amount_after_fee * add_liquidity_ft2 / (add_liquidity_ft1 + amount_after_fee);
 
