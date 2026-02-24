@@ -208,6 +208,7 @@ impl DexEngine {
             asset_in,
             asset_out,
             amount,
+            referrer: referrer.clone(),
         };
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
@@ -469,6 +470,7 @@ impl DexEngine {
             asset_in,
             asset_out,
             amount,
+            referrer: referrer.clone(),
         };
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");

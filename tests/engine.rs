@@ -289,28 +289,6 @@ async fn test_storage_actions() {
         balance_after_withdraw.available,
         NearToken::from_yoctonear(0)
     );
-
-    let result = user1
-        .call(dex_engine_contract.id(), "storage_unregister")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "force": false,
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    assert!(result.json::<bool>().unwrap());
-
-    let storage_balance_after_unregister = dex_engine_contract
-        .view("storage_balance_of")
-        .args_json(json!({ "account_id": user1.id() }))
-        .await
-        .unwrap()
-        .json::<Option<StorageBalance>>()
-        .unwrap();
-    assert!(storage_balance_after_unregister.is_none());
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&str] = &[
     "near",
 ];
 const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
+const MAX_REFERRAL_FEE_FRACTION: FeeFraction = MAX_FEE_FRACTION / 20; // 5%
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -42,6 +43,7 @@ enum StorageKey {
     Pools,
     PublicPoolUserShares { pool_id: PoolId },
     FeesCollectedByUsers,
+    ReferralSettings,
 }
 
 type PoolId = u32;
@@ -52,6 +54,50 @@ type PoolId = u32;
 pub struct XykDex {
     pools: Vector<Pool>,
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+    referral_settings: LookupMap<AccountId, ReferralSettings>,
+}
+
+#[near(serializers=[borsh, json])]
+enum ReferralSettings {
+    V1 {
+        fee_fraction: FeeFraction,
+        fee_fraction_reduced: FeeFraction,
+    },
+}
+
+impl ReferralSettings {
+    fn validate(&self) {
+        match self {
+            ReferralSettings::V1 {
+                fee_fraction,
+                fee_fraction_reduced,
+            } => {
+                expect!(
+                    *fee_fraction < MAX_REFERRAL_FEE_FRACTION,
+                    "Fee fraction must be less than {MAX_REFERRAL_FEE_FRACTION}"
+                );
+                expect!(
+                    *fee_fraction_reduced < MAX_REFERRAL_FEE_FRACTION,
+                    "Fee fraction reduced must be less than {MAX_REFERRAL_FEE_FRACTION}"
+                );
+            }
+        }
+    }
+
+    fn fee_fraction(&self, asset_account_ids: &[AccountId]) -> FeeFraction {
+        match self {
+            ReferralSettings::V1 {
+                fee_fraction,
+                fee_fraction_reduced,
+            } => {
+                if should_reduce_fee(asset_account_ids) {
+                    *fee_fraction_reduced
+                } else {
+                    *fee_fraction
+                }
+            }
+        }
+    }
 }
 
 #[near(event_json(standard = "xyk"))]
@@ -146,6 +192,26 @@ fn asset_account_ids(asset_ids: &[AssetId]) -> Vec<AccountId> {
             AssetId::Nep245(account_id, _) => account_id.clone(),
         })
         .collect()
+}
+
+fn should_reduce_fee(asset_account_ids: &[AccountId]) -> bool {
+    'assets: for asset_account_id in asset_account_ids {
+        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
+            if asset_account_id.as_str() == *reduce_asset_account {
+                continue 'assets;
+            }
+        }
+        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
+            let protocol_fee_bypass_asset_parent_account =
+                bypass_asset_parent_account.parse::<AccountId>().unwrap();
+            if asset_account_id.is_sub_account_of(&protocol_fee_bypass_asset_parent_account) {
+                continue 'assets;
+            }
+        }
+        // If not matched by either of the above, it's a non-stable asset.
+        return false;
+    }
+    true
 }
 
 #[near(serializers=[borsh])]
@@ -304,7 +370,9 @@ impl Dex for XykDex {
                                 .and_modify(|balance| {
                                     balance.0 = balance.0.checked_add(fee_amount).expect("Overflow")
                                 })
-                                .or_insert(U128(fee_amount));
+                                .or_insert_with(|| {
+                                    panic!("Fee asset not registered; this is a bug")
+                                });
                         }
                     }
                     FeeReceiver::Pool => {
@@ -319,7 +387,7 @@ impl Dex for XykDex {
             }
         }
 
-        fn covert_fees_to_near(
+        fn convert_fees_to_near(
             in_balance: &mut u128,
             out_balance: &mut u128,
             fees_breakdown: &mut Vec<FeeBreakdownEntry>,
@@ -356,6 +424,25 @@ impl Dex for XykDex {
             }
         }
 
+        let fee_asset_account_ids =
+            asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]);
+        let current_fees = fees
+            .with_protocol_fee(
+                Some(near_sdk::env::predecessor_account_id()),
+                fee_asset_account_ids.clone(),
+            )
+            .with_referral_fee(
+                request.referrer.clone(),
+                &self.referral_settings,
+                &self.fees_collected_by_users,
+                if should_convert_fees_to_near {
+                    AssetId::Near
+                } else {
+                    request.asset_in.clone()
+                },
+                &fee_asset_account_ids,
+            );
+
         let (fees_breakdown, response) = match request.amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
                 expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
@@ -371,10 +458,7 @@ impl Dex for XykDex {
                 } = collect_fees(
                     exact_amount_in.0,
                     &request.asset_in,
-                    &fees.with_protocol_fee(
-                        Some(near_sdk::env::predecessor_account_id()),
-                        asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
-                    ),
+                    &current_fees,
                     &mut self.fees_collected_by_users,
                     should_convert_fees_to_near,
                 );
@@ -391,7 +475,7 @@ impl Dex for XykDex {
                     .expect("Overflow");
                 *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
                 if should_convert_fees_to_near {
-                    covert_fees_to_near(
+                    convert_fees_to_near(
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -426,11 +510,7 @@ impl Dex for XykDex {
                         / (u128_to_u256(*out_balance) - u128_to_u256(exact_amount_out.0)))
                     .saturating_add(&U256::ONE),
                 );
-                let fees_with_protocol_fee = fees.with_protocol_fee(
-                    Some(near_sdk::env::predecessor_account_id()),
-                    asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]),
-                );
-                let total_fee_fraction = fees_with_protocol_fee
+                let total_fee_fraction = current_fees
                     .receivers
                     .iter()
                     .map(|(_, fee)| *fee as u128)
@@ -457,7 +537,7 @@ impl Dex for XykDex {
                 } = collect_fees(
                     amount_in,
                     &request.asset_in,
-                    &fees_with_protocol_fee,
+                    &current_fees,
                     &mut self.fees_collected_by_users,
                     should_convert_fees_to_near,
                 );
@@ -470,7 +550,7 @@ impl Dex for XykDex {
                     .checked_sub(exact_amount_out.0)
                     .expect("Underflow");
                 if should_convert_fees_to_near {
-                    covert_fees_to_near(
+                    convert_fees_to_near(
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -516,7 +596,7 @@ impl Dex for XykDex {
                     expect!(let FeeBreakdownEntry::Normal { receiver, asset_id, amount } = entry,
                         "Fee breakdown entry is not a normal entry"
                     );
-                    (receiver.clone(), asset_id.clone(), amount.clone())
+                    (receiver.clone(), asset_id.clone(), amount)
                 })
                 .collect(),
         }
@@ -534,6 +614,25 @@ impl XykDex {
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
+            referral_settings: LookupMap::new(StorageKey::ReferralSettings),
+        }
+    }
+
+    #[init(ignore_state)]
+    #[payable]
+    pub fn migrate() -> Self {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        pub struct OldXykDex {
+            pools: Vector<Pool>,
+            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+        }
+        let old_state: OldXykDex =
+            near_sdk::borsh::from_slice(&near_sdk::env::storage_read(b"STATE").unwrap()).unwrap();
+        Self {
+            pools: old_state.pools,
+            fees_collected_by_users: old_state.fees_collected_by_users,
+            referral_settings: LookupMap::new(StorageKey::ReferralSettings),
         }
     }
 
@@ -1757,6 +1856,108 @@ impl XykDex {
         DexCallResponse::default()
     }
 
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn set_referrer_settings(
+        &mut self,
+        #[allow(unused_mut)]
+        #[serializer(borsh)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct ReferrerConfigurationArgs {
+            new_settings: ReferralSettings,
+        }
+        let Ok(ReferrerConfigurationArgs { new_settings }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let storage_usage_before = near_sdk::env::storage_usage();
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        new_settings.validate();
+        self.referral_settings
+            .insert(near_sdk::env::predecessor_account_id(), new_settings);
+        self.referral_settings.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+        expect!(
+            let Some(leftover) = attached_near.checked_sub(storage_cost),
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        DexCallResponse {
+            asset_withdraw_requests: if !leftover.is_zero() {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn register_fee_assets(
+        &mut self,
+        #[allow(unused_mut)]
+        #[serializer(borsh)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct RegisterFeeAssetsArgs {
+            asset_ids: Vec<AssetId>,
+        }
+        let Ok(RegisterFeeAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let storage_usage_before = near_sdk::env::storage_usage();
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        for asset_id in asset_ids {
+            self.fees_collected_by_users
+                .insert((near_sdk::env::predecessor_account_id(), asset_id), U128(0));
+        }
+        self.fees_collected_by_users.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+        expect!(
+            let Some(leftover) = attached_near.checked_sub(storage_cost),
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        DexCallResponse {
+            asset_withdraw_requests: if !leftover.is_zero() {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        near_sdk::env::predecessor_account_id(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
+    }
+
     #[result_serializer(borsh)]
     pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<PoolView> {
         self.pools.get(pool_id).map(|pool| pool.into())
@@ -2169,6 +2370,37 @@ impl From<&FeeConfiguration> for CurrentFees {
     }
 }
 
+impl CurrentFees {
+    fn with_referral_fee(
+        mut self,
+        referrer_account_id: Option<AccountId>,
+        referral_settings: &LookupMap<AccountId, ReferralSettings>,
+        fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
+        fee_asset_id: AssetId,
+        asset_account_ids: &[AccountId],
+    ) -> Self {
+        let Some(referrer_account_id) = referrer_account_id else {
+            return self;
+        };
+        let Some(referral_settings) = referral_settings.get(&referrer_account_id) else {
+            return self;
+        };
+        let referral_fee_fraction = referral_settings.fee_fraction(asset_account_ids);
+        if referral_fee_fraction == 0
+            || fees_collected_by_users
+                .get(&(referrer_account_id.clone(), fee_asset_id))
+                .is_none()
+        {
+            return self;
+        }
+        self.receivers.push((
+            FeeReceiver::Account(referrer_account_id),
+            referral_fee_fraction,
+        ));
+        self
+    }
+}
+
 impl FeeConfiguration {
     fn with_protocol_fee(
         &self,
@@ -2182,27 +2414,7 @@ impl FeeConfiguration {
                 if receivers.is_empty() {
                     protocol_fee = 0;
                 } else if let Some(trader_account_id) = trader_account_id {
-                    let mut has_non_stable_assets = false;
-                    'assets: for asset_account_id in asset_account_ids {
-                        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
-                            if asset_account_id == *reduce_asset_account {
-                                continue 'assets;
-                            }
-                        }
-                        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS
-                        {
-                            let protocol_fee_bypass_asset_parent_account =
-                                bypass_asset_parent_account.parse::<AccountId>().unwrap();
-                            if asset_account_id
-                                .is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
-                            {
-                                continue 'assets;
-                            }
-                        }
-                        // If not matched by either of the above, it's a non-stable asset
-                        has_non_stable_assets = true;
-                    }
-                    if !has_non_stable_assets {
+                    if should_reduce_fee(&asset_account_ids) {
                         protocol_fee = PROTOCOL_FEE_REDUCED;
                     }
                     for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
@@ -2226,27 +2438,7 @@ impl FeeConfiguration {
                 let mut protocol_fee = if fees.receivers.is_empty() {
                     0
                 } else if let Some(trader_account_id) = trader_account_id {
-                    let mut has_non_stable_assets = false;
-                    'assets: for asset_account_id in asset_account_ids {
-                        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
-                            if asset_account_id == *reduce_asset_account {
-                                continue 'assets;
-                            }
-                        }
-                        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS
-                        {
-                            let protocol_fee_bypass_asset_parent_account =
-                                bypass_asset_parent_account.parse::<AccountId>().unwrap();
-                            if asset_account_id
-                                .is_sub_account_of(&protocol_fee_bypass_asset_parent_account)
-                            {
-                                continue 'assets;
-                            }
-                        }
-                        // If not matched by either of the above, it's a non-stable asset
-                        has_non_stable_assets = true;
-                    }
-                    if !has_non_stable_assets {
+                    if should_reduce_fee(&asset_account_ids) {
                         PROTOCOL_FEE_REDUCED
                     } else {
                         let mut protocol_fee = PROTOCOL_FEE;

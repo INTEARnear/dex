@@ -27,6 +27,8 @@ pub struct SwapRequest {
     /// swapped. The response `amount_in` or `amount_out`
     /// must match this amount.
     pub amount: SwapRequestAmount,
+    /// The account ID of the referrer.
+    pub referrer: Option<AccountId>,
 }
 
 /// The swap operation was successful, release `amount_out`
