@@ -136,6 +136,8 @@ enum XykAction {
     CreatePool {
         #[command(subcommand)]
         action: XykCreatePoolAction,
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
     },
     GetPool {
         pool_id: XykPoolId,
@@ -143,12 +145,16 @@ enum XykAction {
     UpgradePool {
         account_id: AccountId,
         pool_id: XykPoolId,
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
     },
     AddLiquidity {
         account_id: AccountId,
         pool_id: XykPoolId,
         amount_0: u128,
         amount_1: u128,
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit_for_register_liquidity: NearToken,
     },
     RemoveLiquidity {
         account_id: AccountId,
@@ -163,6 +169,8 @@ enum XykAction {
         /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
         #[arg(long, value_delimiter = ',')]
         fees: Vec<FeeReceiverArg>,
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
     },
     GetPendingFees {
         account_id: AccountId,
@@ -260,6 +268,8 @@ enum XykCreatePoolAction {
         /// Fee receivers in format "account_id:fee_fraction" (fee_fraction is 10000 = 1%)
         #[arg(long, value_delimiter = ',')]
         fees: Vec<FeeReceiverArg>,
+        #[arg(long, default_value = "0.01 NEAR")]
+        storage_deposit: NearToken,
     },
 }
 
@@ -317,7 +327,7 @@ async fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
 
     let dex_contract_id = std::env::var("DEX_CONTRACT_ID").unwrap_or("dex.intear.near".to_string());
     let dex_contract_id = AccountId::from_str(&dex_contract_id)
-        .map_err(|e| format!("Invalid DEX_CONTRACT_ID: {}", e))?;
+        .map_err(|e| format!("Invalid DEX_CONTRACT_ID: {e}"))?;
     let otc_dex_id = std::env::var("OTC_DEX_ID").unwrap_or("slimedragon.near/otc".to_string());
     let xyk_dex_id = std::env::var("XYK_DEX_ID").unwrap_or("slimedragon.near/xyk".to_string());
 
@@ -334,6 +344,8 @@ fn network() -> NetworkConfig {
         ..NetworkConfig::mainnet()
     }
 }
+
+const TOKEN_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(10);
 
 async fn execute_operations_with_deposit(
     dex_contract_id: AccountId,
@@ -377,7 +389,7 @@ async fn execute_operations_with_deposit(
                     )
                     .transaction()
                     .gas(NearGas::from_tgas(10))
-                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .deposit(TOKEN_STORAGE_DEPOSIT)
                     .with_signer(account_id.clone(), Arc::clone(&account_signer))
                     .send_to(&network())
                     .await;
@@ -415,7 +427,7 @@ async fn execute_operations_with_deposit(
                     )
                     .transaction()
                     .gas(NearGas::from_tgas(10))
-                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .deposit(TOKEN_STORAGE_DEPOSIT)
                     .with_signer(account_id.clone(), Arc::clone(&account_signer))
                     .send_to(&network())
                     .await;
@@ -453,7 +465,7 @@ async fn execute_operations_with_deposit(
                     )
                     .transaction()
                     .gas(NearGas::from_tgas(10))
-                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .deposit(TOKEN_STORAGE_DEPOSIT)
                     .with_signer(account_id.clone(), Arc::clone(&account_signer))
                     .send_to(&network())
                     .await;
@@ -632,12 +644,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        json!({
-                            "dex_id": dex_id,
-                            "method": "new",
-                            "args": "",
-                            "attached_assets": {},
-                        }),
+                        Operation::DexCall {
+                            dex_id,
+                            method: "new".to_string(),
+                            args: "".to_string(),
+                            attached_assets: HashMap::new(),
+                        },
                     )
                     .transaction()
                     .max_gas()
@@ -657,17 +669,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     key_bytes: Vec<u8>,
                 }
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("dex_call", json!({
-                        "dex_id": dex_id,
-                        "method": "set_authorized_key",
-                        "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcSetAuthorizedKeyArgs {
-                            key_bytes: match key {
-                                PublicKey::ED25519(public_key) => [vec![0], public_key.0.to_vec()].concat(),
-                                PublicKey::SECP256K1(public_key) => [vec![1], public_key.0.to_vec()].concat(),
-                            },
-                        }).unwrap()),
-                        "attached_assets": {},
-                    }))
+                    .call_function(
+                        "dex_call",
+                        Operation::DexCall {
+                            dex_id,
+                            method: "set_authorized_key".to_string(),
+                            args: BASE64_STANDARD.encode(
+                                borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+                                    key_bytes: match key {
+                                        PublicKey::ED25519(public_key) => {
+                                            [vec![0], public_key.0.to_vec()].concat()
+                                        }
+                                        PublicKey::SECP256K1(public_key) => {
+                                            [vec![1], public_key.0.to_vec()].concat()
+                                        }
+                                    },
+                                })
+                                .unwrap(),
+                            ),
+                            attached_assets: HashMap::new(),
+                        },
+                    )
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -685,16 +707,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 struct OtcStorageDepositArgs;
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("deposit_near", json!({
-                        "operations": [{
-                            "DexCall": {
-                                "dex_id": dex_id,
-                                "method": "storage_deposit",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
-                                "attached_assets": {
-                                    "near": amount,
-                                },
-                            }
-                        }]
+                        "operations": [Operation::DexCall {
+                            dex_id,
+                            method: "storage_deposit".to_string(),
+                            args: BASE64_STANDARD.encode(borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                            attached_assets: HashMap::from_iter([(AssetId::Near, U128(amount.as_yoctonear()))]),
+                        }],
                     }))
                     .transaction()
                     .max_gas()
@@ -717,12 +735,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 struct OtcDepositAssetsArgs;
                 // U128 serializes as a number
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("dex_call", json!({
-                        "dex_id": dex_id,
-                        "method": "deposit_assets",
-                        "args": BASE64_STANDARD.encode(borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
-                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(asset_id, U128(amount))]),
-                    }))
+                    .call_function(
+                        "dex_call",
+                        Operation::DexCall {
+                            dex_id,
+                            method: "deposit_assets".to_string(),
+                            args: BASE64_STANDARD
+                                .encode(borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+                            attached_assets: HashMap::from_iter([(asset_id, U128(amount))]),
+                        },
+                    )
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -816,12 +838,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        json!({
-                            "dex_id": dex_id,
-                            "method": "new",
-                            "args": "",
-                            "attached_assets": {},
-                        }),
+                        Operation::DexCall {
+                            dex_id,
+                            method: "new".to_string(),
+                            args: "".to_string(),
+                            attached_assets: HashMap::new(),
+                        },
                     )
                     .transaction()
                     .max_gas()
@@ -839,12 +861,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        json!({
-                            "dex_id": dex_id,
-                            "method": "migrate",
-                            "args": "",
-                            "attached_assets": {},
-                        }),
+                        Operation::DexCall {
+                            dex_id,
+                            method: "migrate".to_string(),
+                            args: "".to_string(),
+                            attached_assets: HashMap::new(),
+                        },
                     )
                     .transaction()
                     .max_gas()
@@ -869,27 +891,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .call_function(
                             "execute_operations",
                             json!({
-                                "operations": [{
-                                    "DexCall": {
-                                        "dex_id": dex_id,
-                                        "method": "set_referrer_settings",
-                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykSetReferrerSettingsArgs {
-                                            new_settings: XykReferralSettings::V1 {
-                                                fee_fraction,
-                                                fee_fraction_reduced,
-                                            },
-                                        }).unwrap()),
-                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(
-                                            AssetId::Near,
-                                            U128(storage_deposit.as_yoctonear()),
-                                        )]),
-                                    }
+                                "operations": [Operation::DexCall {
+                                    dex_id,
+                                    method: "set_referrer_settings".to_string(),
+                                    args: BASE64_STANDARD.encode(borsh::to_vec(&XykSetReferrerSettingsArgs {
+                                        new_settings: XykReferralSettings::V1 {
+                                            fee_fraction,
+                                            fee_fraction_reduced,
+                                        },
+                                    }).unwrap()),
+                                    attached_assets: HashMap::from_iter([(
+                                        AssetId::Near,
+                                        U128(storage_deposit.as_yoctonear()),
+                                    )]),
                                 }]
                             }),
                         )
                         .transaction()
                         .max_gas()
-                        .deposit(NearToken::from_yoctonear(1))
+                        .deposit(storage_deposit)
                         .with_signer(account_id.clone(), account_signer)
                         .send_to(&network())
                         .await?;
@@ -908,24 +928,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .call_function(
                             "execute_operations",
                             json!({
-                                "operations": [{
-                                    "DexCall": {
-                                        "dex_id": dex_id,
-                                        "method": "register_fee_assets",
-                                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRegisterFeeAssetsArgs {
-                                            asset_ids,
-                                        }).unwrap()),
-                                        "attached_assets": HashMap::<AssetId, U128>::from_iter([(
-                                            AssetId::Near,
-                                            U128(storage_deposit.as_yoctonear()),
-                                        )]),
-                                    }
+                                "operations": [Operation::DexCall {
+                                    dex_id,
+                                    method: "register_fee_assets".to_string(),
+                                    args: BASE64_STANDARD.encode(borsh::to_vec(&XykRegisterFeeAssetsArgs {
+                                        asset_ids,
+                                    }).unwrap()),
+                                    attached_assets: HashMap::from_iter([(
+                                        AssetId::Near,
+                                        U128(storage_deposit.as_yoctonear()),
+                                    )]),
                                 }]
                             }),
                         )
                         .transaction()
                         .max_gas()
-                        .deposit(NearToken::from_yoctonear(1))
+                        .deposit(storage_deposit)
                         .with_signer(account_id.clone(), account_signer)
                         .send_to(&network())
                         .await?;
@@ -935,7 +953,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             },
-            XykAction::CreatePool { action } => {
+            XykAction::CreatePool {
+                action,
+                storage_deposit,
+            } => {
                 let (account_id, asset_0, asset_1, pool_type, fees, attached_assets) = match action
                 {
                     XykCreatePoolAction::Private {
@@ -951,7 +972,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         fees,
                         HashMap::<AssetId, U128>::from_iter([(
                             AssetId::Near,
-                            U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
+                            U128(storage_deposit.as_yoctonear()),
                         )]),
                     ),
                     XykCreatePoolAction::Public {
@@ -967,7 +988,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         fees,
                         HashMap::<AssetId, U128>::from_iter([(
                             AssetId::Near,
-                            U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
+                            U128(storage_deposit.as_yoctonear()),
                         )]),
                     ),
                     XykCreatePoolAction::Launch {
@@ -977,6 +998,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         phantom_liquidity_near,
                         launched_asset_amount,
                         fees,
+                        storage_deposit,
                     } => {
                         assert!(
                             asset_0 == AssetId::Near,
@@ -995,10 +1017,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             },
                             fees,
                             HashMap::<AssetId, U128>::from_iter([
-                                (
-                                    AssetId::Near,
-                                    U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()),
-                                ),
+                                (AssetId::Near, U128(storage_deposit.as_yoctonear())),
                                 (asset_1, U128(launched_asset_amount)),
                             ]),
                         )
@@ -1010,24 +1029,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
-                        "operations": [{
-                            "DexCall": {
-                                "dex_id": dex_id,
-                                "method": "create_pool",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
+                        "operations": [
+                            Operation::DexCall {
+                                dex_id,
+                                method: "create_pool".to_string(),
+                                args: BASE64_STANDARD.encode(borsh::to_vec(&XykCreatePoolArgs {
                                     assets: (asset_0, asset_1),
                                     fees: XykFeeConfiguration::V1(XykCurrentFees {
                                         receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
                                     }),
                                     pool_type,
                                 }).unwrap()),
-                                "attached_assets": attached_assets,
+                                attached_assets,
                             }
-                        }]
+                        ]
                     }))
                     .transaction()
                     .max_gas()
-                    .deposit("0.01 NEAR".parse::<NearToken>().unwrap())
+                    .deposit(storage_deposit)
                     .with_signer(account_id.clone(), account_signer)
                     .send_to(&network())
                     .await?;
@@ -1055,6 +1074,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             XykAction::UpgradePool {
                 account_id,
                 pool_id,
+                storage_deposit,
             } => {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
@@ -1064,21 +1084,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .call_function(
                         "execute_operations",
                         json!({
-                            "operations": [{
-                                "DexCall": {
-                                    "dex_id": dex_id,
-                                    "method": "upgrade_pool",
-                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&XykUpgradePoolArgs {
-                                        pool_id,
-                                    }).unwrap()),
-                                    "attached_assets": {},
+                            "operations": [
+                                Operation::DexCall {
+                                    dex_id,
+                                    method: "upgrade_pool".to_string(),
+                                    args: BASE64_STANDARD.encode(borsh::to_vec(&XykUpgradePoolArgs { pool_id }).unwrap()),
+                                    attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit.as_yoctonear()))]),
                                 }
-                            }]
+                            ]
                         }),
                     )
                     .transaction()
                     .max_gas()
-                    .deposit(NearToken::from_yoctonear(1))
+                    .deposit(storage_deposit)
                     .with_signer(account_id.clone(), account_signer)
                     .send_to(&network())
                     .await?;
@@ -1089,6 +1107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pool_id,
                 amount_0,
                 amount_1,
+                storage_deposit_for_register_liquidity,
             } => {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
@@ -1109,26 +1128,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let mut operations = vec![json!({
-                    "DexCall": {
-                        "dex_id": dex_id,
-                        "method": "add_liquidity",
-                        "args": BASE64_STANDARD.encode(borsh::to_vec(&XykAddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
-                        "attached_assets": HashMap::<AssetId, U128>::from_iter([
-                            (asset_0, U128(amount_0)),
-                            (asset_1, U128(amount_1)),
-                        ]),
-                    }
-                })];
+                let mut operations = vec![Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "add_liquidity".to_string(),
+                    args: BASE64_STANDARD.encode(
+                        borsh::to_vec(&XykAddLiquidityArgs {
+                            pool_id,
+                            min_shares_received: None,
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([
+                        (asset_0, U128(amount_0)),
+                        (asset_1, U128(amount_1)),
+                    ]),
+                }];
                 if should_register_liquidity {
-                    operations.push(json!({
-                        "DexCall": {
-                            "dex_id": dex_id,
-                            "method": "register_liquidity",
-                            "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRegisterLiquidityArgs { pool_id }).unwrap()),
-                            "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
-                        }
-                    }));
+                    operations.push(Operation::DexCall {
+                        dex_id,
+                        method: "register_liquidity".to_string(),
+                        args: BASE64_STANDARD
+                            .encode(borsh::to_vec(&XykRegisterLiquidityArgs { pool_id }).unwrap()),
+                        attached_assets: HashMap::from_iter([(
+                            AssetId::Near,
+                            U128(storage_deposit_for_register_liquidity.as_yoctonear()),
+                        )]),
+                    });
                 }
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
@@ -1155,20 +1180,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await?;
                 let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
-                    .call_function("execute_operations", json!({
-                        "operations": [{
-                            "DexCall": {
-                                "dex_id": dex_id,
-                                "method": "remove_liquidity",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykRemoveLiquidityArgs {
+                    .call_function(
+                        "execute_operations",
+                        json!({
+                            "operations": [Operation::DexCall {
+                                dex_id,
+                                method: "remove_liquidity".to_string(),
+                                args: BASE64_STANDARD.encode(borsh::to_vec(&XykRemoveLiquidityArgs {
                                     pool_id,
                                     shares_to_remove: shares.and_then(NonZeroU128::new),
                                     min_assets_received: None,
                                 }).unwrap()),
-                                "attached_assets": {},
-                            }
-                        }]
-                    }))
+                                attached_assets: HashMap::new(),
+                            }]
+                        }),
+                    )
                     .transaction()
                     .max_gas()
                     .deposit(NearToken::from_yoctonear(1))
@@ -1181,6 +1207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 account_id,
                 pool_id,
                 fees,
+                storage_deposit,
             } => {
                 let account_signer =
                     Signer::from_keystore_with_search_for_keys(account_id.clone(), &network())
@@ -1188,18 +1215,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let dex_id = config.xyk_dex_id.clone();
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function("execute_operations", json!({
-                        "operations": [{
-                            "DexCall": {
-                                "dex_id": dex_id,
-                                "method": "edit_fees",
-                                "args": BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
-                                    pool_id,
-                                    fees: XykFeeConfiguration::V1(XykCurrentFees {
-                                        receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
-                                    }),
-                                }).unwrap()),
-                                "attached_assets": HashMap::<AssetId, U128>::from_iter([(AssetId::Near, U128("0.01 NEAR".parse::<NearToken>().unwrap().as_yoctonear()))]),
-                            }
+                        "operations": [Operation::DexCall {
+                            dex_id,
+                            method: "edit_fees".to_string(),
+                            args: BASE64_STANDARD.encode(borsh::to_vec(&XykEditFeesArgs {
+                                pool_id,
+                                fees: XykFeeConfiguration::V1(XykCurrentFees {
+                                    receivers: fees.iter().map(|f| (XykFeeReceiver::Account(f.account_id.clone()), f.fee_fraction)).collect(),
+                                }),
+                            }).unwrap()),
+                            attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit.as_yoctonear()))]),
                         }]
                     }))
                     .transaction()
@@ -1256,15 +1281,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .call_function(
                         "execute_operations",
                         json!({
-                            "operations": [{
-                                "DexCall": {
-                                    "dex_id": dex_id,
-                                    "method": "withdraw_fees",
-                                    "args": BASE64_STANDARD.encode(borsh::to_vec(&XykWithdrawFeesArgs {
-                                        assets: asset_ids,
-                                    }).unwrap()),
-                                    "attached_assets": {},
-                                }
+                            "operations": [Operation::DexCall {
+                                dex_id,
+                                method: "withdraw_fees".to_string(),
+                                args: BASE64_STANDARD.encode(borsh::to_vec(&XykWithdrawFeesArgs {
+                                    assets: asset_ids,
+                                }).unwrap()),
+                                attached_assets: HashMap::new(),
                             }]
                         }),
                     )
