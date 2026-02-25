@@ -297,6 +297,6 @@ impl DexEngine {
             }
         }
 
-        PromiseOrValue::Value(vec![])
+        PromiseOrValue::Value(vec![U128(0); token_ids.len()])
     }
 }

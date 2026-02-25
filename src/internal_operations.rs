@@ -597,8 +597,8 @@ impl DexEngine {
                     balance
                 } else {
                     panic!(
-                        "Not enough balance for withdraw {asset_id}: {} < {:?}",
-                        balance.0, at_least
+                        "Not enough balance for withdraw {asset_id}: {} < {at_least:?}",
+                        balance.0,
                     );
                 }
             }
@@ -807,7 +807,7 @@ impl DexEngine {
                             self.internal_withdraw_unchecked(
                                 asset_id,
                                 amount,
-                                by.clone(),
+                                to.unwrap_or_else(|| by.clone()),
                                 AccountOrDexId::Account(rescue_address.clone()),
                             )
                             .detach();
@@ -1003,10 +1003,28 @@ impl DexEngine {
                 true
             }
             Err(error) => {
-                near_sdk::env::log_str(&format!(
-                    "Refunding to {withdraw_from} because withdrawal to {withdraw_to} failed: {error:?}"
-                ));
-                self.internal_increase_assets(withdraw_from, asset_id.clone(), amount);
+                if self.asset_is_registered(
+                    AccountOrDexId::Account(withdraw_to.clone()),
+                    asset_id.clone(),
+                ) {
+                    near_sdk::env::log_str(&format!(
+                        "Refunding to {withdraw_to} (recipient) because withdrawal to {withdraw_to} failed: {error:?}"
+                    ));
+                    self.internal_increase_assets(
+                        AccountOrDexId::Account(withdraw_to.clone()),
+                        asset_id.clone(),
+                        amount,
+                    );
+                } else if self.asset_is_registered(withdraw_from.clone(), asset_id.clone()) {
+                    near_sdk::env::log_str(&format!(
+                        "Refunding to {withdraw_from} (rescue) because withdrawal to {withdraw_to} failed: {error:?}"
+                    ));
+                    self.internal_increase_assets(withdraw_from, asset_id.clone(), amount);
+                } else {
+                    panic!(
+                        "No registered balance found for withdrawal from {withdraw_to} (recipient) or {withdraw_from} (rescue). Assets are lost."
+                    );
+                }
                 self.total_in_custody
                     .entry(asset_id.clone())
                     .and_modify(|b| {

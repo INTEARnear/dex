@@ -1929,8 +1929,16 @@ impl XykDex {
         let storage_usage_before = near_sdk::env::storage_usage();
         expect!(attached_assets.is_empty(), "No assets should be attached");
         for asset_id in asset_ids {
-            self.fees_collected_by_users
-                .insert((near_sdk::env::predecessor_account_id(), asset_id), U128(0));
+            if self
+                .fees_collected_by_users
+                .insert(
+                    (near_sdk::env::predecessor_account_id(), asset_id.clone()),
+                    U128(0),
+                )
+                .is_some()
+            {
+                panic!("Asset {asset_id} already registered");
+            }
         }
         self.fees_collected_by_users.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
