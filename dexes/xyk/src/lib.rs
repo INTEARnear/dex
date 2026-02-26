@@ -235,9 +235,14 @@ impl Dex for XykDex {
         struct SwapArgs {
             pool_id: PoolId,
         }
-        let Ok(SwapArgs { pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
+        let Ok(SwapArgs { mut pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
+        if pool_id == u32::MAX {
+            // Last created pool. This is used to batch "create launch pool + buy"
+            // without having to wait to know the pool ID
+            pool_id = self.pools.len().checked_sub(1).expect("No pools created");
+        }
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
@@ -677,6 +682,7 @@ impl XykDex {
         );
 
         fees.validate();
+        expect!(self.pools.len() < u32::MAX, "Too many pools");
 
         let storage_usage_before = near_sdk::env::storage_usage();
         let protocol_fee_receiver: AccountId = PROTOCOL_FEE_RECEIVER.parse().unwrap();
