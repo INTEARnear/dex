@@ -780,6 +780,10 @@ impl XykDex {
                     .remove(&assets.1)
                     .expect("Launched asset not found");
                 expect!(
+                    attached_launched_asset.0 > 0,
+                    "Launched asset amount must be greater than 0"
+                );
+                expect!(
                     attached_assets.is_empty(),
                     "No assets other than NEAR and launched asset should be attached"
                 );
