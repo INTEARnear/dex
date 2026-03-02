@@ -142,6 +142,12 @@ enum XykAction {
     GetPool {
         pool_id: XykPoolId,
     },
+    GetPools {
+        #[arg(long, default_value = "0")]
+        start: u32,
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
     UpgradePool {
         account_id: AccountId,
         pool_id: XykPoolId,
@@ -1071,6 +1077,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => println!("Pool not found"),
                 }
             }
+            XykAction::GetPools { start, limit } => {
+                let dex_id = config.xyk_dex_id.clone();
+                let pools = xyk_fetch_pools(config.dex_contract_id.clone(), &dex_id, start, limit)
+                    .await?;
+                println!("Pools ({} total returned):", pools.len());
+                for (i, pool) in pools.into_iter().enumerate() {
+                    let pool_id = start + i as u32;
+                    println!("\n--- Pool {pool_id} ---");
+                    println!("{:#?}", pool);
+                }
+            }
             XykAction::UpgradePool {
                 account_id,
                 pool_id,
@@ -1822,6 +1839,30 @@ async fn xyk_fetch_pool(
                 "dex_id": dex_id,
                 "method": "get_pool",
                 "args": BASE64_STANDARD.encode(borsh::to_vec(&pool_id).unwrap()),
+            }),
+        )
+        .read_only()
+        .fetch_from(&network())
+        .await?
+        .data;
+    let response_bytes = BASE64_STANDARD.decode(&result)?;
+    Ok(borsh::from_slice(&response_bytes)?)
+}
+
+async fn xyk_fetch_pools(
+    dex_contract_id: AccountId,
+    dex_id: &str,
+    start_index: u32,
+    limit: u32,
+) -> Result<Vec<XykPoolView>, Box<dyn std::error::Error>> {
+    let args = (start_index, limit);
+    let result: String = Contract(dex_contract_id)
+        .call_function(
+            "dex_view",
+            json!({
+                "dex_id": dex_id,
+                "method": "get_pools",
+                "args": BASE64_STANDARD.encode(borsh::to_vec(&args).unwrap()),
             }),
         )
         .read_only()
