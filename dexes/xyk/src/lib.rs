@@ -27,7 +27,6 @@ const MAX_FEE_FRACTION: FeeFraction = 1000000;
 const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
 const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
 const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
-const PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS: &[&str] = &["user.intear.near"];
 const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&str] =
     &["omft.near", "omni.hot.tg", "tether-token.near"];
 const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&str] = &[
@@ -57,7 +56,7 @@ pub struct XykDex {
     referral_settings: LookupMap<AccountId, ReferralSettings>,
 }
 
-#[near(serializers=[borsh, json])]
+#[near(serializers=[borsh])]
 enum ReferralSettings {
     V1 {
         fee_fraction: FeeFraction,
@@ -432,10 +431,7 @@ impl Dex for XykDex {
         let fee_asset_account_ids =
             asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]);
         let current_fees = fees
-            .with_protocol_fee(
-                Some(near_sdk::env::predecessor_account_id()),
-                fee_asset_account_ids.clone(),
-            )
+            .with_protocol_fee(fee_asset_account_ids.clone())
             .with_referral_fee(
                 request.referrer.clone(),
                 &self.referral_settings,
@@ -2120,10 +2116,10 @@ impl From<&Pool> for PoolView {
                 fees,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
-                    None,
-                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
-                ),
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(asset_account_ids(&[
+                    assets.0.asset_id.clone(),
+                    assets.1.asset_id.clone(),
+                ])),
                 fee_configuration: FeeConfiguration::V1(fees.clone()),
                 owner_id: owner_id.clone(),
                 locked: false,
@@ -2135,10 +2131,10 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
-                    None,
-                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
-                ),
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(asset_account_ids(&[
+                    assets.0.asset_id.clone(),
+                    assets.1.asset_id.clone(),
+                ])),
                 fee_configuration: FeeConfiguration::V1(fees.clone()),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
@@ -2150,10 +2146,10 @@ impl From<&Pool> for PoolView {
             } => PoolView::Launch {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
-                fees: fees.with_protocol_fee(
-                    None,
-                    asset_account_ids(&[AssetId::Near, launched_asset.asset_id.clone()]),
-                ),
+                fees: fees.with_protocol_fee(asset_account_ids(&[
+                    AssetId::Near,
+                    launched_asset.asset_id.clone(),
+                ])),
                 fee_configuration: fees.clone(),
                 phantom_liquidity_near: *phantom_liquidity_near,
             },
@@ -2164,10 +2160,10 @@ impl From<&Pool> for PoolView {
                 locked,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(
-                    None,
-                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
-                ),
+                fees: fees.with_protocol_fee(asset_account_ids(&[
+                    assets.0.asset_id.clone(),
+                    assets.1.asset_id.clone(),
+                ])),
                 fee_configuration: fees.clone(),
                 owner_id: owner_id.clone(),
                 locked: *locked,
@@ -2179,10 +2175,10 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(
-                    None,
-                    asset_account_ids(&[assets.0.asset_id.clone(), assets.1.asset_id.clone()]),
-                ),
+                fees: fees.with_protocol_fee(asset_account_ids(&[
+                    assets.0.asset_id.clone(),
+                    assets.1.asset_id.clone(),
+                ])),
                 fee_configuration: fees.clone(),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
@@ -2373,7 +2369,7 @@ impl FeeConfiguration {
         expect!(
             !receivers.iter().any(|(receiver, _)| matches!(
                 receiver,
-                FeeReceiver::Account(account_id) if account_id.as_str() == PROTOCOL_FEE_RECEIVER
+                FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER
             )),
             "Protocol fee receiver can't be set by users"
         );
@@ -2420,30 +2416,15 @@ impl CurrentFees {
 }
 
 impl FeeConfiguration {
-    fn with_protocol_fee(
-        &self,
-        trader_account_id: Option<AccountId>,
-        asset_account_ids: Vec<AccountId>,
-    ) -> CurrentFees {
+    fn with_protocol_fee(&self, asset_account_ids: Vec<AccountId>) -> CurrentFees {
         match self {
             FeeConfiguration::V1(fees) => {
                 let mut receivers = fees.receivers.clone();
                 let mut protocol_fee = PROTOCOL_FEE;
                 if receivers.is_empty() {
                     protocol_fee = 0;
-                } else if let Some(trader_account_id) = trader_account_id {
-                    if should_reduce_fee(&asset_account_ids) {
-                        protocol_fee = PROTOCOL_FEE_REDUCED;
-                    }
-                    for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
-                        let protocol_fee_bypass_parent_account =
-                            bypass_parent_account.parse::<AccountId>().unwrap();
-                        if trader_account_id.is_sub_account_of(&protocol_fee_bypass_parent_account)
-                        {
-                            protocol_fee = 0;
-                            break;
-                        }
-                    }
+                } else if should_reduce_fee(&asset_account_ids) {
+                    protocol_fee = PROTOCOL_FEE_REDUCED;
                 }
                 receivers.push((
                     FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
@@ -2455,23 +2436,8 @@ impl FeeConfiguration {
                 let mut receivers = Vec::new();
                 let mut protocol_fee = if fees.receivers.is_empty() {
                     0
-                } else if let Some(trader_account_id) = trader_account_id {
-                    if should_reduce_fee(&asset_account_ids) {
-                        PROTOCOL_FEE_REDUCED
-                    } else {
-                        let mut protocol_fee = PROTOCOL_FEE;
-                        for bypass_parent_account in PROTOCOL_FEE_BYPASS_PARENT_ACCOUNTS {
-                            let protocol_fee_bypass_parent_account =
-                                bypass_parent_account.parse::<AccountId>().unwrap();
-                            if trader_account_id
-                                .is_sub_account_of(&protocol_fee_bypass_parent_account)
-                            {
-                                protocol_fee = 0;
-                                break;
-                            }
-                        }
-                        protocol_fee
-                    }
+                } else if should_reduce_fee(&asset_account_ids) {
+                    PROTOCOL_FEE_REDUCED
                 } else {
                     PROTOCOL_FEE
                 };

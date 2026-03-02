@@ -47,3 +47,6 @@ overflow-checks = false # deny(clippy::arithmetic_side_effects) makes this unnec
 
 [profile.release.package.wasmi]
 opt-level = 2 # 57.7 Tgas -> 48.5 Tgas
+
+[profile.release.package.xyk-dex]
+opt-level = 'z'

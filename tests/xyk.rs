@@ -2024,7 +2024,6 @@ async fn test_xyk_fees() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-    println!("{result:#?}");
 
     // fee = swap_amount_ft1 * fee_fraction / 1_000_000 = 100_000_000 * 10_000 / 1_000_000 = 1_000_000
     let fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;

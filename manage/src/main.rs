@@ -1079,8 +1079,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             XykAction::GetPools { start, limit } => {
                 let dex_id = config.xyk_dex_id.clone();
-                let pools = xyk_fetch_pools(config.dex_contract_id.clone(), &dex_id, start, limit)
-                    .await?;
+                let pools =
+                    xyk_fetch_pools(config.dex_contract_id.clone(), &dex_id, start, limit).await?;
                 println!("Pools ({} total returned):", pools.len());
                 for (i, pool) in pools.into_iter().enumerate() {
                     let pool_id = start + i as u32;
