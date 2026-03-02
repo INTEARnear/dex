@@ -1720,7 +1720,7 @@ impl XykDex {
             asset_withdraw_requests.push(AssetWithdrawRequest {
                 asset_id,
                 amount: balance,
-                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
                     near_sdk::env::predecessor_account_id(),
                 ),
             });
