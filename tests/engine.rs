@@ -1355,7 +1355,9 @@ async fn test_execute_operations_liquidity_and_swaps() {
     assert_total_in_custody(
         &dex_engine_contract,
         AssetId::Near,
-        Some(U128(initial_near_deposit.as_yoctonear())),
+        Some(U128(
+            initial_near_deposit.as_yoctonear() - 3250000000000000000000,
+        )), // converted to storage deposit
     )
     .await
     .unwrap();

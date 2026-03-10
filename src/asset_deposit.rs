@@ -44,6 +44,7 @@ impl DexEngine {
     /// Deposit near to the dex engine contract's inner
     /// balance for the user.
     pub fn deposit_near(&mut self, operations: Option<DepositMessage>) {
+        self.assert_not_paused();
         let deposit = U128(near_sdk::env::attached_deposit().as_yoctonear());
         self.total_in_custody
             .entry(AssetId::Near)
@@ -92,6 +93,7 @@ impl FungibleTokenReceiver for DexEngine {
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        self.assert_not_paused();
         let contract_id = near_sdk::env::predecessor_account_id();
         let operations: Option<DepositMessage> = if msg.is_empty() {
             None
@@ -149,6 +151,7 @@ impl NonFungibleTokenReceiver for DexEngine {
         token_id: non_fungible_token::TokenId,
         msg: String,
     ) -> PromiseOrValue<bool> {
+        self.assert_not_paused();
         let contract_id = near_sdk::env::predecessor_account_id();
         let message: Option<DepositMessage> = if msg.is_empty() {
             None
@@ -215,6 +218,7 @@ impl DexEngine {
         amounts: Vec<U128>,
         msg: String,
     ) -> PromiseOrValue<Vec<U128>> {
+        self.assert_not_paused();
         expect!(
             previous_owner_ids.len() == token_ids.len()
                 && previous_owner_ids.len() == amounts.len(),

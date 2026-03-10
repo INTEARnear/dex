@@ -226,14 +226,13 @@ pub async fn assert_near_balance(
     Ok(())
 }
 
-/// Assert the balance of an asset that is custodied by the dex
+/// Get the balance of an asset that is custodied by the dex
 /// engine contract for a user or a dex.
-pub async fn assert_inner_asset_balance(
+pub async fn get_inner_asset_balance(
     dex_engine_contract: &Contract,
     of: AccountOrDexId,
     asset: AssetId,
-    amount: Option<U128>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<U128>, Box<dyn std::error::Error>> {
     let balance = dex_engine_contract
         .view("asset_balance_of")
         .args_json(json!({
@@ -242,6 +241,18 @@ pub async fn assert_inner_asset_balance(
         }))
         .await?
         .json::<Option<U128>>()?;
+    Ok(balance)
+}
+
+/// Assert the balance of an asset that is custodied by the dex
+/// engine contract for a user or a dex.
+pub async fn assert_inner_asset_balance(
+    dex_engine_contract: &Contract,
+    of: AccountOrDexId,
+    asset: AssetId,
+    amount: Option<U128>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let balance = get_inner_asset_balance(dex_engine_contract, of, asset).await?;
     if balance != amount {
         return Err(format!(
             "Inner asset balance mismatch: expected {:?}, actual {:?}",

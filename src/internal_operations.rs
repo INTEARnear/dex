@@ -125,6 +125,11 @@ impl DexEngine {
             id: last_part_of_id,
         };
         let storage_usage_before = near_sdk::env::storage_usage();
+        expect!(
+            self.code_deployment_allowed
+                || near_sdk::env::predecessor_account_id() == "slimedragon.near",
+            "Custom DEX code deployment is temporarily disabled before an audit"
+        );
         self.dex_codes.insert(dex_id.clone(), code_base64.0);
         self.dex_codes.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -443,6 +448,24 @@ impl DexEngine {
                 AssetId::Near,
                 U128(response.add_storage_deposit.as_yoctonear()),
             );
+            self.total_in_custody
+                .entry(AssetId::Near)
+                .and_modify(|b| {
+                    b.0 = b.0.checked_sub(response.add_storage_deposit.as_yoctonear())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Balance underflow for contract and asset Near: {} - {} < {}",
+                                b.0,
+                                response.add_storage_deposit.as_yoctonear(),
+                                u128::MIN,
+                            )
+                        })
+                })
+                .or_insert_with(|| {
+                    panic!(
+                        "Failed to convert NEAR to dex storage deposit: asset Near not registered in total_in_custody"
+                    )
+                });
             self.dex_storage_balances
                 .deposit(&dex_id, response.add_storage_deposit);
         }
@@ -947,6 +970,23 @@ impl DexEngine {
                             amount,
                         );
                     }
+                    self.total_in_custody
+                        .entry(AssetId::Near)
+                        .and_modify(|b| {
+                            b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                                panic!(
+                                    "Balance underflow for contract and asset Near: {} - {} < {}",
+                                    b.0,
+                                    amount.0,
+                                    u128::MIN,
+                                )
+                            })
+                        })
+                        .or_insert_with(|| {
+                            panic!(
+                                "Failed to convert NEAR to storage deposit: asset Near not registered in total_in_custody"
+                            )
+                        });
                     match r#for {
                         Some(AccountOrDexId::Account(account)) => {
                             self.user_storage_balances.storage_deposit(

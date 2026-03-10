@@ -43,7 +43,7 @@ opt-level = "s" # TODO: Improve size and speed optimization once near moves to w
 lto = true
 debug = false
 panic = "abort"
-overflow-checks = false # deny(clippy::arithmetic_side_effects) makes this unnecessary, unless bug is in a dependency
+overflow-checks = true # deny(clippy::arithmetic_side_effects) makes this unnecessary, but could be a bug in a dependency. increases gas usage by 3.3%
 
 [profile.release.package.wasmi]
 opt-level = 2 # 57.7 Tgas -> 48.5 Tgas

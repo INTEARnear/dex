@@ -2065,9 +2065,14 @@ async fn test_xyk_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    assert_ft_balance(&user2, ft1.clone(), U128(fee_amount))
-        .await
-        .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user2.id().clone()),
+        AssetId::Nep141(ft1.id().clone()),
+        Some(U128(fee_amount)),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -2259,7 +2264,6 @@ async fn test_xyk_scheduled_fees() {
         .transact()
         .await
         .unwrap();
-    println!("{result:#?}");
     assert_success(&result).unwrap();
 
     let result = user2
@@ -2279,14 +2283,15 @@ async fn test_xyk_scheduled_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let user2_fee_balance = ft1
-        .view("ft_balance_of")
-        .args_json(json!({"account_id": user2.id()}))
-        .await
-        .unwrap()
-        .json::<U128>()
-        .unwrap()
-        .0;
+    let user2_fee_balance = get_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user2.id().clone()),
+        AssetId::Nep141(ft1.id().clone()),
+    )
+    .await
+    .unwrap()
+    .expect("missing internal fee balance for user2 after withdraw_fees")
+    .0;
     // 5% protocol fee
     let expected_fee_fraction_after_fast_forward =
         expected_fee_fraction_after_fast_forward as u128 * 95 / 100;
@@ -2298,7 +2303,6 @@ async fn test_xyk_scheduled_fees() {
         expected_fee_fraction_after_fast_forward as u128 * (100 + TIME_INCONSISTENCY_PERCENT) / 100;
     let min_fee_amount = swap_amount_ft1 * min_fee_fraction / 1_000_000;
     let max_fee_amount = swap_amount_ft1 * max_fee_fraction / 1_000_000;
-    println!("user2_fee_balance: {}", user2_fee_balance);
     assert!(
         (min_fee_amount..=max_fee_amount).contains(&user2_fee_balance),
         "Scheduled fee {} out of expected range [{}, {}]",

@@ -419,7 +419,7 @@ impl Dex for XykDex {
                     .and_modify(|balance| {
                         balance.0 = balance.0.checked_add(fee_amount_near).expect("Overflow")
                     })
-                    .or_insert(U128(fee_amount_near));
+                    .or_insert_with(|| panic!("NEAR fee asset not registered; this is a bug"));
                 *entry = FeeBreakdownEntry::Normal {
                     receiver: FeeReceiver::Account(receiver.clone()),
                     asset_id: AssetId::Near,
@@ -688,6 +688,7 @@ impl XykDex {
         self.fees_collected_by_users
             .entry((protocol_fee_receiver, assets.1.clone()))
             .or_default();
+        // TODO: Register only NEAR fee asset for Launch pools
         for (fee_receiver, _) in fees.receivers() {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
@@ -1597,6 +1598,7 @@ impl XykDex {
 
         fees.validate();
 
+        // TODO: Register only NEAR fee asset for Launch pools
         let storage_usage_before = near_sdk::env::storage_usage();
         for (fee_receiver, _) in fees.receivers() {
             match fee_receiver {
