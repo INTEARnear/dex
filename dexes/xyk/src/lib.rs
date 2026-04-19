@@ -619,24 +619,6 @@ impl XykDex {
         }
     }
 
-    #[init(ignore_state)]
-    #[payable]
-    pub fn migrate() -> Self {
-        assert_one_yocto();
-        #[near(serializers=[borsh])]
-        pub struct OldXykDex {
-            pools: Vector<Pool>,
-            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-        }
-        let old_state: OldXykDex =
-            near_sdk::borsh::from_slice(&near_sdk::env::storage_read(b"STATE").unwrap()).unwrap();
-        Self {
-            pools: old_state.pools,
-            fees_collected_by_users: old_state.fees_collected_by_users,
-            referral_settings: LookupMap::new(StorageKey::ReferralSettings),
-        }
-    }
-
     #[payable]
     #[result_serializer(borsh)]
     pub fn create_pool(

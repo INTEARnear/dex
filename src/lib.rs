@@ -84,7 +84,7 @@ impl Default for DexEngine {
             user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
             total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
             paused: false,
-            code_deployment_allowed: true, // true for tests; false for production contract that was already deployed and is migrated, where migration sets this to false
+            code_deployment_allowed: true,
         }
     }
 }
@@ -297,34 +297,6 @@ pub struct RunnerData<'a> {
 
 #[near]
 impl DexEngine {
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate() -> Self {
-        #[near(serializers=[borsh])]
-        pub struct OldState {
-            dex_balances: LookupMap<(DexId, AssetId), U128>,
-            dex_storage: DexStorage,
-            dex_codes: LookupMap<DexId, Vec<u8>>,
-            dex_storage_balances: StorageBalances<DexId>,
-            user_balances: LookupMap<(AccountId, AssetId), U128>,
-            user_storage_balances: StorageBalances<AccountId>,
-            total_in_custody: IterableMap<AssetId, U128>,
-        }
-        let old_state = near_sdk::env::state_read::<OldState>().expect("Failed to read old state");
-        let new_state = Self {
-            dex_balances: old_state.dex_balances,
-            dex_storage: old_state.dex_storage,
-            dex_codes: old_state.dex_codes,
-            dex_storage_balances: old_state.dex_storage_balances,
-            user_balances: old_state.user_balances,
-            user_storage_balances: old_state.user_storage_balances,
-            total_in_custody: old_state.total_in_custody,
-            paused: false,
-            code_deployment_allowed: false,
-        };
-        new_state
-    }
-
     #[payable]
     pub fn pause(&mut self) {
         near_sdk::assert_one_yocto();
@@ -413,6 +385,7 @@ impl DexEngine {
     #[payable]
     pub fn transfer_asset(&mut self, to: AccountOrDexId, asset_id: AssetId, amount: U128) {
         near_sdk::assert_one_yocto();
+        self.assert_not_paused();
         self.internal_transfer_asset(
             AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
             to,
