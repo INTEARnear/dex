@@ -43,6 +43,7 @@ enum StorageKey {
     PublicPoolUserShares { pool_id: PoolId },
     FeesCollectedByUsers,
     ReferralSettings,
+    CommunityOwnedFees,
 }
 
 type PoolId = u32;
@@ -54,6 +55,7 @@ pub struct XykDex {
     pools: Vector<Pool>,
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
     referral_settings: LookupMap<AccountId, ReferralSettings>,
+    community_owned_fees: LookupMap<AccountId, NearToken>,
 }
 
 #[near(serializers=[borsh])]
@@ -325,6 +327,10 @@ impl Dex for XykDex {
                 receiver: AccountId,
                 amount_token: U128,
             },
+            CommunityFeeDeferredForConvertionToNear {
+                receiver: AccountId,
+                amount_token: U128,
+            },
         }
 
         struct CollectFeesReturn {
@@ -338,6 +344,7 @@ impl Dex for XykDex {
             asset_in: &AssetId,
             fees: &CurrentFees,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
+            community_owned_fees: &mut LookupMap<AccountId, NearToken>,
             convert_to_near: bool,
         ) -> CollectFeesReturn {
             let mut fees_breakdown = Vec::new();
@@ -352,23 +359,19 @@ impl Dex for XykDex {
                         / u128_to_u256(MAX_FEE_FRACTION as u128),
                 );
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
-                fees_breakdown.push(
-                    if let (FeeReceiver::Account(account_id), true) = (receiver, convert_to_near) {
-                        FeeBreakdownEntry::DeferredForConvertionToNear {
-                            receiver: account_id.clone(),
-                            amount_token: U128(fee_amount),
-                        }
-                    } else {
-                        FeeBreakdownEntry::Normal {
-                            receiver: receiver.clone(),
-                            asset_id: asset_in.clone(),
-                            amount: U128(fee_amount),
-                        }
-                    },
-                );
                 match receiver {
                     FeeReceiver::Account(account_id) => {
-                        if !convert_to_near {
+                        if convert_to_near {
+                            fees_breakdown.push(FeeBreakdownEntry::DeferredForConvertionToNear {
+                                receiver: account_id.clone(),
+                                amount_token: U128(fee_amount),
+                            });
+                        } else {
+                            fees_breakdown.push(FeeBreakdownEntry::Normal {
+                                receiver: receiver.clone(),
+                                asset_id: asset_in.clone(),
+                                amount: U128(fee_amount),
+                            });
                             fees_collected_by_users
                                 .entry((account_id.clone(), asset_in.clone()))
                                 .and_modify(|balance| {
@@ -380,7 +383,38 @@ impl Dex for XykDex {
                         }
                     }
                     FeeReceiver::Pool => {
+                        fees_breakdown.push(FeeBreakdownEntry::Normal {
+                            receiver: receiver.clone(),
+                            asset_id: asset_in.clone(),
+                            amount: U128(fee_amount),
+                        });
                         pool_fee = pool_fee.checked_add(fee_amount).expect("Overflow");
+                    }
+                    FeeReceiver::Community(account_id) => {
+                        if convert_to_near {
+                            fees_breakdown.push(
+                                FeeBreakdownEntry::CommunityFeeDeferredForConvertionToNear {
+                                    receiver: account_id.clone(),
+                                    amount_token: U128(fee_amount),
+                                },
+                            );
+                        } else {
+                            fees_breakdown.push(FeeBreakdownEntry::Normal {
+                                receiver: receiver.clone(),
+                                asset_id: asset_in.clone(),
+                                amount: U128(fee_amount),
+                            });
+                            community_owned_fees
+                                .entry(account_id.clone())
+                                .and_modify(|total_fee| {
+                                    *total_fee = total_fee
+                                        .checked_add(NearToken::from_yoctonear(fee_amount))
+                                        .expect("Overflow")
+                                })
+                                .or_insert_with(|| {
+                                    panic!("Community fee account not registered; this is a bug")
+                                });
+                        }
                     }
                 }
             }
@@ -396,35 +430,65 @@ impl Dex for XykDex {
             out_balance: &mut u128,
             fees_breakdown: &mut Vec<FeeBreakdownEntry>,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
+            community_owned_fees: &mut LookupMap<AccountId, NearToken>,
         ) {
             for entry in fees_breakdown {
-                let FeeBreakdownEntry::DeferredForConvertionToNear {
+                if let FeeBreakdownEntry::DeferredForConvertionToNear {
                     receiver,
                     amount_token,
                 } = entry
-                else {
-                    continue;
-                };
-                // u128 * u128 and u128 + u128 can't overflow u256;
-                // in denominator in_balance or amount can't either be zero.
-                #[allow(clippy::arithmetic_side_effects)]
-                let fee_amount_near = u256_to_u128(
-                    u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
-                        / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
-                );
-                *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
-                *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
-                fees_collected_by_users
-                    .entry((receiver.clone(), AssetId::Near))
-                    .and_modify(|balance| {
-                        balance.0 = balance.0.checked_add(fee_amount_near).expect("Overflow")
-                    })
-                    .or_insert_with(|| panic!("NEAR fee asset not registered; this is a bug"));
-                *entry = FeeBreakdownEntry::Normal {
-                    receiver: FeeReceiver::Account(receiver.clone()),
-                    asset_id: AssetId::Near,
-                    amount: U128(fee_amount_near),
-                };
+                {
+                    // u128 * u128 and u128 + u128 can't overflow u256;
+                    // in denominator in_balance or amount can't either be zero.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let fee_amount_near = u256_to_u128(
+                        u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
+                            / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
+                    );
+                    *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
+                    *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
+                    fees_collected_by_users
+                        .entry((receiver.clone(), AssetId::Near))
+                        .and_modify(|balance| {
+                            balance.0 = balance.0.checked_add(fee_amount_near).expect("Overflow")
+                        })
+                        .or_insert_with(|| panic!("NEAR fee asset not registered; this is a bug"));
+                    *entry = FeeBreakdownEntry::Normal {
+                        receiver: FeeReceiver::Account(receiver.clone()),
+                        asset_id: AssetId::Near,
+                        amount: U128(fee_amount_near),
+                    };
+                }
+                if let FeeBreakdownEntry::CommunityFeeDeferredForConvertionToNear {
+                    receiver,
+                    amount_token,
+                } = entry
+                {
+                    // u128 * u128 and u128 + u128 can't overflow u256;
+                    // in denominator in_balance or amount can't either be zero.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let fee_amount_near = u256_to_u128(
+                        u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
+                            / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
+                    );
+                    *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
+                    *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
+                    community_owned_fees
+                        .entry(receiver.clone())
+                        .and_modify(|total_fee| {
+                            *total_fee = total_fee
+                                .checked_add(NearToken::from_yoctonear(fee_amount_near))
+                                .expect("Overflow")
+                        })
+                        .or_insert_with(|| {
+                            panic!("Community fee account not registered; this is a bug")
+                        });
+                    *entry = FeeBreakdownEntry::Normal {
+                        receiver: FeeReceiver::Community(receiver.clone()),
+                        asset_id: AssetId::Near,
+                        amount: U128(fee_amount_near),
+                    };
+                }
             }
         }
 
@@ -461,6 +525,7 @@ impl Dex for XykDex {
                     &request.asset_in,
                     &current_fees,
                     &mut self.fees_collected_by_users,
+                    &mut self.community_owned_fees,
                     should_convert_fees_to_near,
                 );
                 // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
@@ -481,6 +546,7 @@ impl Dex for XykDex {
                         out_balance,
                         &mut fees_breakdown,
                         &mut self.fees_collected_by_users,
+                        &mut self.community_owned_fees,
                     );
                 }
                 (
@@ -540,6 +606,7 @@ impl Dex for XykDex {
                     &request.asset_in,
                     &current_fees,
                     &mut self.fees_collected_by_users,
+                    &mut self.community_owned_fees,
                     should_convert_fees_to_near,
                 );
                 *in_balance = in_balance
@@ -556,6 +623,7 @@ impl Dex for XykDex {
                         out_balance,
                         &mut fees_breakdown,
                         &mut self.fees_collected_by_users,
+                        &mut self.community_owned_fees,
                     );
                 }
                 (
@@ -568,6 +636,7 @@ impl Dex for XykDex {
             }
         };
         self.fees_collected_by_users.flush();
+        self.community_owned_fees.flush();
 
         if let Pool::LaunchV1 {
             near_amount,
@@ -616,6 +685,33 @@ impl XykDex {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
             referral_settings: LookupMap::new(StorageKey::ReferralSettings),
+            community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
+        }
+    }
+
+    #[init(ignore_state)]
+    #[payable]
+    pub fn migrate() -> Self {
+        assert_one_yocto();
+        expect!(
+            near_sdk::env::predecessor_account_id() == "slimedragon.near",
+            "Only owner can migrate"
+        );
+
+        #[near(serializers=[borsh])]
+        pub struct OldXykDex {
+            pools: Vector<Pool>,
+            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+            referral_settings: LookupMap<AccountId, ReferralSettings>,
+        }
+
+        let old_state: OldXykDex = near_sdk::env::state_read().expect("State read failed");
+
+        XykDex {
+            pools: old_state.pools,
+            fees_collected_by_users: old_state.fees_collected_by_users,
+            referral_settings: old_state.referral_settings,
+            community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
         }
     }
 
@@ -659,7 +755,7 @@ impl XykDex {
             "Only NEAR, NEP-141, and NEP-245 assets are supported"
         );
 
-        fees.validate();
+        fees.validate(&pool_type);
         expect!(self.pools.len() < u32::MAX, "Too many pools");
 
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -686,9 +782,15 @@ impl XykDex {
                         .or_default();
                 }
                 FeeReceiver::Pool => {}
+                FeeReceiver::Community(account_id) => {
+                    self.community_owned_fees
+                        .entry(account_id.clone())
+                        .or_default();
+                }
             }
         }
         self.fees_collected_by_users.flush();
+        self.community_owned_fees.flush();
 
         let attached_near = NearToken::from_yoctonear(
             attached_assets
@@ -1547,6 +1649,8 @@ impl XykDex {
             panic!("Pool not found");
         };
 
+        fees.validate(&PoolType::from(&*pool));
+
         let assets = match pool {
             Pool::PrivateV1 {
                 assets, owner_id, ..
@@ -1578,8 +1682,6 @@ impl XykDex {
             }
         };
 
-        fees.validate();
-
         // TODO: Register only NEAR fee asset for Launch pools
         let storage_usage_before = near_sdk::env::storage_usage();
         for (fee_receiver, _) in fees.receivers() {
@@ -1597,6 +1699,7 @@ impl XykDex {
                         .or_default();
                 }
                 FeeReceiver::Pool => {}
+                FeeReceiver::Community(_) => unreachable!(),
             }
         }
         self.fees_collected_by_users.flush();
@@ -1956,6 +2059,41 @@ impl XykDex {
         }
     }
 
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn withdraw_community_fee(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct WithdrawCommunityFeeArgs {
+            account_id: AccountId,
+        }
+        let Ok(WithdrawCommunityFeeArgs { account_id }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+
+        expect!(
+            self.community_owned_fees.contains_key(&account_id),
+            "Account does not have a registered community fee"
+        );
+        let amount = self
+            .community_owned_fees
+            .insert(account_id.clone(), NearToken::ZERO)
+            .expect("Just checked that the account has a registered community fee");
+        DexCallResponse {
+            asset_withdraw_requests: vec![AssetWithdrawRequest {
+                asset_id: AssetId::Near,
+                amount: U128(amount.as_yoctonear()),
+                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(account_id),
+            }],
+            ..Default::default()
+        }
+    }
+
     #[result_serializer(borsh)]
     pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<PoolView> {
         self.pools.get(pool_id).map(|pool| pool.into())
@@ -2032,6 +2170,17 @@ impl XykDex {
             Pool::LaunchV1 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => false,
         }
     }
+
+    #[result_serializer(borsh)]
+    pub fn get_community_owned_fees(
+        &self,
+        #[serializer(borsh)] account_id: AccountId,
+    ) -> NearToken {
+        self.community_owned_fees
+            .get(&account_id)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 #[near(serializers=[borsh])]
@@ -2065,6 +2214,23 @@ pub enum Pool {
         user_shares: LookupMap<AccountId, Option<SharesBalance>>,
         total_shares: Option<SharesBalance>,
     },
+}
+
+impl From<&Pool> for PoolType {
+    fn from(pool: &Pool) -> Self {
+        match pool {
+            Pool::PrivateV1 { .. } => PoolType::PrivateV1,
+            Pool::PublicV1 { .. } => PoolType::PublicV1,
+            Pool::LaunchV1 {
+                phantom_liquidity_near,
+                ..
+            } => PoolType::LaunchV1 {
+                phantom_liquidity_near: *phantom_liquidity_near,
+            },
+            Pool::PrivateV2 { .. } => PoolType::PrivateV2,
+            Pool::PublicV2 { .. } => PoolType::PublicV2,
+        }
+    }
 }
 
 #[near(serializers=[borsh, json])]
@@ -2325,7 +2491,7 @@ impl FeeConfiguration {
         }
     }
 
-    fn validate(&self) {
+    fn validate(&self, pool_type: &PoolType) {
         match self {
             FeeConfiguration::V1(_) => {}
             FeeConfiguration::V2(fees) => {
@@ -2357,6 +2523,18 @@ impl FeeConfiguration {
             )),
             "Protocol fee receiver can't be set by users"
         );
+        if receivers
+            .iter()
+            .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)))
+        {
+            expect!(
+                matches!(
+                    pool_type,
+                    PoolType::LaunchV1 { .. } | PoolType::LaunchLatest { .. }
+                ),
+                "Community fee receiver is only supported in Launch pools"
+            );
+        }
     }
 }
 
@@ -2466,6 +2644,7 @@ impl FeeConfiguration {
 pub enum FeeReceiver {
     Account(AccountId),
     Pool,
+    Community(AccountId),
 }
 
 #[near(serializers=[borsh, json])]
