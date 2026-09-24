@@ -680,10 +680,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        Operation::DexCall {
-                            dex_id,
-                            method: "set_authorized_key".to_string(),
-                            args: BASE64_STANDARD.encode(
+                        serde_json::json!({
+                            "dex_id": dex_id,
+                            "method": "set_authorized_key".to_string(),
+                            "args": BASE64_STANDARD.encode(
                                 borsh::to_vec(&OtcSetAuthorizedKeyArgs {
                                     key_bytes: match key {
                                         PublicKey::ED25519(public_key) => {
@@ -696,8 +696,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .unwrap(),
                             ),
-                            attached_assets: HashMap::new(),
-                        },
+                            "attached_assets": {},
+                        }),
                     )
                     .transaction()
                     .max_gas()
@@ -746,13 +746,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        Operation::DexCall {
-                            dex_id,
-                            method: "deposit_assets".to_string(),
-                            args: BASE64_STANDARD
+                        serde_json::json!({
+                            "dex_id": dex_id,
+                            "method": "deposit_assets".to_string(),
+                            "args": BASE64_STANDARD
                                 .encode(borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
-                            attached_assets: HashMap::from_iter([(asset_id, U128(amount))]),
-                        },
+                            "attached_assets": HashMap::<AssetId, U128>::from_iter([(asset_id, U128(amount))]),
+                        }),
                     )
                     .transaction()
                     .max_gas()
@@ -844,12 +844,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let result = Contract(config.dex_contract_id.clone())
                         .call_function(
                             "dex_call",
-                            Operation::DexCall {
-                                dex_id: format!("{deployer_id}/xyk"),
-                                method: "migrate".to_string(),
-                                args: "".to_string(),
-                                attached_assets: HashMap::new(),
-                            },
+                            serde_json::json!({
+                                "dex_id": format!("{deployer_id}/xyk"),
+                                "method": "migrate".to_string(),
+                                "args": "".to_string(),
+                                "attached_assets": {},
+                            }),
                         )
                         .transaction()
                         .max_gas()
@@ -868,12 +868,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        Operation::DexCall {
-                            dex_id,
-                            method: "new".to_string(),
-                            args: "".to_string(),
-                            attached_assets: HashMap::new(),
-                        },
+                        serde_json::json!({
+                            "dex_id": dex_id,
+                            "method": "new".to_string(),
+                            "args": "".to_string(),
+                            "attached_assets": {},
+                        }),
                     )
                     .transaction()
                     .max_gas()
@@ -891,12 +891,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = Contract(config.dex_contract_id.clone())
                     .call_function(
                         "dex_call",
-                        Operation::DexCall {
-                            dex_id,
-                            method: "migrate".to_string(),
-                            args: "".to_string(),
-                            attached_assets: HashMap::new(),
-                        },
+                        serde_json::json!({
+                            "dex_id": dex_id,
+                            "method": "migrate".to_string(),
+                            "args": "".to_string(),
+                            "attached_assets": {},
+                        }),
                     )
                     .transaction()
                     .max_gas()
