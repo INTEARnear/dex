@@ -122,6 +122,9 @@ enum XykAction {
         /// Include storage deposit (5 NEAR) in the deployment transaction
         #[arg(long)]
         storage: bool,
+        /// Call the `migrate` method on the XYK dex
+        #[arg(long)]
+        migrate: bool,
     },
     Initialize {
         deployer_id: AccountId,
@@ -764,6 +767,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             XykAction::Deploy {
                 deployer_id,
                 storage,
+                migrate,
             } => {
                 println!("Compiling xyk-dex");
                 assert!(
@@ -830,11 +834,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gas: NearGas::from_tgas(290),
                         deposit: NearToken::from_yoctonear(1),
                     })))
-                    .with_signer(deployer_signer)
+                    .with_signer(deployer_signer.clone())
                     .send_to(&network())
                     .await?;
 
                 println!("Deployed. Result: {:?}", result.outcome());
+
+                if migrate {
+                    let result = Contract(config.dex_contract_id.clone())
+                        .call_function(
+                            "dex_call",
+                            Operation::DexCall {
+                                dex_id: format!("{deployer_id}/xyk"),
+                                method: "migrate".to_string(),
+                                args: "".to_string(),
+                                attached_assets: HashMap::new(),
+                            },
+                        )
+                        .transaction()
+                        .max_gas()
+                        .deposit(NearToken::from_yoctonear(1))
+                        .with_signer(deployer_id.clone(), deployer_signer)
+                        .send_to(&network())
+                        .await?;
+                    println!("Migrated XYK dex. Result: {:?}", result.outcome());
+                }
             }
             XykAction::Initialize { deployer_id } => {
                 let deployer_signer =
