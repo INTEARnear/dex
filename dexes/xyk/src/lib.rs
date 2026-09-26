@@ -9,12 +9,14 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, Timestamp, assert_one_yocto,
+    AccountId, AccountIdRef, BorshStorageKey, NearToken, PanicOnDefault, Timestamp,
+    assert_one_yocto,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
 };
 
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
     const MEMORY_SIZE: usize = 0x8000; // 32KB
@@ -26,12 +28,16 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
 const MAX_FEE_FRACTION: FeeFraction = 1000000;
 const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
 const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
-const PROTOCOL_FEE_RECEIVER: &str = "plach.intear.near";
-const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&str] =
-    &["omft.near", "omni.hot.tg", "tether-token.near"];
-const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&str] = &[
-    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
-    "near",
+const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
+const NEAR_ACCOUNT_ID: &AccountIdRef = AccountIdRef::new_or_panic("near");
+const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&AccountIdRef] = &[
+    AccountIdRef::new_or_panic("omft.near"),
+    AccountIdRef::new_or_panic("omni.hot.tg"),
+    AccountIdRef::new_or_panic("tether-token.near"),
+];
+const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
+    AccountIdRef::new_or_panic("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"),
+    NEAR_ACCOUNT_ID,
 ];
 const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 const MAX_REFERRAL_FEE_FRACTION: FeeFraction = MAX_FEE_FRACTION / 20; // 5%
@@ -85,7 +91,7 @@ impl ReferralSettings {
         }
     }
 
-    fn fee_fraction(&self, asset_account_ids: &[AccountId]) -> FeeFraction {
+    fn fee_fraction(&self, asset_account_ids: &[&AccountIdRef]) -> FeeFraction {
         match self {
             ReferralSettings::V1 {
                 fee_fraction,
@@ -151,10 +157,6 @@ enum XykDexEvent {
     },
 }
 
-fn u128_to_u256(value: u128) -> U256 {
-    U256::from(value)
-}
-
 fn u256_to_u128(value: U256) -> u128 {
     expect!(value.bits() <= 128, "Value must be less than 128 bits");
     let bytes = value.to_le_bytes();
@@ -162,40 +164,70 @@ fn u256_to_u128(value: U256) -> u128 {
     u128::from_le_bytes(*first_chunk)
 }
 
+/// Returns `a * b / c`, rounded down. Panics if the result doesn't fit into u128.
+fn mul_div(a: u128, b: u128, c: u128) -> u128 {
+    mul_add_div(a, b, 0, c)
+}
+
+/// Returns `a * b / (c + d)`, rounded down. Panics if the result doesn't fit into u128.
+fn mul_div_sum(a: u128, b: u128, c: u128, d: u128) -> u128 {
+    match c.checked_add(d) {
+        Some(sum) => mul_div(a, b, sum),
+        // u128 + u128 can't overflow u256
+        #[allow(clippy::arithmetic_side_effects)]
+        None => mul_add_div_u256(a, b, 0, U256::from(c) + U256::from(d)),
+    }
+}
+
+/// Returns `(a * b + add) / c`, rounded down. Panics if the result doesn't fit into u128.
+fn mul_add_div(a: u128, b: u128, add: u128, c: u128) -> u128 {
+    match a
+        .checked_mul(b)
+        .and_then(|product| product.checked_add(add))
+    {
+        // Callers make sure that c is not 0
+        #[allow(clippy::arithmetic_side_effects)]
+        Some(dividend) => dividend / c,
+        None => mul_add_div_u256(a, b, add, U256::from(c)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn mul_add_div_u256(a: u128, b: u128, add: u128, c: U256) -> u128 {
+    use crypto_bigint::CheckedAdd;
+    // u128 * u128 + u128 hopefully can't overflow u256; callers make sure that c is not 0
+    #[allow(clippy::arithmetic_side_effects)]
+    u256_to_u128(
+        ((U256::from(a) * U256::from(b))
+            .checked_add(&U256::from(add))
+            .unwrap())
+            / c,
+    )
+}
+
 fn shares_to_tokens(
     shares: SharesBalance,
     total_shares: SharesBalance,
     total_tokens: NonZeroU128,
 ) -> u128 {
-    // total_shares is NonZeroU128; multiplication of u128's can not overflow u256
-    #[allow(clippy::arithmetic_side_effects)]
-    u256_to_u128(
-        u128_to_u256(total_tokens.get()) * u128_to_u256(shares.get())
-            / u128_to_u256(total_shares.get()),
-    )
+    mul_div(total_tokens.get(), shares.get(), total_shares.get())
 }
 
 fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: NonZeroU128) -> u128 {
-    // total_shares is NonZeroU128; multiplication of u128's can not overflow u256
-    #[allow(clippy::arithmetic_side_effects)]
-    u256_to_u128(
-        u128_to_u256(tokens) * u128_to_u256(total_shares.get()) / u128_to_u256(total_tokens.get()),
-    )
+    mul_div(tokens, total_shares.get(), total_tokens.get())
 }
 
-fn asset_account_ids(asset_ids: &[AssetId]) -> Vec<AccountId> {
-    asset_ids
-        .iter()
-        .map(|asset_id| match asset_id {
-            AssetId::Near => "near".parse::<AccountId>().unwrap(),
-            AssetId::Nep141(account_id) => account_id.clone(),
-            AssetId::Nep171(_, _) => panic!("Nep171 assets are not supported"),
-            AssetId::Nep245(account_id, _) => account_id.clone(),
-        })
-        .collect()
+fn asset_account_ids<const N: usize>(asset_ids: [&AssetId; N]) -> [&AccountIdRef; N] {
+    asset_ids.map(|asset_id| match asset_id {
+        AssetId::Near => NEAR_ACCOUNT_ID,
+        AssetId::Nep141(account_id) => account_id,
+        AssetId::Nep171(_, _) => panic!("Nep171 assets are not supported"),
+        AssetId::Nep245(account_id, _) => account_id,
+    })
 }
 
-fn should_reduce_fee(asset_account_ids: &[AccountId]) -> bool {
+fn should_reduce_fee(asset_account_ids: &[&AccountIdRef]) -> bool {
     'assets: for asset_account_id in asset_account_ids {
         for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
             if asset_account_id.as_str() == *reduce_asset_account {
@@ -203,9 +235,7 @@ fn should_reduce_fee(asset_account_ids: &[AccountId]) -> bool {
             }
         }
         for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
-            let protocol_fee_bypass_asset_parent_account =
-                bypass_asset_parent_account.parse::<AccountId>().unwrap();
-            if asset_account_id.is_sub_account_of(&protocol_fee_bypass_asset_parent_account) {
+            if asset_account_id.is_sub_account_of(bypass_asset_parent_account) {
                 continue 'assets;
             }
         }
@@ -351,13 +381,8 @@ impl Dex for XykDex {
             let mut total_fees = 0u128;
             let mut pool_fee = 0u128;
             for (receiver, fee_fraction) in fees.receivers.iter() {
-                // MAX_FEE_FRACTION is constant, so no zero division; u128 * u128 can't
-                // overflow u256
-                #[allow(clippy::arithmetic_side_effects)]
-                let fee_amount = u256_to_u128(
-                    u128_to_u256(amount_in) * u128_to_u256(*fee_fraction as u128)
-                        / u128_to_u256(MAX_FEE_FRACTION as u128),
-                );
+                let fee_amount =
+                    mul_div(amount_in, *fee_fraction as u128, MAX_FEE_FRACTION as u128);
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
                 match receiver {
                     FeeReceiver::Account(account_id) => {
@@ -438,13 +463,9 @@ impl Dex for XykDex {
                     amount_token,
                 } = entry
                 {
-                    // u128 * u128 and u128 + u128 can't overflow u256;
                     // in denominator in_balance or amount can't either be zero.
-                    #[allow(clippy::arithmetic_side_effects)]
-                    let fee_amount_near = u256_to_u128(
-                        u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
-                            / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
-                    );
+                    let fee_amount_near =
+                        mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
                     *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
                     *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
                     fees_collected_by_users
@@ -464,13 +485,9 @@ impl Dex for XykDex {
                     amount_token,
                 } = entry
                 {
-                    // u128 * u128 and u128 + u128 can't overflow u256;
                     // in denominator in_balance or amount can't either be zero.
-                    #[allow(clippy::arithmetic_side_effects)]
-                    let fee_amount_near = u256_to_u128(
-                        u128_to_u256(amount_token.0) * u128_to_u256(*out_balance)
-                            / (u128_to_u256(*in_balance) + u128_to_u256(amount_token.0)),
-                    );
+                    let fee_amount_near =
+                        mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
                     *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
                     *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
                     community_owned_fees
@@ -492,10 +509,9 @@ impl Dex for XykDex {
             }
         }
 
-        let fee_asset_account_ids =
-            asset_account_ids(&[request.asset_in.clone(), request.asset_out.clone()]);
+        let fee_asset_account_ids = asset_account_ids([&request.asset_in, &request.asset_out]);
         let current_fees = fees
-            .with_protocol_fee(fee_asset_account_ids.clone())
+            .with_protocol_fee(&fee_asset_account_ids)
             .with_referral_fee(
                 request.referrer.clone(),
                 &self.referral_settings,
@@ -528,11 +544,12 @@ impl Dex for XykDex {
                     &mut self.community_owned_fees,
                     should_convert_fees_to_near,
                 );
-                // u128 * u128 or u128 + u128 can't overflow u256; in_balance was checked to be positive
-                #[allow(clippy::arithmetic_side_effects)]
-                let amount_out = u256_to_u128(
-                    u128_to_u256(amount_in_after_fees) * u128_to_u256(*out_balance)
-                        / (u128_to_u256(*in_balance) + u128_to_u256(amount_in_after_fees)),
+                // in_balance was checked to be positive
+                let amount_out = mul_div_sum(
+                    amount_in_after_fees,
+                    *out_balance,
+                    *in_balance,
+                    amount_in_after_fees,
                 );
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
@@ -568,15 +585,16 @@ impl Dex for XykDex {
                     exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
-                // u128 * u128 can't overflow u256; out_balance was checked to be
-                // greater than exact_amount_out so no underflow or zero division
-                // can happen
+                // out_balance was checked to be greater than exact_amount_out so
+                // no underflow or zero division can happen
                 #[allow(clippy::arithmetic_side_effects)]
-                let amount_in_without_fees = u256_to_u128(
-                    ((u128_to_u256(*in_balance) * u128_to_u256(exact_amount_out.0))
-                        / (u128_to_u256(*out_balance) - u128_to_u256(exact_amount_out.0)))
-                    .saturating_add(&U256::ONE),
-                );
+                let amount_in_without_fees = mul_div(
+                    *in_balance,
+                    exact_amount_out.0,
+                    *out_balance - exact_amount_out.0,
+                )
+                .checked_add(1)
+                .expect("Value must be less than 128 bits");
                 let total_fee_fraction = current_fees
                     .receivers
                     .iter()
@@ -588,14 +606,12 @@ impl Dex for XykDex {
                 let fee_denominator_minus_one = fee_denominator
                     .checked_sub(1)
                     .expect("Fee fraction somehow equals 100%");
-                // checked_sub would fail if denominator was 0; MAX_FEE_FRACTION is
-                // constant, so multiplication of u128's will not be close to overflowing
-                // u256 after adding another u1282
-                #[allow(clippy::arithmetic_side_effects)]
-                let amount_in = u256_to_u128(
-                    (u128_to_u256(amount_in_without_fees) * u128_to_u256(MAX_FEE_FRACTION as u128)
-                        + u128_to_u256(fee_denominator_minus_one))
-                        / u128_to_u256(fee_denominator),
+                // checked_sub would fail if denominator was 0
+                let amount_in = mul_add_div(
+                    amount_in_without_fees,
+                    MAX_FEE_FRACTION as u128,
+                    fee_denominator_minus_one,
+                    fee_denominator,
                 );
                 let CollectFeesReturn {
                     amount_in_after_fees,
@@ -759,19 +775,18 @@ impl XykDex {
         expect!(self.pools.len() < u32::MAX, "Too many pools");
 
         let storage_usage_before = near_sdk::env::storage_usage();
-        let protocol_fee_receiver: AccountId = PROTOCOL_FEE_RECEIVER.parse().unwrap();
         self.fees_collected_by_users
-            .entry((protocol_fee_receiver.clone(), assets.0.clone()))
+            .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.0.clone()))
             .or_default();
         self.fees_collected_by_users
-            .entry((protocol_fee_receiver, assets.1.clone()))
+            .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.1.clone()))
             .or_default();
         // TODO: Register only NEAR fee asset for Launch pools
         for (fee_receiver, _) in fees.receivers() {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
                     expect!(
-                        account_id != PROTOCOL_FEE_RECEIVER,
+                        account_id != PROTOCOL_FEE_RECEIVER_ID,
                         "Protocol fee receiver can't be changed",
                     );
                     self.fees_collected_by_users
@@ -1430,17 +1445,17 @@ impl XykDex {
                     shares_to_remove.get() <= INITIAL_SHARES.get(),
                     "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
-                #[allow(clippy::arithmetic_side_effects)]
-                // u128 * u128 can't overflow; INITIAL_SHARES is not 0
-                let withdrawn_amount_0 = u256_to_u128(
-                    u128_to_u256(assets.0.balance.0) * u128_to_u256(shares_to_remove.get())
-                        / u128_to_u256(INITIAL_SHARES.get()),
+                // INITIAL_SHARES is not 0
+                let withdrawn_amount_0 = mul_div(
+                    assets.0.balance.0,
+                    shares_to_remove.get(),
+                    INITIAL_SHARES.get(),
                 );
-                #[allow(clippy::arithmetic_side_effects)]
-                // u128 * u128 can't overflow; INITIAL_SHARES is not 0
-                let withdrawn_amount_1 = u256_to_u128(
-                    u128_to_u256(assets.1.balance.0) * u128_to_u256(shares_to_remove.get())
-                        / u128_to_u256(INITIAL_SHARES.get()),
+                // INITIAL_SHARES is not 0
+                let withdrawn_amount_1 = mul_div(
+                    assets.1.balance.0,
+                    shares_to_remove.get(),
+                    INITIAL_SHARES.get(),
                 );
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
                     expect!(
@@ -1688,7 +1703,7 @@ impl XykDex {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
                     expect!(
-                        account_id != PROTOCOL_FEE_RECEIVER,
+                        account_id != PROTOCOL_FEE_RECEIVER_ID,
                         "Protocol fee receiver can't be changed",
                     );
                     self.fees_collected_by_users
@@ -2267,10 +2282,7 @@ impl From<&Pool> for PoolView {
             } => PoolView::Private {
                 assets: assets.clone(),
                 fees: FeeConfiguration::V1(fees.clone())
-                    .with_protocol_fee(asset_account_ids(&[
-                        assets.0.asset_id.clone(),
-                        assets.1.asset_id.clone(),
-                    ]))
+                    .with_protocol_fee(&asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]))
                     .into(),
                 fee_configuration: FeeConfiguration::V1(fees.clone()).into(),
                 owner_id: owner_id.clone(),
@@ -2284,10 +2296,7 @@ impl From<&Pool> for PoolView {
             } => PoolView::Public {
                 assets: assets.clone(),
                 fees: FeeConfiguration::V1(fees.clone())
-                    .with_protocol_fee(asset_account_ids(&[
-                        assets.0.asset_id.clone(),
-                        assets.1.asset_id.clone(),
-                    ]))
+                    .with_protocol_fee(&asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]))
                     .into(),
                 fee_configuration: FeeConfiguration::V1(fees.clone()).into(),
                 total_shares: total_shares.map(|s| U128(s.get())),
@@ -2301,9 +2310,9 @@ impl From<&Pool> for PoolView {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
                 fees: fees
-                    .with_protocol_fee(asset_account_ids(&[
-                        AssetId::Near,
-                        launched_asset.asset_id.clone(),
+                    .with_protocol_fee(&asset_account_ids([
+                        &AssetId::Near,
+                        &launched_asset.asset_id,
                     ]))
                     .into(),
                 fee_configuration: fees.clone().into(),
@@ -2317,10 +2326,7 @@ impl From<&Pool> for PoolView {
             } => PoolView::Private {
                 assets: assets.clone(),
                 fees: fees
-                    .with_protocol_fee(asset_account_ids(&[
-                        assets.0.asset_id.clone(),
-                        assets.1.asset_id.clone(),
-                    ]))
+                    .with_protocol_fee(&asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]))
                     .into(),
                 fee_configuration: fees.clone().into(),
                 owner_id: owner_id.clone(),
@@ -2334,10 +2340,7 @@ impl From<&Pool> for PoolView {
             } => PoolView::Public {
                 assets: assets.clone(),
                 fees: fees
-                    .with_protocol_fee(asset_account_ids(&[
-                        assets.0.asset_id.clone(),
-                        assets.1.asset_id.clone(),
-                    ]))
+                    .with_protocol_fee(&asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]))
                     .into(),
                 fee_configuration: fees.clone().into(),
                 total_shares: total_shares.map(|s| U128(s.get())),
@@ -2521,12 +2524,11 @@ impl FeeAmount {
 
                 let fee_decrease = match curve {
                     ScheduledFeeCurve::Linear => {
-                        #[allow(clippy::arithmetic_side_effects)]
-                        // Multiplying u128 by u128 can't overflow u256, and total_duration
-                        // is not 0 due to .validate() check
-                        FeeFraction::try_from(u256_to_u128(
-                            u128_to_u256(fee_range as u128) * u128_to_u256(time_elapsed as u128)
-                                / u128_to_u256(total_duration as u128),
+                        // total_duration is not 0 due to .validate() check
+                        FeeFraction::try_from(mul_div(
+                            fee_range as u128,
+                            time_elapsed as u128,
+                            total_duration as u128,
                         ))
                         .expect("Fee decrease overflows u32")
                     }
@@ -2591,7 +2593,7 @@ impl FeeConfiguration {
         expect!(
             !receivers.iter().any(|(receiver, _)| matches!(
                 receiver,
-                FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER
+                FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID
             )),
             "Protocol fee receiver can't be set by users"
         );
@@ -2625,7 +2627,7 @@ impl CurrentFees {
         referral_settings: &LookupMap<AccountId, ReferralSettings>,
         fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
         fee_asset_id: AssetId,
-        asset_account_ids: &[AccountId],
+        asset_account_ids: &[&AccountIdRef],
     ) -> Self {
         let Some(referrer_account_id) = referrer_account_id else {
             return self;
@@ -2650,18 +2652,18 @@ impl CurrentFees {
 }
 
 impl FeeConfiguration {
-    fn with_protocol_fee(&self, asset_account_ids: Vec<AccountId>) -> CurrentFees {
+    fn with_protocol_fee(&self, asset_account_ids: &[&AccountIdRef]) -> CurrentFees {
         match self {
             FeeConfiguration::V1(fees) => {
                 let mut receivers = fees.receivers.clone();
                 let mut protocol_fee = PROTOCOL_FEE;
                 if receivers.is_empty() {
                     protocol_fee = 0;
-                } else if should_reduce_fee(&asset_account_ids) {
+                } else if should_reduce_fee(asset_account_ids) {
                     protocol_fee = PROTOCOL_FEE_REDUCED;
                 }
                 receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
+                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
                     protocol_fee,
                 ));
                 CurrentFees { receivers }
@@ -2670,7 +2672,7 @@ impl FeeConfiguration {
                 let mut receivers = Vec::new();
                 let mut protocol_fee = if fees.receivers.is_empty() {
                     0
-                } else if should_reduce_fee(&asset_account_ids) {
+                } else if should_reduce_fee(asset_account_ids) {
                     PROTOCOL_FEE_REDUCED
                 } else {
                     PROTOCOL_FEE
@@ -2702,7 +2704,7 @@ impl FeeConfiguration {
                     }
                 }
                 receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER.parse().unwrap()),
+                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
                     protocol_fee,
                 ));
                 CurrentFees { receivers }

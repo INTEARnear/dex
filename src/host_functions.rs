@@ -807,21 +807,21 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<()
     };
     let message = String::from_utf8(msg_bytes)
         .map_err(|err| wasmi::Error::new(format!("log_utf8 received invalid UTF-8: {err}")))?;
-    if let Some(event) = message.strip_prefix("EVENT_JSON:") {
-        if let Ok(event) = near_sdk::serde_json::from_str(event) {
-            IntearDexEvent::DexEvent {
-                dex_id: caller.data().dex_id.clone(),
-                event,
-                referrer: caller.data().referrer.clone(),
-                user: match &caller.data().call_type {
-                    CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
-                    CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
-                    _ => None,
-                },
-            }
-            .emit();
-            return Ok(());
+    if let Some(event) = message.strip_prefix("EVENT_JSON:")
+        && let Ok(event) = near_sdk::serde_json::from_str(event)
+    {
+        IntearDexEvent::DexEvent {
+            dex_id: caller.data().dex_id.clone(),
+            event,
+            referrer: caller.data().referrer.clone(),
+            user: match &caller.data().call_type {
+                CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
+                CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
+                _ => None,
+            },
         }
+        .emit();
+        return Ok(());
     }
 
     near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
@@ -839,7 +839,7 @@ pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(
             "log_utf16: unterminated log strings are not supported",
         ));
     } else {
-        if len % 2 != 0 {
+        if !len.is_multiple_of(2) {
             return Err(wasmi::Error::new(
                 "log_utf16 length must be even (u16 units)",
             ));
@@ -852,8 +852,10 @@ pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(
                     "Failed to read log_utf16 buffer from guest memory: {err}"
                 ))
             })?;
-        buf.chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        buf.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk))
             .collect()
     };
     let message = String::from_utf16(&utf16)

@@ -126,10 +126,14 @@ impl DexEngine {
         };
         let storage_usage_before = near_sdk::env::storage_usage();
         expect!(
-            self.code_deployment_allowed
-                || near_sdk::env::predecessor_account_id() == "slimedragon.near",
-            "Custom DEX code deployment is temporarily disabled before an audit"
+            near_sdk::env::predecessor_account_id() == self.trusted_code_deployer,
+            "Only the trusted code deployer can deploy dex code"
         );
+        // SAFETY: can only be deployed by trusted callers. Currently only slimedragon.near
+        // can deploy, later another smart contract will validate and deploy permissionlessly.
+        if let Err(err) = unsafe { Module::new_unchecked(&Engine::default(), &code_base64.0) } {
+            near_sdk::env::panic_str(&format!("Invalid dex code: {err}"));
+        }
         self.dex_codes.insert(dex_id.clone(), code_base64.0);
         self.dex_codes.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -155,9 +159,10 @@ impl DexEngine {
         referrer: Option<AccountId>,
     ) -> Option<Vec<u8>> {
         let engine = Engine::default();
-        let module = match Module::new(&engine, code) {
+        // SAFETY: already validated in internal_deploy_dex_code
+        let module = match unsafe { Module::new_unchecked(&engine, code) } {
             Ok(module) => module,
-            Err(err) => panic!("Failed to load module: {err:?}"),
+            Err(_) => panic!("Failed to load module"),
         };
 
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -184,7 +189,7 @@ impl DexEngine {
 
         let instance = match linker.instantiate_and_start(&mut store, &module) {
             Ok(i) => i,
-            Err(err) => panic!("Failed to instantiate module: {err:?}"),
+            Err(err) => panic!("Failed to instantiate module: {err}"),
         };
         let func: Func = match instance.get_func(&mut store, method) {
             Some(f) => f,
@@ -192,7 +197,7 @@ impl DexEngine {
         };
         match func.call(&mut store, &[], &mut []) {
             Ok(()) => (),
-            Err(err) => panic!("Failed to call function '{method}': {err:?}"),
+            Err(err) => panic!("Failed to call function '{method}': {err}"),
         };
         store.data_mut().response.take()
     }

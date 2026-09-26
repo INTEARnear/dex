@@ -134,11 +134,6 @@ enum FeeReceiver {
 }
 
 #[near(serializers=[borsh])]
-struct CreatePoolResponse {
-    pool_id: PoolId,
-}
-
-#[near(serializers=[borsh])]
 struct GetPoolArgs {
     pool_id: PoolId,
 }

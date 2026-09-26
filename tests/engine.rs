@@ -22,6 +22,7 @@ async fn test_minimal() {
     let swap_amount = 10u128;
 
     let TestContext {
+        sandbox,
         dex_engine_contract,
         deployer,
         ..
@@ -70,7 +71,7 @@ async fn test_minimal() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let initial_near_balance = deployer.view_account().await.unwrap().balance;
+    let initial_near_balance = near_balance_after_refunds(&sandbox, &deployer).await;
     let mut total_near_burnt = NearToken::from_yoctonear(0);
     assert_inner_asset_balance(
         &dex_engine_contract,
@@ -756,10 +757,12 @@ async fn test_execute_operations() {
     let swap_amount = NearToken::from_millinear(1);
 
     let TestContext {
+        deployer,
         dex_engine_contract,
         user1,
         ..
     } = setup_test_environment().await;
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
     let dex_wasm = &wasms.minimal_dex_wasm;
 
@@ -1074,6 +1077,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
         deployer,
         ..
     } = setup_test_environment().await;
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
     let dex_wasm = &wasms.simple_amm_dex_wasm;
 
@@ -1429,6 +1433,7 @@ async fn test_operations_with_ft_deposit() {
         deployer,
         ..
     } = setup_test_environment().await;
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
     let dex_wasm = &wasms.minimal_dex_wasm;
 
@@ -1654,7 +1659,7 @@ async fn test_regular_flow() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let initial_near_balance = deployer.view_account().await.unwrap().balance;
+    let initial_near_balance = near_balance_after_refunds(&sandbox, &deployer).await;
     let mut total_near_burnt = NearToken::from_yoctonear(0);
     assert_inner_asset_balance(
         &dex_engine_contract,
@@ -2247,6 +2252,7 @@ async fn test_swap_constraints() {
         deployer,
         ..
     } = setup_test_environment().await;
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
     let dex_wasm = &wasms.simple_amm_dex_wasm;
 
@@ -2522,6 +2528,7 @@ async fn test_simulate_swap_simple() {
         deployer,
         ..
     } = setup_test_environment().await;
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
     let dex_wasm = &wasms.simple_amm_dex_wasm;
 
@@ -2835,4 +2842,103 @@ async fn test_withdraw_at_least() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_dex_code_deployment_permissions() {
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        user1,
+        user2,
+        deployer,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+        ..Default::default()
+    })
+    .await;
+    let dex_wasm = &get_compiled_wasms().await.minimal_dex_wasm;
+
+    let deploy = |account: &near_workspaces::Account| {
+        account
+            .call(dex_engine_contract.id(), "deploy_dex_code")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "last_part_of_id": "dex",
+                "code_base64": BASE64_STANDARD.encode(dex_wasm),
+            }))
+            .transact()
+    };
+    for account in [&deployer, &user1] {
+        let result = account
+            .call(dex_engine_contract.id(), "dex_storage_deposit")
+            .max_gas()
+            .deposit(engine_dex_storage_deposit())
+            .args_json(json!({
+                "dex_id": DexId {
+                    deployer: account.id().clone(),
+                    id: "dex".to_string(),
+                },
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    let trusted_code_deployer: AccountId = dex_engine_contract
+        .view("get_trusted_code_deployer")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(&trusted_code_deployer, deployer.id());
+
+    // Untrusted accounts can't deploy code or take the permission
+    let result = deploy(&user1).await.unwrap();
+    assert!(format!("{result:?}").contains("Only the trusted code deployer can deploy dex code"));
+    let result = user1
+        .call(dex_engine_contract.id(), "set_trusted_code_deployer")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({ "account_id": user1.id() }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+
+    // Operations in ft_transfer_call are executed on behalf of the sender
+    // that the token contract claims, so they can't deploy code even if
+    // the claimed sender is trusted
+    let result = deployer
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(1),
+            "msg": near_sdk::serde_json::to_string(&vec![Operation::DeployDexCode {
+                last_part_of_id: "dex".to_string(),
+                code_base64: Base64VecU8(dex_wasm.to_vec()),
+            }])
+            .unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Operation only available in execute_actions"));
+
+    let result = deploy(&deployer).await.unwrap();
+    assert_success(&result).unwrap();
+
+    // The permission can be transferred
+    set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
+    let result = deploy(&user1).await.unwrap();
+    assert_success(&result).unwrap();
+    let result = deploy(&deployer).await.unwrap();
+    assert!(format!("{result:?}").contains("Only the trusted code deployer can deploy dex code"));
+    let result = deploy(&user2).await.unwrap();
+    assert!(!result.is_success());
 }

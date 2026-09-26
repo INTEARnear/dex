@@ -128,6 +128,9 @@ impl AuthorizedTradeIntent {
                             .expect("Invalid signature");
                             actual_public_key == expected_public_key.as_bytes()[1..]
                         }
+                        CurveType::MLDSA65 => {
+                            panic!("Intent not authorized: MLDSA65 keys are not supported")
+                        }
                     };
                     expect!(
                         is_verified,

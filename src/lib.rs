@@ -16,7 +16,7 @@ use crate::{
 };
 use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PromiseOrValue,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
     store::{IterableMap, LookupMap},
@@ -25,6 +25,7 @@ use near_sdk::{
 const CAN_PAUSE: &[&str] = &["slimedragon.near", "pause.slimedragon.near"];
 
 #[near(contract_state)]
+#[derive(PanicOnDefault)]
 pub struct DexEngine {
     /// Assets that are custodied by the dex engine contract
     /// for the dexes that run inside it. Other dexes or users
@@ -58,7 +59,9 @@ pub struct DexEngine {
     /// without causing any issues.
     total_in_custody: IterableMap<AssetId, U128>,
     paused: bool,
-    code_deployment_allowed: bool,
+    /// The only account that can deploy dex code. Dex code isn't
+    /// validated when it's loaded, so it must come from a trusted source.
+    trusted_code_deployer: AccountId,
 }
 
 #[derive(BorshStorageKey)]
@@ -73,8 +76,8 @@ enum StorageKey {
     ContractTrackedBalance,
 }
 
-impl Default for DexEngine {
-    fn default() -> Self {
+impl DexEngine {
+    fn new_state(trusted_code_deployer: AccountId) -> Self {
         Self {
             dex_balances: LookupMap::new(StorageKey::DexBalances),
             dex_storage: LookupMap::new(StorageKey::DexStorage),
@@ -84,7 +87,7 @@ impl Default for DexEngine {
             user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
             total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
             paused: false,
-            code_deployment_allowed: true,
+            trusted_code_deployer,
         }
     }
 }
@@ -297,6 +300,55 @@ pub struct RunnerData<'a> {
 
 #[near]
 impl DexEngine {
+    #[init]
+    pub fn new(trusted_code_deployer: AccountId) -> Self {
+        Self::new_state(trusted_code_deployer)
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate(trusted_code_deployer: AccountId) -> Self {
+        #[near(serializers=[borsh])]
+        struct OldState {
+            dex_balances: LookupMap<(DexId, AssetId), U128>,
+            dex_storage: DexStorage,
+            dex_codes: LookupMap<DexId, Vec<u8>>,
+            dex_storage_balances: StorageBalances<DexId>,
+            user_balances: LookupMap<(AccountId, AssetId), U128>,
+            user_storage_balances: StorageBalances<AccountId>,
+            total_in_custody: IterableMap<AssetId, U128>,
+            paused: bool,
+            code_deployment_allowed: bool,
+        }
+        let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
+        Self {
+            dex_balances: old_state.dex_balances,
+            dex_storage: old_state.dex_storage,
+            dex_codes: old_state.dex_codes,
+            dex_storage_balances: old_state.dex_storage_balances,
+            user_balances: old_state.user_balances,
+            user_storage_balances: old_state.user_storage_balances,
+            total_in_custody: old_state.total_in_custody,
+            paused: old_state.paused,
+            trusted_code_deployer,
+        }
+    }
+
+    /// Transfer the permission to deploy dex code to another account
+    #[payable]
+    pub fn set_trusted_code_deployer(&mut self, account_id: AccountId) {
+        near_sdk::assert_one_yocto();
+        expect!(
+            near_sdk::env::predecessor_account_id() == self.trusted_code_deployer,
+            "Only the trusted code deployer can transfer this permission"
+        );
+        self.trusted_code_deployer = account_id;
+    }
+
+    pub fn get_trusted_code_deployer(&self) -> AccountId {
+        self.trusted_code_deployer.clone()
+    }
+
     #[payable]
     pub fn pause(&mut self) {
         near_sdk::assert_one_yocto();

@@ -209,21 +209,35 @@ pub async fn assert_ft_balance(
     Ok(())
 }
 
+/// Returns the balance of NEAR of an account after refunds of unused gas
+/// for previous transactions are received.
+pub async fn near_balance_after_refunds(
+    sandbox: &near_workspaces::Worker<near_workspaces::network::Sandbox>,
+    account: &Account,
+) -> NearToken {
+    sandbox.fast_forward(3).await.unwrap();
+    account.view_account().await.unwrap().balance
+}
+
 /// Assert the balance of NEAR of an account.
 pub async fn assert_near_balance(
     account: &Account,
     amount: NearToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let account_details = account.view_account().await?;
-    if account_details.balance != amount {
-        return Err(format!(
-            "NEAR balance mismatch: expected {}, actual {}",
-            amount.as_yoctonear(),
-            account_details.balance.as_yoctonear()
-        )
-        .into());
+    let mut balance = account.view_account().await?.balance;
+    for _ in 0..50 {
+        if balance == amount {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        balance = account.view_account().await?.balance;
     }
-    Ok(())
+    Err(format!(
+        "NEAR balance mismatch: expected {}, actual {}",
+        amount.as_yoctonear(),
+        balance.as_yoctonear()
+    )
+    .into())
 }
 
 /// Get the balance of an asset that is custodied by the dex
@@ -400,6 +414,16 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
     let (user5, user5_key) = create_user(&sandbox, "user5").await;
 
     let deployer = sandbox.dev_create_account().await.unwrap();
+
+    let result = dex_engine_contract
+        .call("new")
+        .args_json(json!({
+            "trusted_code_deployer": deployer.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
 
     let ft_total_supply = NearToken::from_near(1_000_000_000_000);
 
@@ -602,4 +626,22 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
         ft2,
         ft3,
     }
+}
+
+/// Allow an account to deploy dex code
+pub async fn set_trusted_code_deployer(
+    dex_engine_contract: &Contract,
+    current: &Account,
+    new: &Account,
+) {
+    let result = current
+        .call(dex_engine_contract.id(), "set_trusted_code_deployer")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "account_id": new.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
 }

@@ -13,6 +13,7 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
 };
 
 mod sys {
+    #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
     unsafe extern "C" {
         pub fn value_return(value_len: u64, value_ptr: u64);
         pub fn input(register_id: u64);

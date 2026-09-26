@@ -148,7 +148,7 @@ async fn test_otc_regular_flow() {
         id: "dex".to_string(),
     };
 
-    let initial_near_balance = deployer.view_account().await.unwrap().balance;
+    let initial_near_balance = near_balance_after_refunds(&sandbox, &deployer).await;
     let mut total_near_burnt = NearToken::from_yoctonear(0);
 
     let result = deployer
