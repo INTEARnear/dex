@@ -2942,3 +2942,816 @@ async fn test_dex_code_deployment_permissions() {
     let result = deploy(&user2).await.unwrap();
     assert!(!result.is_success());
 }
+
+#[tokio::test]
+async fn test_total_storage_balances() {
+    let storage_deposit_amount = NearToken::from_millinear(500);
+    let registration_deposit_amount = NearToken::from_millinear(10);
+    let storage_withdraw_amount = NearToken::from_millinear(100);
+    let initial_near_deposit = NearToken::from_near(1);
+    let dex_storage_deposit_amount = NearToken::from_millinear(300);
+    let user_storage_deposit_amount = NearToken::from_millinear(200);
+    let dex_storage_withdraw_amount = NearToken::from_near(1);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user2,
+        user3,
+        user4,
+        user5,
+        deployer,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: get_compiled_wasms().await.minimal_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ..Default::default()
+    })
+    .await;
+    let wasms = get_compiled_wasms().await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let new_account_id: AccountId = "new-account.test.near".parse().unwrap();
+    let accounts = [
+        user1.id(),
+        user2.id(),
+        user3.id(),
+        user4.id(),
+        user5.id(),
+        deployer.id(),
+        &new_account_id,
+    ];
+    let dexes = [&dex_id];
+
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = user1
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(storage_deposit_amount)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.users.total,
+        total_storage_balances_before
+            .users
+            .total
+            .saturating_add(storage_deposit_amount),
+    );
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(registration_deposit_amount)
+        .args_json(json!({
+            "account_id": new_account_id,
+            "registration_only": true,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = user2
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(registration_deposit_amount)
+        .args_json(json!({
+            "registration_only": true,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.users.total,
+        total_storage_balances_before.users.total,
+    );
+    assert_eq!(
+        total_storage_balances_after.users.available,
+        total_storage_balances_before.users.available,
+    );
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = user2
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Nep141("some-token.test.near".parse().unwrap())],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.users.total,
+        total_storage_balances_before.users.total,
+    );
+    assert!(
+        total_storage_balances_after.users.available
+            < total_storage_balances_before.users.available
+    );
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = user2
+        .call(dex_engine_contract.id(), "storage_withdraw")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "amount": storage_withdraw_amount,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.users.total,
+        total_storage_balances_before
+            .users
+            .total
+            .saturating_sub(storage_withdraw_amount),
+    );
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = user3
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(initial_near_deposit)
+        .args_json(json!({
+            "operations": [
+                Operation::StorageDeposit {
+                    amount: U128(dex_storage_deposit_amount.as_yoctonear()),
+                    r#for: Some(AccountOrDexId::Dex(dex_id.clone())),
+                },
+                Operation::StorageDeposit {
+                    amount: U128(user_storage_deposit_amount.as_yoctonear()),
+                    r#for: Some(AccountOrDexId::Account(user4.id().clone())),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.dexes.total,
+        total_storage_balances_before
+            .dexes
+            .total
+            .saturating_add(dex_storage_deposit_amount),
+    );
+    assert_eq!(
+        total_storage_balances_after.users.total,
+        total_storage_balances_before
+            .users
+            .total
+            .saturating_add(user_storage_deposit_amount),
+    );
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Near,
+        Some(U128(
+            initial_near_deposit
+                .saturating_sub(dex_storage_deposit_amount)
+                .saturating_sub(user_storage_deposit_amount)
+                .as_yoctonear(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = deployer
+        .call(dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": "dex",
+            "code_base64": BASE64_STANDARD.encode(&wasms.simple_amm_dex_wasm),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.dexes.total,
+        total_storage_balances_before.dexes.total,
+    );
+    assert_ne!(
+        total_storage_balances_after.dexes.available,
+        total_storage_balances_before.dexes.available,
+    );
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    let total_storage_balances_before = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_storage_withdraw")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id,
+            "amount": dex_storage_withdraw_amount,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let total_storage_balances_after = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after.dexes.total,
+        total_storage_balances_before
+            .dexes
+            .total
+            .saturating_sub(dex_storage_withdraw_amount),
+    );
+    assert_total_storage_balances(&dex_engine_contract, &accounts, &dexes)
+        .await
+        .unwrap();
+
+    sandbox.fast_forward(3).await.unwrap();
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_untracked_near() {
+    let transfer_amount = NearToken::from_near(3);
+    let deposit_amount = NearToken::from_near(2);
+    let max_gas_reward = NearToken::from_millinear(10);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        register_assets_for_all: true,
+        ..Default::default()
+    })
+    .await;
+
+    sandbox.fast_forward(3).await.unwrap();
+    let untracked_near_initial = assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    let result = user1
+        .transfer_near(dex_engine_contract.id(), transfer_amount)
+        .await
+        .unwrap();
+    assert!(result.is_success());
+    let untracked_near_after_transfer = assert_untracked_near(&dex_engine_contract).await.unwrap();
+    assert_eq!(
+        untracked_near_after_transfer,
+        untracked_near_initial.saturating_add(transfer_amount),
+    );
+
+    let result = user1
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(deposit_amount)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    sandbox.fast_forward(3).await.unwrap();
+    let untracked_near_after_deposit = assert_untracked_near(&dex_engine_contract).await.unwrap();
+    assert!(untracked_near_after_deposit >= untracked_near_after_transfer);
+    assert!(
+        untracked_near_after_deposit < untracked_near_after_transfer.saturating_add(max_gas_reward)
+    );
+}
+
+#[tokio::test]
+async fn test_rescue() {
+    let untracked_ft_amount = 1000u128;
+    let tracked_ft_amount = 500u128;
+    let partial_rescue_amount = 400u128;
+    let near_transfer_amount = NearToken::from_near(2);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user2,
+        user3,
+        deployer,
+        ft1: ft,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+        ..Default::default()
+    })
+    .await;
+    let pauser = create_pauser(&sandbox).await;
+    let dex_engine_account = dex_engine_contract.as_account();
+
+    let result = deployer
+        .call(ft.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(untracked_ft_amount),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(ft.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(tracked_ft_amount),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Nep141(ft.id().clone()),
+        Some(U128(tracked_ft_amount)),
+    )
+    .await
+    .unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "to": user1.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Method rescue is private"));
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Contract must be paused to rescue assets"));
+
+    set_paused(&dex_engine_contract, &pauser, true).await;
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "amount": U128(untracked_ft_amount + 1),
+            "to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains(&format!("only {untracked_ft_amount} is untracked")));
+    assert_ft_balance(&user2, ft.clone(), U128(0))
+        .await
+        .unwrap();
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "amount": U128(partial_rescue_amount),
+            "to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_ft_balance(&user2, ft.clone(), U128(partial_rescue_amount))
+        .await
+        .unwrap();
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_ft_balance(&user2, ft.clone(), U128(untracked_ft_amount))
+        .await
+        .unwrap();
+    assert_ft_balance(dex_engine_account, ft.clone(), U128(tracked_ft_amount))
+        .await
+        .unwrap();
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Nep141(ft.id().clone()),
+        Some(U128(tracked_ft_amount)),
+    )
+    .await
+    .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(deployer.id().clone()),
+        AssetId::Nep141(ft.id().clone()),
+        Some(U128(tracked_ft_amount)),
+    )
+    .await
+    .unwrap();
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft.id().clone()),
+            "to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Nothing to rescue"));
+
+    let result = user1
+        .transfer_near(dex_engine_contract.id(), near_transfer_amount)
+        .await
+        .unwrap();
+    assert!(result.is_success());
+    sandbox.fast_forward(3).await.unwrap();
+    let untracked_near = assert_untracked_near(&dex_engine_contract).await.unwrap();
+    assert!(untracked_near >= near_transfer_amount);
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Near,
+            "amount": U128(untracked_near.as_yoctonear() + 1),
+            "to": user3.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Can't rescue"));
+
+    let user3_balance_before = user3.view_account().await.unwrap().balance;
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Near,
+            "amount": U128(near_transfer_amount.as_yoctonear()),
+            "to": user3.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_near_balance(
+        &user3,
+        user3_balance_before.saturating_add(near_transfer_amount),
+    )
+    .await
+    .unwrap();
+    sandbox.fast_forward(3).await.unwrap();
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    set_paused(&dex_engine_contract, &pauser, false).await;
+
+    let result = dex_engine_account
+        .call(dex_engine_contract.id(), "rescue")
+        .max_gas()
+        .args_json(json!({
+            "asset_id": AssetId::Near,
+            "to": user3.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Contract must be paused to rescue assets"));
+}
+
+/// Must match `NEAR_CUSTODY_OVERCOUNT` in the contract
+const NEAR_CUSTODY_OVERCOUNT: u128 = 2_455_360_000_000_000_000_000_001;
+
+/// Sums of raw dex engine state before the storage balance sums migration
+struct EngineStateSums {
+    users_storage_total: u128,
+    users_storage_used: u128,
+    dexes_storage_total: u128,
+    dexes_storage_used: u128,
+    near_in_balances: u128,
+    dex_balances: Vec<(DexId, AssetId, u128)>,
+}
+
+/// Parse a state key without its collection prefix. total_in_custody values
+/// are stored under 32-byte hashes that can start with any byte, so these
+/// are allowed to fail to parse.
+fn parse_state_key<T: near_sdk::borsh::BorshDeserialize>(key: &[u8]) -> Option<T> {
+    let result = near_sdk::borsh::from_slice::<T>(&key[1..]);
+    if key.len() == 32 {
+        result.ok()
+    } else {
+        Some(result.unwrap())
+    }
+}
+
+fn sum_engine_state(state: &HashMap<Vec<u8>, Vec<u8>>) -> EngineStateSums {
+    let mut sums = EngineStateSums {
+        users_storage_total: 0,
+        users_storage_used: 0,
+        dexes_storage_total: 0,
+        dexes_storage_used: 0,
+        near_in_balances: 0,
+        dex_balances: Vec::new(),
+    };
+    for (key, value) in state {
+        match key[0] {
+            0 => {
+                if let Some((dex_id, asset_id)) = parse_state_key::<(DexId, AssetId)>(key) {
+                    let balance = near_sdk::borsh::from_slice::<u128>(value).unwrap();
+                    if asset_id == AssetId::Near {
+                        sums.near_in_balances += balance;
+                    }
+                    sums.dex_balances.push((dex_id, asset_id, balance));
+                }
+            }
+            4 => {
+                if let Some((_, asset_id)) = parse_state_key::<(AccountId, AssetId)>(key) {
+                    let balance = near_sdk::borsh::from_slice::<u128>(value).unwrap();
+                    if asset_id == AssetId::Near {
+                        sums.near_in_balances += balance;
+                    }
+                }
+            }
+            3 if parse_state_key::<DexId>(key).is_some() => {
+                let (total, used) = near_sdk::borsh::from_slice::<(u128, u128)>(value).unwrap();
+                sums.dexes_storage_total += total;
+                sums.dexes_storage_used += used;
+            }
+            5 if parse_state_key::<AccountId>(key).is_some() => {
+                let (total, used) = near_sdk::borsh::from_slice::<(u128, u128)>(value).unwrap();
+                sums.users_storage_total += total;
+                sums.users_storage_used += used;
+            }
+            _ => {}
+        }
+    }
+    sums
+}
+
+#[tokio::test]
+async fn test_migration_of_mainnet_state() {
+    let storage_deposit_amount = NearToken::from_millinear(100);
+
+    let dex_engine_id: AccountId = "dex.intear.near".parse().unwrap();
+    let wasms = get_compiled_wasms().await;
+    let mainnet = mainnet().await;
+    let sandbox = near_workspaces::sandbox().await.unwrap();
+    let block_height = mainnet.view_block().await.unwrap().height();
+    let mainnet_state = mainnet
+        .view_state(&dex_engine_id)
+        .block_height(block_height)
+        .await
+        .unwrap();
+    let dex_engine_contract = sandbox
+        .import_contract(&dex_engine_id, &mainnet)
+        .block_height(block_height)
+        .transact()
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    let mut current_batch = Vec::new();
+    let mut current_batch_size: usize = 0;
+    const MAX_BATCH_SIZE: usize = 50000;
+    for (key, value) in mainnet_state.iter() {
+        current_batch.push((key.as_slice(), value.as_slice()));
+        current_batch_size += 40 + key.len() + value.len();
+        if current_batch_size >= MAX_BATCH_SIZE {
+            batches.push(current_batch);
+            current_batch = Vec::new();
+            current_batch_size = 0;
+        }
+    }
+    batches.push(current_batch);
+    for batch in batches {
+        sandbox
+            .patch(&dex_engine_id)
+            .states(batch)
+            .transact()
+            .await
+            .unwrap();
+    }
+    let (user1, _) = create_user(&sandbox, "user1").await;
+    let pauser = create_pauser(&sandbox).await;
+    let deployer = sandbox.dev_create_account().await.unwrap();
+    let sums = sum_engine_state(&mainnet_state);
+
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Near,
+        Some(U128(sums.near_in_balances + NEAR_CUSTODY_OVERCOUNT)),
+    )
+    .await
+    .unwrap();
+
+    set_paused(&dex_engine_contract, &pauser, true).await;
+
+    let result = dex_engine_contract
+        .as_account()
+        .batch(dex_engine_contract.id())
+        .deploy(&wasms.contract_wasm)
+        .call(
+            near_workspaces::operations::Function::new("migrate")
+                .args_json(json!({
+                    "trusted_code_deployer": deployer.id(),
+                    "dex_storage_balances_total": NearToken::from_yoctonear(sums.dexes_storage_total),
+                    "dex_storage_balances_used": NearToken::from_yoctonear(sums.dexes_storage_used),
+                    "user_storage_balances_total": NearToken::from_yoctonear(sums.users_storage_total),
+                    "user_storage_balances_used": NearToken::from_yoctonear(sums.users_storage_used),
+                }))
+                .max_gas(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Near,
+        Some(U128(sums.near_in_balances)),
+    )
+    .await
+    .unwrap();
+    for (dex_id, asset_id, balance) in &sums.dex_balances {
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Dex(dex_id.clone()),
+            asset_id.clone(),
+            Some(U128(*balance)),
+        )
+        .await
+        .unwrap();
+    }
+    let total_storage_balances = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances.users.total.as_yoctonear(),
+        sums.users_storage_total,
+    );
+    assert_eq!(
+        total_storage_balances.users.available.as_yoctonear(),
+        sums.users_storage_total - sums.users_storage_used,
+    );
+    assert_eq!(
+        total_storage_balances.dexes.total.as_yoctonear(),
+        sums.dexes_storage_total,
+    );
+    assert_eq!(
+        total_storage_balances.dexes.available.as_yoctonear(),
+        sums.dexes_storage_total - sums.dexes_storage_used,
+    );
+    let trusted_code_deployer: AccountId = dex_engine_contract
+        .view("get_trusted_code_deployer")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(&trusted_code_deployer, deployer.id());
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Contract is paused"));
+
+    set_paused(&dex_engine_contract, &pauser, false).await;
+
+    let result = user1
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(storage_deposit_amount)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let user1_storage_balance = get_storage_balance(&dex_engine_contract, user1.id())
+        .await
+        .unwrap()
+        .unwrap();
+    let total_storage_balances = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances.users.total.as_yoctonear(),
+        sums.users_storage_total + storage_deposit_amount.as_yoctonear(),
+    );
+    assert_eq!(
+        total_storage_balances.users.available.as_yoctonear(),
+        sums.users_storage_total - sums.users_storage_used
+            + user1_storage_balance.available.as_yoctonear(),
+    );
+    sandbox.fast_forward(3).await.unwrap();
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+}

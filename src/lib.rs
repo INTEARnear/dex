@@ -5,6 +5,7 @@ pub mod asset_deposit;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
+pub mod rescue;
 pub mod storage_management;
 
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use crate::{
     internal_asset_operations::AccountOrDexId,
     internal_operations::{DirectWithdrawAmount, Operation, TradeAccount},
-    storage_management::StorageBalances,
+    storage_management::{StorageBalances, StorageUsed},
 };
 use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
 use near_sdk::{
@@ -307,27 +308,60 @@ impl DexEngine {
 
     #[private]
     #[init(ignore_state)]
-    pub fn migrate(trusted_code_deployer: AccountId) -> Self {
+    pub fn migrate(
+        trusted_code_deployer: AccountId,
+        dex_storage_balances_total: NearToken,
+        dex_storage_balances_used: NearToken,
+        user_storage_balances_total: NearToken,
+        user_storage_balances_used: NearToken,
+    ) -> Self {
+        // Before 3adeba3, NEAR converted to dex storage deposits through
+        // `add_storage_deposit` was removed from the dex balance, but not from
+        // `total_in_custody`, so NEAR in custody was overcounted by this amount.
+        const NEAR_CUSTODY_OVERCOUNT: u128 = 2_455_360_000_000_000_000_000_001;
+
         #[near(serializers=[borsh])]
         struct OldState {
             dex_balances: LookupMap<(DexId, AssetId), U128>,
             dex_storage: DexStorage,
             dex_codes: LookupMap<DexId, Vec<u8>>,
-            dex_storage_balances: StorageBalances<DexId>,
+            dex_storage_balances: LookupMap<DexId, StorageUsed>,
             user_balances: LookupMap<(AccountId, AssetId), U128>,
-            user_storage_balances: StorageBalances<AccountId>,
+            user_storage_balances: LookupMap<AccountId, StorageUsed>,
             total_in_custody: IterableMap<AssetId, U128>,
             paused: bool,
             code_deployment_allowed: bool,
         }
-        let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
+        let mut old_state: OldState =
+            near_sdk::env::state_read().expect("Failed to read old state");
+        let near_in_custody = old_state
+            .total_in_custody
+            .get_mut(&AssetId::Near)
+            .expect("NEAR is not in total_in_custody");
+        near_in_custody.0 = near_in_custody
+            .0
+            .checked_sub(NEAR_CUSTODY_OVERCOUNT)
+            .expect("NEAR in custody is less than the overcount");
+        old_state.total_in_custody.flush();
         Self {
             dex_balances: old_state.dex_balances,
             dex_storage: old_state.dex_storage,
             dex_codes: old_state.dex_codes,
-            dex_storage_balances: old_state.dex_storage_balances,
+            dex_storage_balances: StorageBalances::from_parts(
+                old_state.dex_storage_balances,
+                StorageUsed {
+                    total: dex_storage_balances_total,
+                    used: dex_storage_balances_used,
+                },
+            ),
             user_balances: old_state.user_balances,
-            user_storage_balances: old_state.user_storage_balances,
+            user_storage_balances: StorageBalances::from_parts(
+                old_state.user_storage_balances,
+                StorageUsed {
+                    total: user_storage_balances_total,
+                    used: user_storage_balances_used,
+                },
+            ),
             total_in_custody: old_state.total_in_custody,
             paused: old_state.paused,
             trusted_code_deployer,

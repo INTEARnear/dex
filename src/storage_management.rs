@@ -14,8 +14,8 @@ use crate::{DexEngine, DexEngineExt};
 #[derive(Clone, Copy, Default)]
 #[near(serializers=[borsh])]
 pub struct StorageUsed {
-    total: NearToken,
-    used: NearToken,
+    pub total: NearToken,
+    pub used: NearToken,
 }
 
 impl From<StorageUsed> for StorageBalance {
@@ -30,24 +30,53 @@ impl From<StorageUsed> for StorageBalance {
     }
 }
 
+#[near(serializers=[json])]
+pub struct TotalStorageBalances {
+    pub users: StorageBalance,
+    pub dexes: StorageBalance,
+}
+
 const STORAGE_MIN_BOUND: NearToken = NearToken::from_millinear(5); // 0.005 NEAR = 500KB
 
 #[near(serializers=[borsh])]
 pub struct StorageBalances<K: Ord + BorshSerialize + BorshDeserialize> {
     storage_balances: LookupMap<K, StorageUsed>,
+    sum: StorageUsed,
 }
 
 impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
     pub fn new(storage_key: impl IntoStorageKey) -> Self {
         Self {
             storage_balances: LookupMap::new(storage_key),
+            sum: StorageUsed::default(),
         }
+    }
+
+    /// Used in migration from the layout that didn't track the sum
+    pub const fn from_parts(storage_balances: LookupMap<K, StorageUsed>, sum: StorageUsed) -> Self {
+        Self {
+            storage_balances,
+            sum,
+        }
+    }
+
+    pub const fn sum(&self) -> StorageUsed {
+        self.sum
+    }
+
+    fn add_to_sum_total(&mut self, amount: NearToken) {
+        self.sum.total = self
+            .sum
+            .total
+            .checked_add(amount)
+            .expect("Storage balances sum overflow");
     }
 
     pub fn deposit(&mut self, account_id: &K, amount: NearToken) {
         let b = self.storage_balances.entry(account_id.clone()).or_default();
         b.total = b.total.saturating_add(amount);
         self.storage_balances.flush();
+        self.add_to_sum_total(amount);
     }
 
     pub fn charge(&mut self, account_id: &K, storage_usage_before: u64, storage_usage_after: u64) {
@@ -68,6 +97,11 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
                     panic!("Storage used ({}) exceeds total ({})", b.used, b.total);
                 }
                 self.storage_balances.flush();
+                self.sum.used = self
+                    .sum
+                    .used
+                    .checked_add(storage_cost)
+                    .expect("Storage balances sum overflow");
             }
             std::cmp::Ordering::Less => {
                 // refund the difference
@@ -82,6 +116,11 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
                     .checked_sub(storage_cost)
                     .expect("Storage cost underflow");
                 self.storage_balances.flush();
+                self.sum.used = self
+                    .sum
+                    .used
+                    .checked_sub(storage_cost)
+                    .expect("Storage balances sum underflow");
             }
             std::cmp::Ordering::Equal => {
                 // nothing changed
@@ -151,6 +190,12 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
             .entry(account_id)
             .and_modify(|b| b.used = b.used.saturating_add(storage_cost))
             .or_insert_with(|| unreachable!("Just inserted"));
+        self.add_to_sum_total(deposit);
+        self.sum.used = self
+            .sum
+            .used
+            .checked_add(storage_cost)
+            .expect("Storage balances sum overflow");
         balance.into()
     }
 
@@ -171,10 +216,16 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
             .total
             .checked_sub(amount)
             .expect("Total balance less than used balance");
+        let updated = *storage_used;
+        self.sum.total = self
+            .sum
+            .total
+            .checked_sub(amount)
+            .expect("Storage balances sum underflow");
         Promise::new(near_sdk::env::predecessor_account_id())
             .transfer(amount)
             .detach();
-        (*storage_used).into()
+        updated.into()
     }
 
     pub fn storage_unregister(&mut self, _account_id: K, _force: Option<bool>) -> bool {
@@ -266,5 +317,12 @@ impl DexEngine {
 
     pub fn dex_storage_balance_of(&self, dex_id: DexId) -> Option<StorageBalance> {
         self.dex_storage_balances.storage_balance_of(dex_id)
+    }
+
+    pub fn total_storage_balances(&self) -> TotalStorageBalances {
+        TotalStorageBalances {
+            users: self.user_storage_balances.sum().into(),
+            dexes: self.dex_storage_balances.sum().into(),
+        }
     }
 }

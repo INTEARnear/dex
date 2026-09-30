@@ -671,42 +671,42 @@ impl DexEngine {
         withdraw_to: AccountId,
         withdraw_from: AccountOrDexId,
     ) -> PromiseOrValue<bool> {
+        const GAS_FOR_WITHDRAWAL_CALLBACK: Gas = Gas::from_tgas(5);
+
+        PromiseOrValue::Promise(
+            Self::transfer_asset_promise(&asset_id, amount, withdraw_to.clone()).then(
+                Self::ext(near_sdk::env::current_account_id())
+                    .with_static_gas(GAS_FOR_WITHDRAWAL_CALLBACK)
+                    .after_withdraw(asset_id, amount, withdraw_to, withdraw_from),
+            ),
+        )
+    }
+
+    /// Sends assets from this contract's account, without touching any balances.
+    pub(crate) fn transfer_asset_promise(
+        asset_id: &AssetId,
+        amount: U128,
+        to: AccountId,
+    ) -> Promise {
         const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
         const GAS_FOR_NFT_TRANSFER: Gas = Gas::from_tgas(10);
         const GAS_FOR_MT_TRANSFER: Gas = Gas::from_tgas(10);
-        const GAS_FOR_WITHDRAWAL_CALLBACK: Gas = Gas::from_tgas(5);
 
-        PromiseOrValue::Promise(match &asset_id {
-            AssetId::Near => Promise::new(withdraw_to.clone())
-                .transfer(NearToken::from_yoctonear(amount.0))
-                .then(
-                    Self::ext(near_sdk::env::current_account_id())
-                        .with_static_gas(GAS_FOR_WITHDRAWAL_CALLBACK)
-                        .after_withdraw(asset_id, amount, withdraw_to, withdraw_from),
-                ),
+        match asset_id {
+            AssetId::Near => Promise::new(to).transfer(NearToken::from_yoctonear(amount.0)),
             AssetId::Nep141(contract_id) => ext_ft_core::ext(contract_id.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(GAS_FOR_FT_TRANSFER)
-                .ft_transfer(withdraw_to.clone(), amount, None)
-                .then(
-                    Self::ext(near_sdk::env::current_account_id())
-                        .with_static_gas(GAS_FOR_WITHDRAWAL_CALLBACK)
-                        .after_withdraw(asset_id, amount, withdraw_to, withdraw_from),
-                ),
+                .ft_transfer(to, amount, None),
             AssetId::Nep171(contract_id, token_id) => ext_nft_core::ext(contract_id.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(GAS_FOR_NFT_TRANSFER)
-                .nft_transfer(withdraw_to.clone(), token_id.clone(), None, None)
-                .then(
-                    Self::ext(near_sdk::env::current_account_id())
-                        .with_static_gas(GAS_FOR_WITHDRAWAL_CALLBACK)
-                        .after_withdraw(asset_id, amount, withdraw_to, withdraw_from),
-                ),
+                .nft_transfer(to, token_id.clone(), None, None),
             AssetId::Nep245(contract_id, token_id) => Promise::new(contract_id.clone())
                 .function_call(
                     "mt_transfer",
                     near_sdk::serde_json::json!({
-                        "receiver_id": withdraw_to,
+                        "receiver_id": to,
                         "token_id": token_id,
                         "amount": amount,
                         "approval": null,
@@ -716,13 +716,8 @@ impl DexEngine {
                     .into_bytes(),
                     NearToken::from_yoctonear(1),
                     GAS_FOR_MT_TRANSFER,
-                )
-                .then(
-                    Self::ext(near_sdk::env::current_account_id())
-                        .with_static_gas(GAS_FOR_WITHDRAWAL_CALLBACK)
-                        .after_withdraw(asset_id, amount, withdraw_to, withdraw_from),
                 ),
-        })
+        }
     }
 
     pub(crate) fn internal_execute_operations(

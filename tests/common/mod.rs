@@ -2,15 +2,19 @@
 
 use intear_dex::internal_asset_operations::AccountOrDexId;
 use intear_dex::internal_operations::Operation;
+use intear_dex::storage_management::TotalStorageBalances;
 use intear_dex_types::{AssetId, DexId};
-use near_crypto::KeyType;
+use near_contract_standards::storage_management::StorageBalance;
+use near_crypto::{KeyType, SecretKey};
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::Base64VecU8;
 use near_sdk::serde_json::json;
 use near_sdk::{AccountId, NearToken, json_types::U128};
+use near_workspaces::network::{Mainnet, Sandbox};
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::{Account, Contract};
+use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
@@ -173,10 +177,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
 }
 
 /// Track tokens burnt from a transaction result and add to total_near_burnt.
-pub fn track_tokens_burnt(
-    result: &near_workspaces::result::ExecutionFinalResult,
-    total_near_burnt: &mut NearToken,
-) {
+pub fn track_tokens_burnt(result: &ExecutionFinalResult, total_near_burnt: &mut NearToken) {
     let near_burnt = result
         .outcomes()
         .iter()
@@ -211,10 +212,7 @@ pub async fn assert_ft_balance(
 
 /// Returns the balance of NEAR of an account after refunds of unused gas
 /// for previous transactions are received.
-pub async fn near_balance_after_refunds(
-    sandbox: &near_workspaces::Worker<near_workspaces::network::Sandbox>,
-    account: &Account,
-) -> NearToken {
+pub async fn near_balance_after_refunds(sandbox: &Worker<Sandbox>, account: &Account) -> NearToken {
     sandbox.fast_forward(3).await.unwrap();
     account.view_account().await.unwrap().balance
 }
@@ -229,7 +227,7 @@ pub async fn assert_near_balance(
         if balance == amount {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         balance = account.view_account().await?.balance;
     }
     Err(format!(
@@ -310,11 +308,8 @@ pub fn assert_success(result: &ExecutionFinalResult) -> Result<(), String> {
 }
 
 /// Create a new user account.
-pub async fn create_user(
-    sandbox: &near_workspaces::Worker<near_workspaces::network::Sandbox>,
-    name: &str,
-) -> (near_workspaces::Account, near_crypto::SecretKey) {
-    let key = near_crypto::SecretKey::from_random(KeyType::ED25519);
+pub async fn create_user(sandbox: &Worker<Sandbox>, name: &str) -> (Account, SecretKey) {
+    let key = SecretKey::from_random(KeyType::ED25519);
     let account = sandbox
         .create_root_account_subaccount(name.parse().unwrap(), key.to_string().parse().unwrap())
         .await
@@ -378,19 +373,19 @@ pub struct TestSetupConfig {
 }
 
 pub struct TestContext {
-    pub sandbox: near_workspaces::Worker<near_workspaces::network::Sandbox>,
+    pub sandbox: Worker<Sandbox>,
     pub dex_engine_contract: Contract,
-    pub user1: near_workspaces::Account,
-    pub user1_key: near_crypto::SecretKey,
-    pub user2: near_workspaces::Account,
-    pub user2_key: near_crypto::SecretKey,
-    pub user3: near_workspaces::Account,
-    pub user3_key: near_crypto::SecretKey,
-    pub user4: near_workspaces::Account,
-    pub user4_key: near_crypto::SecretKey,
-    pub user5: near_workspaces::Account,
-    pub user5_key: near_crypto::SecretKey,
-    pub deployer: near_workspaces::Account,
+    pub user1: Account,
+    pub user1_key: SecretKey,
+    pub user2: Account,
+    pub user2_key: SecretKey,
+    pub user3: Account,
+    pub user3_key: SecretKey,
+    pub user4: Account,
+    pub user4_key: SecretKey,
+    pub user5: Account,
+    pub user5_key: SecretKey,
+    pub deployer: Account,
     pub ft1: Contract,
     pub ft2: Contract,
     pub ft3: Contract,
@@ -430,7 +425,7 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
     let ft1 = sandbox
         .create_root_account_subaccount_and_deploy(
             "ft1".parse().unwrap(),
-            near_crypto::SecretKey::from_random(KeyType::ED25519)
+            SecretKey::from_random(KeyType::ED25519)
                 .to_string()
                 .parse()
                 .unwrap(),
@@ -452,7 +447,7 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
     let ft2 = sandbox
         .create_root_account_subaccount_and_deploy(
             "ft2".parse().unwrap(),
-            near_crypto::SecretKey::from_random(KeyType::ED25519)
+            SecretKey::from_random(KeyType::ED25519)
                 .to_string()
                 .parse()
                 .unwrap(),
@@ -474,7 +469,7 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
     let ft3 = sandbox
         .create_root_account_subaccount_and_deploy(
             "ft3".parse().unwrap(),
-            near_crypto::SecretKey::from_random(KeyType::ED25519)
+            SecretKey::from_random(KeyType::ED25519)
                 .to_string()
                 .parse()
                 .unwrap(),
@@ -644,4 +639,182 @@ pub async fn set_trusted_code_deployer(
         .await
         .unwrap();
     assert_success(&result).unwrap();
+}
+
+pub async fn mainnet() -> Worker<Mainnet> {
+    near_workspaces::mainnet()
+        .rpc_addr(&std::env::var("RPC_URL").unwrap_or_else(|_| "https://rpc.intea.rs".to_string()))
+        .await
+        .unwrap()
+}
+
+/// Create `pause.slimedragon.near`, which is allowed to pause the dex engine.
+pub async fn create_pauser(sandbox: &Worker<Sandbox>) -> Account {
+    let account_id: AccountId = "pause.slimedragon.near".parse().unwrap();
+    let key =
+        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    sandbox
+        .patch(&account_id)
+        .account(AccountDetailsPatch::default().balance(NearToken::from_near(100)))
+        .access_key(
+            key.public_key(),
+            near_workspaces::types::AccessKey::full_access(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    Account::from_secret_key(account_id, key, sandbox)
+}
+
+/// Pause or unpause the dex engine
+pub async fn set_paused(dex_engine_contract: &Contract, pauser: &Account, paused: bool) {
+    let result = pauser
+        .call(
+            dex_engine_contract.id(),
+            if paused { "pause" } else { "unpause" },
+        )
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+}
+
+/// Get the sum of storage balances of all users and all dexes.
+pub async fn get_total_storage_balances(
+    dex_engine_contract: &Contract,
+) -> Result<TotalStorageBalances, Box<dyn std::error::Error>> {
+    let total_storage_balances = dex_engine_contract
+        .view("total_storage_balances")
+        .args_json(json!({}))
+        .await?
+        .json::<TotalStorageBalances>()?;
+    Ok(total_storage_balances)
+}
+
+/// Get the storage balance of a user.
+pub async fn get_storage_balance(
+    dex_engine_contract: &Contract,
+    account_id: &AccountId,
+) -> Result<Option<StorageBalance>, Box<dyn std::error::Error>> {
+    let storage_balance = dex_engine_contract
+        .view("storage_balance_of")
+        .args_json(json!({
+            "account_id": account_id,
+        }))
+        .await?
+        .json::<Option<StorageBalance>>()?;
+    Ok(storage_balance)
+}
+
+/// Get the storage balance of a dex.
+pub async fn get_dex_storage_balance(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+) -> Result<Option<StorageBalance>, Box<dyn std::error::Error>> {
+    let storage_balance = dex_engine_contract
+        .view("dex_storage_balance_of")
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .await?
+        .json::<Option<StorageBalance>>()?;
+    Ok(storage_balance)
+}
+
+/// Assert that the sum of storage balances of all users and all dexes
+/// equals the sum of storage balances of the given accounts and dexes,
+/// which must be all accounts and dexes that have a storage balance.
+pub async fn assert_total_storage_balances(
+    dex_engine_contract: &Contract,
+    accounts: &[&AccountId],
+    dexes: &[&DexId],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut users_total = NearToken::from_yoctonear(0);
+    let mut users_available = NearToken::from_yoctonear(0);
+    for account_id in accounts {
+        if let Some(storage_balance) = get_storage_balance(dex_engine_contract, account_id).await? {
+            users_total = users_total.saturating_add(storage_balance.total);
+            users_available = users_available.saturating_add(storage_balance.available);
+        }
+    }
+    let mut dexes_total = NearToken::from_yoctonear(0);
+    let mut dexes_available = NearToken::from_yoctonear(0);
+    for dex_id in dexes {
+        if let Some(storage_balance) = get_dex_storage_balance(dex_engine_contract, dex_id).await? {
+            dexes_total = dexes_total.saturating_add(storage_balance.total);
+            dexes_available = dexes_available.saturating_add(storage_balance.available);
+        }
+    }
+    let total_storage_balances = get_total_storage_balances(dex_engine_contract).await?;
+    if total_storage_balances.users.total != users_total
+        || total_storage_balances.users.available != users_available
+        || total_storage_balances.dexes.total != dexes_total
+        || total_storage_balances.dexes.available != dexes_available
+    {
+        return Err(format!(
+            "Total storage balances mismatch: expected users {}/{}, dexes {}/{}, actual users {}/{}, dexes {}/{}",
+            users_total.as_yoctonear(),
+            users_available.as_yoctonear(),
+            dexes_total.as_yoctonear(),
+            dexes_available.as_yoctonear(),
+            total_storage_balances.users.total.as_yoctonear(),
+            total_storage_balances.users.available.as_yoctonear(),
+            total_storage_balances.dexes.total.as_yoctonear(),
+            total_storage_balances.dexes.available.as_yoctonear(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Assert that `untracked_near()` equals the NEAR balance of the dex engine
+/// minus NEAR in custody, storage balances, and storage that storage
+/// balances don't pay for. Returns the untracked NEAR.
+pub async fn assert_untracked_near(
+    dex_engine_contract: &Contract,
+) -> Result<NearToken, Box<dyn std::error::Error>> {
+    let account = dex_engine_contract.view_account().await?;
+    let total_storage_balances = get_total_storage_balances(dex_engine_contract).await?;
+    let near_in_custody = dex_engine_contract
+        .view("total_in_custody")
+        .args_json(json!({
+            "asset_id": AssetId::Near,
+        }))
+        .await?
+        .json::<Option<U128>>()?
+        .map_or(0, |amount| amount.0);
+    let storage_balances_total = total_storage_balances
+        .users
+        .total
+        .saturating_add(total_storage_balances.dexes.total);
+    let storage_paid_by_storage_balances = storage_balances_total
+        .saturating_sub(total_storage_balances.users.available)
+        .saturating_sub(total_storage_balances.dexes.available);
+    let storage_locked = near_sdk::env::storage_byte_cost()
+        .checked_mul(account.storage_usage as u128)
+        .unwrap();
+    let expected = account
+        .balance
+        .checked_sub(NearToken::from_yoctonear(near_in_custody))
+        .and_then(|b| b.checked_sub(storage_balances_total))
+        .and_then(|b| {
+            b.checked_sub(storage_locked.saturating_sub(storage_paid_by_storage_balances))
+        })
+        .ok_or("NEAR deficit")?;
+    let untracked_near = dex_engine_contract
+        .view("untracked_near")
+        .args_json(json!({}))
+        .await?
+        .json::<NearToken>()?;
+    if untracked_near != expected {
+        return Err(format!(
+            "Untracked NEAR mismatch: expected {}, actual {}",
+            expected.as_yoctonear(),
+            untracked_near.as_yoctonear()
+        )
+        .into());
+    }
+    Ok(untracked_near)
 }
