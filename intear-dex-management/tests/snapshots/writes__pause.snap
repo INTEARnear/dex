@@ -1,0 +1,48 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"pause.slimedragon.near\",\n&[\"engine\", \"pause\", \"pause.slimedragon.near\"]).await"
+---
+$ near-intear-dex-management engine pause pause.slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3FKQRJWcQdtKfNy2MXqkfXsMPR3JFk6Qgy4MZCF7uotz4kZG8cJ8FDTgC8YQ1XgbcbtPLWNTZL5bbV2Rp9JCxEhi send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer pause.slimedragon.near · dex.intear.near
+│  Pause dex.intear.near: deposits, withdrawals, swaps and dex calls stop until it's unpaused
+│  Actions: pause (1 yoctoNEAR, 10 Tgas)
+├  Unsigned transaction:
+│    signer_id:    pause.slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  pause
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [pause.slimedragon.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "pause" call to <dex.intear.near> on behalf of <pause.slimedragon.near> succeeded.
+
+├  ✓ Paused dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine pause pause.slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3FKQRJWcQdtKfNy2MXqkfXsMPR3JFk6Qgy4MZCF7uotz4kZG8cJ8FDTgC8YQ1XgbcbtPLWNTZL5bbV2Rp9JCxEhi send

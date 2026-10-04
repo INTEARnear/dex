@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"swap\", \"alice.near\", \"0\", \"sell\", \"1 USDt\", \"max-slippage\", \"1%\",\n\"from-wallet\", \"to-balance\"]).await"
+---
+$ near-intear-dex-management xyk swap alice.near 0 sell '1 USDt' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk swap alice.near 0 sell '1 USDt' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: A swap from the wallet into the balance on dex.intear.near has to start from NEAR, which goes into the balance first; tokens take a deposit of their own
+
+Suggestion: Deposit the tokens first, then swap from-balance:
+    near intear-dex-management engine deposit alice.near nep141:usdt.tether-token.near '1 USDt' network-config sandbox

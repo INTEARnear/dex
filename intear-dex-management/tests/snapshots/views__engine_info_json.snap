@@ -1,0 +1,51 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"engine\", \"info\"])"
+---
+$ near-intear-dex-management --json engine info network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "paused": false,
+  "trusted_code_deployer": "slimedragon.near",
+  "storage": {
+    "users": {
+      "total": {
+        "raw": "2000000000000000000000000",
+        "decimal": "2",
+        "symbol": "NEAR"
+      },
+      "available": {
+        "raw": "1983040000000000000000000",
+        "decimal": "1.98304",
+        "symbol": "NEAR"
+      }
+    },
+    "dexes": {
+      "total": {
+        "raw": "20015910000000000000000000",
+        "decimal": "20.01591",
+        "symbol": "NEAR"
+      },
+      "available": {
+        "raw": "[BUILD DEPENDENT]",
+        "decimal": "[BUILD DEPENDENT]",
+        "symbol": "NEAR"
+      }
+    }
+  },
+  "near_in_custody": {
+    "raw": "204790000000000000000000000",
+    "decimal": "204.79",
+    "symbol": "NEAR"
+  },
+  "untracked_near": {
+    "raw": "[BUILD DEPENDENT]",
+    "decimal": "[BUILD DEPENDENT]",
+    "symbol": "NEAR"
+  }
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine info network-config sandbox now

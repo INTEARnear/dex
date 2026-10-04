@@ -1,0 +1,59 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.transaction(ENGINE,\n&[\"engine\", \"admin\", \"rescue\", \"nep141:usdt.tether-token.near\", \"all\", \"to\",\n\"alice.near\"]).await"
+---
+$ near-intear-dex-management engine admin rescue nep141:usdt.tether-token.near all to alice.near network-config sandbox sign-with-plaintext-private-key ed25519:31RNZv9Mu9yyhbK9AsqxFMM8M9YoDQNWuqLjpPDZ3a8sQazgTxQXfBWg8KmGkx6CKyKcw6kMn6Z9YcqRvKZdFQBa send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer dex.intear.near · dex.intear.near
+│  Send all untracked USDt (5 USDt) from dex.intear.near to alice.near
+│  Actions: rescue (0 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    dex.intear.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  rescue
+│                       args:         {
+│                                       "asset_id": "nep141:usdt.tether-token.near",
+│                                       "amount": null,
+│                                       "to": "alice.near"
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [usdt.tether-token.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│    Logs [usdt.tether-token.near]:
+│      EVENT_JSON:{"standard":"nep141","version":"1.0.0","event":"ft_transfer","data":[{"old_owner_id":"dex.intear.near","new_owner_id":"alice.near","amount":"5000000"}]}
+│    Logs [dex.intear.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "rescue" call to <dex.intear.near> on behalf of <dex.intear.near> succeeded.
+
+├  ✓ Rescued all untracked USDt (5 USDt) to alice.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin rescue nep141:usdt.tether-token.near all to alice.near network-config sandbox sign-with-plaintext-private-key ed25519:31RNZv9Mu9yyhbK9AsqxFMM8M9YoDQNWuqLjpPDZ3a8sQazgTxQXfBWg8KmGkx6CKyKcw6kMn6Z9YcqRvKZdFQBa send

@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.transaction(\"slimedragon.near\",\n&[\"engine\", \"admin\", \"set-trusted-code-deployer\", \"slimedragon.near\",\n\"nobody.near\"]).await"
+---
+$ near-intear-dex-management engine admin set-trusted-code-deployer slimedragon.near nobody.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin set-trusted-code-deployer slimedragon.near nobody.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+
+Error:
+   0: nobody.near doesn't exist on network sandbox
+
+Suggestion: Check the account id, or choose a connection to the network it's on

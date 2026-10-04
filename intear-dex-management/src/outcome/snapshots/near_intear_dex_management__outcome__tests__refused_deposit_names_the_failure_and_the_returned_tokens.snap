@@ -1,0 +1,7 @@
+---
+source: intear-dex-management/src/outcome/mod.rs
+expression: report.to_string()
+---
+The deposit failed on-chain
+dex.intear.near failed: Asset nep141:intel.tkn.near is not registered for Account(bob.near)
+intel.tkn.near sent 1 INTEL back to bob.near

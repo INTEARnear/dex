@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"pause.slimedragon.near\",\n&[\"engine\", \"pause\", \"pause.slimedragon.near\"]).await"
+---
+$ near-intear-dex-management engine pause pause.slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3FKQRJWcQdtKfNy2MXqkfXsMPR3JFk6Qgy4MZCF7uotz4kZG8cJ8FDTgC8YQ1XgbcbtPLWNTZL5bbV2Rp9JCxEhi send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine pause pause.slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3FKQRJWcQdtKfNy2MXqkfXsMPR3JFk6Qgy4MZCF7uotz4kZG8cJ8FDTgC8YQ1XgbcbtPLWNTZL5bbV2Rp9JCxEhi send
+
+Error:
+   0: dex.intear.near is already paused

@@ -1,0 +1,54 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.transaction(ENGINE,\n&[\"engine\", \"admin\", \"rescue\", \"near\", \"1 NEAR\", \"to\", \"bob.near\"]).await"
+---
+$ near-intear-dex-management engine admin rescue near '1 NEAR' to bob.near network-config sandbox sign-with-plaintext-private-key ed25519:31RNZv9Mu9yyhbK9AsqxFMM8M9YoDQNWuqLjpPDZ3a8sQazgTxQXfBWg8KmGkx6CKyKcw6kMn6Z9YcqRvKZdFQBa send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer dex.intear.near · dex.intear.near
+│  Send 1 NEAR from dex.intear.near to bob.near
+│  Actions: rescue (0 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    dex.intear.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  rescue
+│                       args:         {
+│                                       "asset_id": "near",
+│                                       "amount": "1000000000000000000000000",
+│                                       "to": "bob.near"
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [bob.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "rescue" call to <dex.intear.near> on behalf of <dex.intear.near> succeeded.
+
+├  ✓ Rescued 1 NEAR to bob.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin rescue near '1 NEAR' to bob.near network-config sandbox sign-with-plaintext-private-key ed25519:31RNZv9Mu9yyhbK9AsqxFMM8M9YoDQNWuqLjpPDZ3a8sQazgTxQXfBWg8KmGkx6CKyKcw6kMn6Z9YcqRvKZdFQBa send

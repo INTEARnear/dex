@@ -1,9 +1,10 @@
 mod common;
 use common::*;
 
-use intear_dex::internal_operations::{SwapOperationAmount, WithdrawAmount};
-use intear_dex::{internal_asset_operations::AccountOrDexId, internal_operations::Operation};
-use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
+use intear_dex_types::{
+    AccountOrDexId, AssetId, DexId, Operation, SwapOperationAmount, SwapRequestAmount,
+    WithdrawAmount,
+};
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_sdk::serde_json::json;
 use near_sdk::{
@@ -3509,8 +3510,228 @@ async fn test_rescue() {
     assert!(format!("{result:?}").contains("Contract must be paused to rescue assets"));
 }
 
-/// Must match `NEAR_CUSTODY_OVERCOUNT` in the contract
-const NEAR_CUSTODY_OVERCOUNT: u128 = 2_455_360_000_000_000_000_000_001;
+#[tokio::test]
+async fn test_registered_assets_index() {
+    let near_deposit = NearToken::from_near(1);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user2,
+        ft1,
+        ft2,
+        ft3,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        register_assets_for_all: true,
+        ..Default::default()
+    })
+    .await;
+    let new_account_id: AccountId = "new-account.test.near".parse().unwrap();
+    let unregistered_asset_id = AssetId::Nep141("unregistered-token.test.near".parse().unwrap());
+
+    let result = user1
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(near_deposit)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let user1_registered_assets = vec![
+        (AssetId::Near, U128(near_deposit.as_yoctonear())),
+        (AssetId::Nep141(ft1.id().clone()), U128(0)),
+        (AssetId::Nep141(ft2.id().clone()), U128(0)),
+        (AssetId::Nep141(ft3.id().clone()), U128(0)),
+    ];
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 0, 10)
+            .await
+            .unwrap(),
+        user1_registered_assets,
+    );
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 1, 2)
+            .await
+            .unwrap(),
+        user1_registered_assets[1..3],
+    );
+    assert!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 4, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        get_registered_assets(&dex_engine_contract, &new_account_id, 0, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Nep141(ft2.id().clone()), AssetId::Near],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 0, 10)
+            .await
+            .unwrap(),
+        user1_registered_assets,
+    );
+
+    let result = user2
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Nep141(ft1.id().clone())],
+            "for": AccountOrDexId::Account(new_account_id.clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, &new_account_id, 0, 10)
+            .await
+            .unwrap(),
+        vec![(AssetId::Nep141(ft1.id().clone()), U128(0))],
+    );
+
+    let result = user1
+        .call(dex_engine_contract.id(), "backfill_registered_assets")
+        .max_gas()
+        .args_json(json!({
+            "entries": [(user1.id(), AssetId::Near)],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    println!("{result:?}");
+    assert!(format!("{result:?}").contains("Method backfill_registered_assets is private"));
+
+    let result = dex_engine_contract
+        .call("backfill_registered_assets")
+        .max_gas()
+        .args_json(json!({
+            "entries": [(user2.id(), unregistered_asset_id.clone())],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains(&format!(
+        "Asset {unregistered_asset_id} is not registered for Account({})",
+        user2.id()
+    )));
+
+    // Simulate registrations made before the index existed
+    let user1_registered_assets_key = [
+        &[7u8][..], // StorageKey::UserRegisteredAssets
+        &near_sdk::borsh::to_vec(user1.id()).unwrap(),
+    ]
+    .concat();
+    sandbox
+        .patch(dex_engine_contract.id())
+        .state(
+            &user1_registered_assets_key,
+            &near_sdk::borsh::to_vec(&vec![AssetId::Nep141(ft2.id().clone())]).unwrap(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 0, 10)
+            .await
+            .unwrap(),
+        vec![(AssetId::Nep141(ft2.id().clone()), U128(0))],
+    );
+
+    let user1_storage_balance_before_backfill =
+        get_storage_balance(&dex_engine_contract, user1.id())
+            .await
+            .unwrap()
+            .unwrap();
+    let backfill_entries = user1_registered_assets
+        .iter()
+        .map(|(asset_id, _)| (user1.id().clone(), asset_id.clone()))
+        .collect::<Vec<_>>();
+    // Sending the same entries again changes nothing
+    for _ in 0..2 {
+        let result = dex_engine_contract
+            .call("backfill_registered_assets")
+            .max_gas()
+            .args_json(json!({
+                "entries": backfill_entries,
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        assert_eq!(
+            get_registered_assets(&dex_engine_contract, user1.id(), 0, 10)
+                .await
+                .unwrap(),
+            vec![
+                (AssetId::Nep141(ft2.id().clone()), U128(0)),
+                (AssetId::Near, U128(near_deposit.as_yoctonear())),
+                (AssetId::Nep141(ft1.id().clone()), U128(0)),
+                (AssetId::Nep141(ft3.id().clone()), U128(0)),
+            ],
+        );
+    }
+
+    let user1_storage_balance_after_backfill =
+        get_storage_balance(&dex_engine_contract, user1.id())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        user1_storage_balance_after_backfill.available,
+        user1_storage_balance_before_backfill.available,
+    );
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_is_paused() {
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        ..
+    } = setup_test_environment().await;
+    let pauser = create_pauser(&sandbox).await;
+
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+
+    let result = user1
+        .call(dex_engine_contract.id(), "pause")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    println!("{result:?}");
+    assert!(format!("{result:?}").contains("Only authorized accounts can pause the contract"));
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+
+    set_paused(&dex_engine_contract, &pauser, true).await;
+    assert!(is_paused(&dex_engine_contract).await.unwrap());
+
+    set_paused(&dex_engine_contract, &pauser, false).await;
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+}
 
 /// Sums of raw dex engine state before the storage balance sums migration
 struct EngineStateSums {
@@ -3520,6 +3741,7 @@ struct EngineStateSums {
     dexes_storage_used: u128,
     near_in_balances: u128,
     dex_balances: Vec<(DexId, AssetId, u128)>,
+    user_balances: Vec<(AccountId, AssetId, u128)>,
 }
 
 /// Parse a state key without its collection prefix. total_in_custody values
@@ -3542,6 +3764,7 @@ fn sum_engine_state(state: &HashMap<Vec<u8>, Vec<u8>>) -> EngineStateSums {
         dexes_storage_used: 0,
         near_in_balances: 0,
         dex_balances: Vec::new(),
+        user_balances: Vec::new(),
     };
     for (key, value) in state {
         match key[0] {
@@ -3555,13 +3778,18 @@ fn sum_engine_state(state: &HashMap<Vec<u8>, Vec<u8>>) -> EngineStateSums {
                 }
             }
             4 => {
-                if let Some((_, asset_id)) = parse_state_key::<(AccountId, AssetId)>(key) {
+                if let Some((account_id, asset_id)) = parse_state_key::<(AccountId, AssetId)>(key) {
                     let balance = near_sdk::borsh::from_slice::<u128>(value).unwrap();
                     if asset_id == AssetId::Near {
                         sums.near_in_balances += balance;
                     }
+                    sums.user_balances.push((account_id, asset_id, balance));
                 }
             }
+            7 => assert!(
+                parse_state_key::<AccountId>(key).is_none(),
+                "Registered assets lists already exist before the migration"
+            ),
             3 if parse_state_key::<DexId>(key).is_some() => {
                 let (total, used) = near_sdk::borsh::from_slice::<(u128, u128)>(value).unwrap();
                 sums.dexes_storage_total += total;
@@ -3625,6 +3853,7 @@ async fn test_migration_of_mainnet_state() {
     let deployer = sandbox.dev_create_account().await.unwrap();
     let sums = sum_engine_state(&mainnet_state);
 
+    const NEAR_CUSTODY_OVERCOUNT: u128 = 2_455_360_000_000_000_000_000_001;
     assert_total_in_custody(
         &dex_engine_contract,
         AssetId::Near,
@@ -3654,6 +3883,7 @@ async fn test_migration_of_mainnet_state() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+    assert!(is_paused(&dex_engine_contract).await.unwrap());
 
     assert_total_in_custody(
         &dex_engine_contract,
@@ -3700,6 +3930,69 @@ async fn test_migration_of_mainnet_state() {
     assert_eq!(&trusted_code_deployer, deployer.id());
     assert_untracked_near(&dex_engine_contract).await.unwrap();
 
+    const BACKFILL_BATCH_SIZE: usize = 200;
+    let backfill_entries = sums
+        .user_balances
+        .iter()
+        .map(|(account_id, asset_id, _)| (account_id.clone(), asset_id.clone()))
+        .collect::<Vec<_>>();
+    let total_storage_balances_before_backfill = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    for batch in backfill_entries.chunks(BACKFILL_BATCH_SIZE) {
+        let result = dex_engine_contract
+            .call("backfill_registered_assets")
+            .max_gas()
+            .args_json(json!({
+                "entries": batch,
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    let mut registered_assets_by_account = HashMap::<AccountId, Vec<(AssetId, U128)>>::new();
+    for (account_id, asset_id, balance) in &sums.user_balances {
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(account_id.clone()),
+            asset_id.clone(),
+            Some(U128(*balance)),
+        )
+        .await
+        .unwrap();
+        registered_assets_by_account
+            .entry(account_id.clone())
+            .or_default()
+            .push((asset_id.clone(), U128(*balance)));
+    }
+    for (account_id, mut expected_registered_assets) in registered_assets_by_account {
+        let mut registered_assets =
+            get_registered_assets(&dex_engine_contract, &account_id, 0, u32::MAX)
+                .await
+                .unwrap();
+        registered_assets.sort_by(|(asset_a, _), (asset_b, _)| asset_a.cmp(asset_b));
+        expected_registered_assets.sort_by(|(asset_a, _), (asset_b, _)| asset_a.cmp(asset_b));
+        assert_eq!(
+            registered_assets, expected_registered_assets,
+            "Registered assets of {account_id}"
+        );
+    }
+
+    let total_storage_balances_after_backfill = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_storage_balances_after_backfill.users.total,
+        total_storage_balances_before_backfill.users.total,
+    );
+    assert_eq!(
+        total_storage_balances_after_backfill.users.available,
+        total_storage_balances_before_backfill.users.available,
+    );
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
     let result = user1
         .call(dex_engine_contract.id(), "register_assets")
         .max_gas()
@@ -3713,6 +4006,7 @@ async fn test_migration_of_mainnet_state() {
     assert!(format!("{result:?}").contains("Contract is paused"));
 
     set_paused(&dex_engine_contract, &pauser, false).await;
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
 
     let result = user1
         .call(dex_engine_contract.id(), "storage_deposit")
@@ -3735,6 +4029,13 @@ async fn test_migration_of_mainnet_state() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+
+    assert_eq!(
+        get_registered_assets(&dex_engine_contract, user1.id(), 0, u32::MAX)
+            .await
+            .unwrap(),
+        vec![(AssetId::Near, U128(0))],
+    );
 
     let user1_storage_balance = get_storage_balance(&dex_engine_contract, user1.id())
         .await

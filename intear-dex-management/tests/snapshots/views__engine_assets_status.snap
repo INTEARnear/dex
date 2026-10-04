@@ -1,0 +1,18 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"assets\", \"status\", \"alice.near\",\n\"near,nep141:intel.tkn.near,nep141:wrap.near\",])"
+---
+$ near-intear-dex-management engine assets status alice.near near,nep141:intel.tkn.near,nep141:wrap.near network-config sandbox now
+exit code: 0
+--- stdout ---
++-----------------------+------------+---------+
+| Asset                 | Registered | Balance |
++-----------------------+------------+---------+
+| near                  | yes        | 5 NEAR  |
+| nep141:intel.tkn.near | yes        | 0 INTEL |
+| nep141:wrap.near      | no         |         |
++-----------------------+------------+---------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine assets status alice.near near,nep141:intel.tkn.near,nep141:wrap.near network-config sandbox now

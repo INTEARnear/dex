@@ -1,0 +1,84 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"swap\", \"alice.near\", \"0\", \"buy\", \"0.1 NEAR\", \"max-slippage\", \"1%\",\n\"from-wallet\", \"to-wallet\"]).await"
+---
+$ near-intear-dex-management xyk swap alice.near 0 buy '0.1 NEAR' max-slippage '1%' from-wallet to-wallet network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+"284805"
+--- stderr ---
+├  sandbox · signer alice.near · usdt.tether-token.near
+│  Buy 0.1 NEAR on pool #0 (NEAR / USDt) of slimedragon.near/xyk for at most 0.284805 USDt, 0.281985 USDt at the current price
+│  The USDt comes from alice.near's wallet
+│  What the swap doesn't use of the 0.284805 USDt goes back to alice.near's wallet
+│  The NEAR goes to alice.near's wallet
+│  Actions: ft_transfer_call (1 yoctoNEAR, 150 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  usdt.tether-token.near
+│    actions:
+│       -- function call:
+│                       method name:  ft_transfer_call
+│                       args:         {
+│                                       "receiver_id": "dex.intear.near",
+│                                       "amount": "284805",
+│                                       "msg": "{\"operations\":[{\"SwapSimple\":{\"dex_id\":\"slimedragon.near/xyk\",\"message\":\"AAAAAA==\",\"asset_in\":\"nep141:usdt.tether-token.near\",\"asset_out\":\"near\",\"amount\":{\"Amount\":{\"ExactOut\":\"100000000000000000000000\"}},\"constraint\":\"284805\"}},{\"Withdraw\":{\"asset_id\":\"near\",\"amount\":\"PreviousSwapOutput\",\"to\":null,\"rescue_address\":null}},{\"Withdraw\":{\"asset_id\":\"nep141:usdt.tether-token.near\",\"amount\":{\"Full\":{\"at_least\":null}},\"to\":null,\"rescue_address\":null}}],\"referrer\":null}"
+│                                     }
+│                       gas:          150.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [usdt.tether-token.near]:
+│      EVENT_JSON:{"standard":"nep141","version":"1.0.0","event":"ft_transfer","data":[{"old_owner_id":"alice.near","new_owner_id":"dex.intear.near","amount":"284805"}]}
+│    Logs [dex.intear.near]:
+│      Fully authorized: false
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"103228326644066525423207416"},{"asset_id":"nep141:usdt.tether-token.near","balance":"290641420"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":0,"request":{"message":"AAAAAA==","asset_in":"nep141:usdt.tether-token.near","asset_out":"near","amount":{"ExactOut":"100000000000000000000000"},"referrer":null},"amount_in":"281985","fees_breakdown":[["Pool","nep141:usdt.tether-token.near","563"],[{"Account":"alice.near"},"nep141:usdt.tether-token.near","140"],[{"Account":"plach.intear.near"},"nep141:usdt.tether-token.near","0"]],"amount_out":"100000000000000000000000"}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:usdt.tether-token.near","balance":"1290642061"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"153230173516927416113249107"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"AAAAAA==","asset_in":"nep141:usdt.tether-token.near","asset_out":"near","amount":{"ExactOut":"100000000000000000000000"},"referrer":null},"amount_in":"281985","amount_out":"100000000000000000000000","trader":"alice.near","referrer":null}}
+│      Executing operation 1
+│      Executing operation 2
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Ok(())
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"withdraw","data":{"from":{"Account":"alice.near"},"to":"alice.near","asset_id":"near","amount":"100000000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [usdt.tether-token.near]:
+│      EVENT_JSON:{"standard":"nep141","version":"1.0.0","event":"ft_transfer","data":[{"old_owner_id":"dex.intear.near","new_owner_id":"alice.near","amount":"2820"}]}
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Ok(())
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"withdraw","data":{"from":{"Account":"alice.near"},"to":"alice.near","asset_id":"nep141:usdt.tether-token.near","amount":"2820"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [usdt.tether-token.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+
+
+The "ft_transfer_call" call to <usdt.tether-token.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Swapped on pool #0 (NEAR / USDt) of slimedragon.near/xyk; the NEAR went to alice.near's wallet
+│  Pool #0 of slimedragon.near/xyk now holds 103.228326644066525423207416 NEAR and 290.64142 USDt
+│  Pool #0 of slimedragon.near/xyk swapped 0.281985 USDt for 0.1 NEAR
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk swap alice.near 0 buy '0.1 NEAR' max-slippage '1%' from-wallet to-wallet network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

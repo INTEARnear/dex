@@ -1,0 +1,15 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"referrer\", \"show\", \"carol.near\"])"
+---
+$ near-intear-dex-management xyk referrer show carol.near network-config sandbox now
+exit code: 0
+--- stdout ---
+Referrer          carol.near
+Dex               slimedragon.near/xyk
+Referral fee      not set
+Collects fees in  no pool asset, so it takes no referral fee
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk referrer show carol.near network-config sandbox now

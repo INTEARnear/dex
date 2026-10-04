@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"pools\", \"list\", \"--asset\",\n\"nep141:usdt.tether-token.near\"])"
+---
+$ near-intear-dex-management xyk pools list --asset nep141:usdt.tether-token.near network-config sandbox now
+exit code: 0
+--- stdout ---
++------+---------+--------------+------------------------------+---------+
+| Pool | Kind    | Pair         | Reserves                     | Fee     |
++------+---------+--------------+------------------------------+---------+
+| #0   | private | NEAR / USDt  | 100 NEAR / 300 USDt          | 0.2501% |
+| #1   | private | USDt / INTEL | 1,000 USDt / 2,000,000 INTEL | 1.2%    |
++------+---------+--------------+------------------------------+---------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pools list --asset nep141:usdt.tether-token.near network-config sandbox now

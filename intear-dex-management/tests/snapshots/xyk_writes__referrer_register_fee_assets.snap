@@ -1,0 +1,69 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "xyk_transaction_paying_storage(&sandbox, &cli, \"carol.near\", XYK_DEX_ID,\n&[\"xyk\", \"referrer\", \"register-fee-assets\", \"carol.near\",\n\"near,nep141:usdt.tether-token.near\"]).await"
+---
+$ near-intear-dex-management xyk referrer register-fee-assets carol.near near,nep141:usdt.tether-token.near network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer carol.near · dex.intear.near
+│  Start fee balances of carol.near in NEAR, USDt on slimedragon.near/xyk, so it can take referral fees paid in them
+│  Attach 0.00242 NEAR from carol.near's wallet for the storage this takes; slimedragon.near/xyk sends back what it doesn't use
+│  Actions: execute_operations (0.00242 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    carol.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "DexCall": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "method": "register_fee_assets",
+│                                             "args": "AgAAAAABFgAAAHVzZHQudGV0aGVyLXRva2VuLm5lYXI=",
+│                                             "attached_assets": {
+│                                               "near": "2420000000000000000000"
+│                                             }
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0.00242 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"near","balance":"2420000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"near","balance":"0"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150002420000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150000000000000000000000000"}}
+│    Logs [carol.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <carol.near> succeeded.
+
+├  ✓ carol.near now collects fees in NEAR, USDt on slimedragon.near/xyk
+│  carol.near now has 0 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk referrer register-fee-assets carol.near near,nep141:usdt.tether-token.near network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send

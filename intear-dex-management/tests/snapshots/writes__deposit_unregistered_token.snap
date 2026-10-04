@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"bob.near\",\n&[\"engine\", \"deposit\", \"bob.near\", \"nep141:intel.tkn.near\", \"1 INTEL\"]).await"
+---
+$ near-intear-dex-management engine deposit bob.near nep141:intel.tkn.near '1 INTEL' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine deposit bob.near nep141:intel.tkn.near '1 INTEL' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+
+Error:
+   0: INTEL isn't registered for bob.near on dex.intear.near
+
+Suggestion: Register it first:
+    near intear-dex-management engine assets register bob.near nep141:intel.tkn.near network-config sandbox

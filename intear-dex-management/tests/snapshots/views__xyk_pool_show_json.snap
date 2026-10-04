@@ -1,0 +1,97 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"pool\", \"show\", \"1\"])"
+---
+$ near-intear-dex-management --json xyk pool show 1 network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "pool_id": 1,
+  "kind": "private",
+  "assets": [
+    {
+      "asset_id": "nep141:usdt.tether-token.near",
+      "reserve": {
+        "raw": "1000000000",
+        "decimal": "1000",
+        "symbol": "USDt"
+      }
+    },
+    {
+      "asset_id": "nep141:intel.tkn.near",
+      "reserve": {
+        "raw": "2000000000000000000000000",
+        "decimal": "2000000",
+        "symbol": "INTEL"
+      }
+    }
+  ],
+  "fees": {
+    "total": {
+      "fraction": 12000,
+      "percent": "1.2"
+    },
+    "receivers": [
+      {
+        "receiver": "alice.near",
+        "fee": {
+          "fraction": 10000,
+          "percent": "1"
+        }
+      },
+      {
+        "receiver": "pool",
+        "fee": {
+          "fraction": 1000,
+          "percent": "0.1"
+        }
+      },
+      {
+        "receiver": "protocol",
+        "fee": {
+          "fraction": 1000,
+          "percent": "0.1"
+        }
+      }
+    ]
+  },
+  "fee_configuration": {
+    "receivers": [
+      {
+        "receiver": "alice.near",
+        "scheduled": {
+          "start": {
+            "time": "2025-01-01T00:00:00Z",
+            "fee": {
+              "fraction": 20000,
+              "percent": "2"
+            }
+          },
+          "end": {
+            "time": "2025-07-01T00:00:00Z",
+            "fee": {
+              "fraction": 10000,
+              "percent": "1"
+            }
+          },
+          "curve": "linear"
+        }
+      },
+      {
+        "receiver": "pool",
+        "fixed": {
+          "fraction": 1000,
+          "percent": "0.1"
+        }
+      }
+    ]
+  },
+  "owner_id": "slimedragon.near",
+  "locked": true,
+  "dex_id": "slimedragon.near/xyk",
+  "upgrade_available": false
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk pool show 1 network-config sandbox now

@@ -9,11 +9,20 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, expect,
 };
 use near_sdk::{
-    AccountId, AccountIdRef, BorshStorageKey, NearToken, PanicOnDefault, Timestamp,
-    assert_one_yocto,
+    AccountId, AccountIdRef, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
+};
+use xyk_dex_types::{
+    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
+    CreatePoolResponse, CurrentFees, EditFeesArgs, FeeConfiguration, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
+    GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, FULL_FEE_FRACTION,
+    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
+    SetReferrerSettingsArgs, SharesBalance, SwapArgs, UpgradePoolArgs, WithdrawCommunityFeeArgs,
+    WithdrawFeesArgs, XykDexEvent, asset_account_ids,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -25,23 +34,6 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
 
-const MAX_FEE_FRACTION: FeeFraction = 1000000;
-const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
-const PROTOCOL_FEE: FeeFraction = MAX_FEE_FRACTION / 1000; // 0.1%
-const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
-const NEAR_ACCOUNT_ID: &AccountIdRef = AccountIdRef::new_or_panic("near");
-const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&AccountIdRef] = &[
-    AccountIdRef::new_or_panic("omft.near"),
-    AccountIdRef::new_or_panic("omni.hot.tg"),
-    AccountIdRef::new_or_panic("tether-token.near"),
-];
-const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
-    AccountIdRef::new_or_panic("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"),
-    NEAR_ACCOUNT_ID,
-];
-const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
-const MAX_REFERRAL_FEE_FRACTION: FeeFraction = MAX_FEE_FRACTION / 20; // 5%
-
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
@@ -52,8 +44,6 @@ enum StorageKey {
     CommunityOwnedFees,
 }
 
-type PoolId = u32;
-
 /// A x*y=k pool with two assets
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -62,99 +52,6 @@ pub struct XykDex {
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
     referral_settings: LookupMap<AccountId, ReferralSettings>,
     community_owned_fees: LookupMap<AccountId, NearToken>,
-}
-
-#[near(serializers=[borsh])]
-enum ReferralSettings {
-    V1 {
-        fee_fraction: FeeFraction,
-        fee_fraction_reduced: FeeFraction,
-    },
-}
-
-impl ReferralSettings {
-    fn validate(&self) {
-        match self {
-            ReferralSettings::V1 {
-                fee_fraction,
-                fee_fraction_reduced,
-            } => {
-                expect!(
-                    *fee_fraction < MAX_REFERRAL_FEE_FRACTION,
-                    "Fee fraction must be less than {MAX_REFERRAL_FEE_FRACTION}"
-                );
-                expect!(
-                    *fee_fraction_reduced < MAX_REFERRAL_FEE_FRACTION,
-                    "Fee fraction reduced must be less than {MAX_REFERRAL_FEE_FRACTION}"
-                );
-            }
-        }
-    }
-
-    fn fee_fraction(&self, asset_account_ids: &[&AccountIdRef]) -> FeeFraction {
-        match self {
-            ReferralSettings::V1 {
-                fee_fraction,
-                fee_fraction_reduced,
-            } => {
-                if should_reduce_fee(asset_account_ids) {
-                    *fee_fraction_reduced
-                } else {
-                    *fee_fraction
-                }
-            }
-        }
-    }
-}
-
-#[near(event_json(standard = "xyk"))]
-enum XykDexEvent {
-    #[event_version("1.0.0")]
-    PoolUpdated { pool_id: PoolId, pool: PoolView },
-    #[event_version("1.0.0")]
-    Swap {
-        pool_id: PoolId,
-        request: SwapRequest,
-        amount_in: U128,
-        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
-        amount_out: U128,
-    },
-    #[event_version("1.0.0")]
-    LiquidityAdded {
-        pool_id: PoolId,
-        asset_0: AssetId,
-        asset_1: AssetId,
-
-        added_amount_0: U128,
-        added_amount_1: U128,
-        minted_shares: U128,
-
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
-
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
-        new_total_shares: U128,
-    },
-    #[event_version("1.0.0")]
-    LiquidityRemoved {
-        pool_id: PoolId,
-        asset_0: AssetId,
-        asset_1: AssetId,
-
-        removed_amount_0: U128,
-        removed_amount_1: U128,
-        burned_shares: U128,
-
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
-
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
-        new_total_shares: U128,
-    },
 }
 
 fn u256_to_u128(value: U256) -> u128 {
@@ -218,58 +115,14 @@ fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: Non
     mul_div(tokens, total_shares.get(), total_tokens.get())
 }
 
-fn asset_account_ids<const N: usize>(asset_ids: [&AssetId; N]) -> [&AccountIdRef; N] {
-    asset_ids.map(|asset_id| match asset_id {
-        AssetId::Near => NEAR_ACCOUNT_ID,
-        AssetId::Nep141(account_id) => account_id,
-        AssetId::Nep171(_, _) => panic!("Nep171 assets are not supported"),
-        AssetId::Nep245(account_id, _) => account_id,
-    })
-}
-
-fn should_reduce_fee(asset_account_ids: &[&AccountIdRef]) -> bool {
-    'assets: for asset_account_id in asset_account_ids {
-        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
-            if asset_account_id.as_str() == *reduce_asset_account {
-                continue 'assets;
-            }
-        }
-        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
-            if asset_account_id.is_sub_account_of(bypass_asset_parent_account) {
-                continue 'assets;
-            }
-        }
-        // If not matched by either of the above, it's a non-stable asset.
-        return false;
-    }
-    true
-}
-
-#[near(serializers=[borsh])]
-pub enum PoolType {
-    PrivateLatest,
-    PublicLatest,
-    LaunchLatest { phantom_liquidity_near: U128 },
-    // Supporting previous versions could be useful for writing tests
-    LaunchV1 { phantom_liquidity_near: U128 },
-    PrivateV1,
-    PublicV1,
-    PrivateV2,
-    PublicV2,
-}
-
 #[near]
 impl Dex for XykDex {
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        #[near(serializers=[borsh])]
-        struct SwapArgs {
-            pool_id: PoolId,
-        }
         let Ok(SwapArgs { mut pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
-        if pool_id == u32::MAX {
+        if pool_id == LAST_CREATED_POOL_ID_MARKER {
             // Last created pool. This is used to batch "create launch pool + buy"
             // without having to wait to know the pool ID
             pool_id = self.pools.len().checked_sub(1).expect("No pools created");
@@ -382,7 +235,7 @@ impl Dex for XykDex {
             let mut pool_fee = 0u128;
             for (receiver, fee_fraction) in fees.receivers.iter() {
                 let fee_amount =
-                    mul_div(amount_in, *fee_fraction as u128, MAX_FEE_FRACTION as u128);
+                    mul_div(amount_in, *fee_fraction as u128, FULL_FEE_FRACTION as u128);
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
                 match receiver {
                     FeeReceiver::Account(account_id) => {
@@ -510,19 +363,18 @@ impl Dex for XykDex {
         }
 
         let fee_asset_account_ids = asset_account_ids([&request.asset_in, &request.asset_out]);
-        let current_fees = fees
-            .with_protocol_fee(&fee_asset_account_ids)
-            .with_referral_fee(
-                request.referrer.clone(),
-                &self.referral_settings,
-                &self.fees_collected_by_users,
-                if should_convert_fees_to_near {
-                    AssetId::Near
-                } else {
-                    request.asset_in.clone()
-                },
-                &fee_asset_account_ids,
-            );
+        let current_fees = with_referral_fee(
+            fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp()),
+            request.referrer.clone(),
+            &self.referral_settings,
+            &self.fees_collected_by_users,
+            if should_convert_fees_to_near {
+                AssetId::Near
+            } else {
+                request.asset_in.clone()
+            },
+            &fee_asset_account_ids,
+        );
 
         let (fees_breakdown, response) = match request.amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
@@ -600,7 +452,7 @@ impl Dex for XykDex {
                     .iter()
                     .map(|(_, fee)| *fee as u128)
                     .sum::<u128>();
-                let fee_denominator = (MAX_FEE_FRACTION as u128)
+                let fee_denominator = (FULL_FEE_FRACTION as u128)
                     .checked_sub(total_fee_fraction)
                     .expect("Fee fraction somehow above 100%");
                 let fee_denominator_minus_one = fee_denominator
@@ -609,7 +461,7 @@ impl Dex for XykDex {
                 // checked_sub would fail if denominator was 0
                 let amount_in = mul_add_div(
                     amount_in_without_fees,
-                    MAX_FEE_FRACTION as u128,
+                    FULL_FEE_FRACTION as u128,
                     fee_denominator_minus_one,
                     fee_denominator,
                 );
@@ -710,7 +562,7 @@ impl XykDex {
     pub fn migrate() -> Self {
         assert_one_yocto();
         expect!(
-            near_sdk::env::predecessor_account_id() == "slimedragon.near",
+            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
             "Only owner can migrate"
         );
 
@@ -741,12 +593,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct CreatePoolArgs {
-            assets: (AssetId, AssetId),
-            fees: FeeConfiguration,
-            pool_type: PoolType,
-        }
         let Ok(CreatePoolArgs {
             assets,
             fees,
@@ -771,7 +617,8 @@ impl XykDex {
             "Only NEAR, NEP-141, and NEP-245 assets are supported"
         );
 
-        fees.validate(&pool_type);
+        fees.validate(&pool_type, near_sdk::env::block_timestamp())
+            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
         expect!(self.pools.len() < u32::MAX, "Too many pools");
 
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -782,7 +629,7 @@ impl XykDex {
             .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.1.clone()))
             .or_default();
         // TODO: Register only NEAR fee asset for Launch pools
-        for (fee_receiver, _) in fees.receivers() {
+        for (fee_receiver, _) in fees.receivers_at(near_sdk::env::block_timestamp()) {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
                     expect!(
@@ -963,10 +810,6 @@ impl XykDex {
         }
         .emit();
 
-        #[near(serializers=[borsh])]
-        struct CreatePoolResponse {
-            pool_id: PoolId,
-        }
         let response = CreatePoolResponse { pool_id };
         DexCallResponse {
             asset_withdraw_requests: if let Some(leftover) = attached_near.checked_sub(storage_cost)
@@ -996,10 +839,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct RegisterLiquidityArgs {
-            pool_id: PoolId,
-        }
         let Ok(RegisterLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1059,11 +898,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct AddLiquidityArgs {
-            pool_id: PoolId,
-            min_shares_received: Option<SharesBalance>,
-        }
         let Ok(AddLiquidityArgs {
             pool_id,
             min_shares_received,
@@ -1368,8 +1202,6 @@ impl XykDex {
         }
         .emit();
 
-        #[near(serializers=[borsh])]
-        struct AddLiquidityResponse;
         let response = AddLiquidityResponse;
         DexCallResponse {
             asset_withdraw_requests,
@@ -1386,12 +1218,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct RemoveLiquidityArgs {
-            pool_id: PoolId,
-            shares_to_remove: Option<SharesBalance>,
-            min_assets_received: Option<(U128, U128)>,
-        }
         let Ok(RemoveLiquidityArgs {
             pool_id,
             shares_to_remove,
@@ -1619,8 +1445,6 @@ impl XykDex {
         }
         .emit();
 
-        #[near(serializers=[borsh])]
-        struct RemoveLiquidityResponse;
         let response = RemoveLiquidityResponse;
         DexCallResponse {
             asset_withdraw_requests: vec![
@@ -1652,11 +1476,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct EditFeesArgs {
-            pool_id: PoolId,
-            fees: FeeConfiguration,
-        }
         let Ok(EditFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1664,7 +1483,8 @@ impl XykDex {
             panic!("Pool not found");
         };
 
-        fees.validate(&PoolType::from(&*pool));
+        fees.validate(&PoolType::from(&*pool), near_sdk::env::block_timestamp())
+            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
 
         let assets = match pool {
             Pool::PrivateV1 {
@@ -1699,7 +1519,7 @@ impl XykDex {
 
         // TODO: Register only NEAR fee asset for Launch pools
         let storage_usage_before = near_sdk::env::storage_usage();
-        for (fee_receiver, _) in fees.receivers() {
+        for (fee_receiver, _) in fees.receivers_at(near_sdk::env::block_timestamp()) {
             match fee_receiver {
                 FeeReceiver::Account(account_id) => {
                     expect!(
@@ -1794,10 +1614,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct WithdrawFeesArgs {
-            assets: Vec<AssetId>,
-        }
         let Ok(WithdrawFeesArgs { assets }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1844,10 +1660,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct UpgradePoolArgs {
-            pool_id: PoolId,
-        }
         let Ok(UpgradePoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1925,10 +1737,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct LockPoolArgs {
-            pool_id: PoolId,
-        }
         let Ok(LockPoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1974,11 +1782,7 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct ReferrerConfigurationArgs {
-            new_settings: ReferralSettings,
-        }
-        let Ok(ReferrerConfigurationArgs { new_settings }) = near_sdk::borsh::from_slice(&args)
+        let Ok(SetReferrerSettingsArgs { new_settings }) = near_sdk::borsh::from_slice(&args)
         else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1986,7 +1790,9 @@ impl XykDex {
             NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
         let storage_usage_before = near_sdk::env::storage_usage();
         expect!(attached_assets.is_empty(), "No assets should be attached");
-        new_settings.validate();
+        new_settings
+            .validate()
+            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
         self.referral_settings
             .insert(near_sdk::env::predecessor_account_id(), new_settings);
         self.referral_settings.flush();
@@ -2025,10 +1831,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct RegisterFeeAssetsArgs {
-            asset_ids: Vec<AssetId>,
-        }
         let Ok(RegisterFeeAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -2082,10 +1884,6 @@ impl XykDex {
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        #[near(serializers=[borsh])]
-        struct WithdrawCommunityFeeArgs {
-            account_id: AccountId,
-        }
         let Ok(WithdrawCommunityFeeArgs { account_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -2110,16 +1908,14 @@ impl XykDex {
     }
 
     #[result_serializer(borsh)]
-    pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<PoolView> {
+    pub fn get_pool(&self, #[serializer(borsh)] args: GetPoolArgs) -> Option<PoolView> {
+        let GetPoolArgs { pool_id } = args;
         self.pools.get(pool_id).map(|pool| pool.into())
     }
 
     #[result_serializer(borsh)]
-    pub fn get_pools(
-        &self,
-        #[serializer(borsh)] start_index: PoolId,
-        #[serializer(borsh)] limit: PoolId,
-    ) -> Vec<PoolView> {
+    pub fn get_pools(&self, #[serializer(borsh)] args: GetPoolsArgs) -> Vec<PoolView> {
+        let GetPoolsArgs { start_index, limit } = args;
         self.pools
             .iter()
             .skip(start_index as usize)
@@ -2131,9 +1927,12 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pool_shares(
         &self,
-        #[serializer(borsh)] pool_ids: Vec<PoolId>,
-        #[serializer(borsh)] account_id: AccountId,
+        #[serializer(borsh)] args: GetPoolSharesArgs,
     ) -> Vec<Option<U128>> {
+        let GetPoolSharesArgs {
+            pool_ids,
+            account_id,
+        } = args;
         pool_ids
             .into_iter()
             .map(|pool_id| {
@@ -2156,9 +1955,12 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pending_fees(
         &self,
-        #[serializer(borsh)] account_id: AccountId,
-        #[serializer(borsh)] asset_ids: Vec<AssetId>,
+        #[serializer(borsh)] args: GetPendingFeesArgs,
     ) -> HashMap<AssetId, U128> {
+        let GetPendingFeesArgs {
+            account_id,
+            asset_ids,
+        } = args;
         asset_ids
             .into_iter()
             .filter_map(|asset_id| {
@@ -2176,7 +1978,8 @@ impl XykDex {
     }
 
     #[result_serializer(borsh)]
-    pub fn pool_needs_upgrade(&self, #[serializer(borsh)] pool_id: PoolId) -> bool {
+    pub fn pool_needs_upgrade(&self, #[serializer(borsh)] args: PoolNeedsUpgradeArgs) -> bool {
+        let PoolNeedsUpgradeArgs { pool_id } = args;
         let Some(pool) = self.pools.get(pool_id) else {
             panic!("Pool {pool_id} not found");
         };
@@ -2189,12 +1992,22 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_community_owned_fees(
         &self,
-        #[serializer(borsh)] account_id: AccountId,
+        #[serializer(borsh)] args: GetCommunityOwnedFeesArgs,
     ) -> NearToken {
+        let GetCommunityOwnedFeesArgs { account_id } = args;
         self.community_owned_fees
             .get(&account_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_referral_settings(
+        &self,
+        #[serializer(borsh)] args: GetReferralSettingsArgs,
+    ) -> Option<ReferralSettings> {
+        let GetReferralSettingsArgs { account_id } = args;
+        self.referral_settings.get(&account_id).cloned()
     }
 }
 
@@ -2248,30 +2061,6 @@ impl From<&Pool> for PoolType {
     }
 }
 
-#[near(serializers=[borsh, json])]
-pub enum PoolView {
-    Private {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        owner_id: AccountId,
-        locked: bool,
-    },
-    Public {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        total_shares: Option<U128>,
-    },
-    Launch {
-        near_amount: U128,
-        launched_asset: AssetWithBalance,
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        phantom_liquidity_near: U128,
-    },
-}
-
 impl From<&Pool> for PoolView {
     fn from(pool: &Pool) -> Self {
         match pool {
@@ -2281,10 +2070,10 @@ impl From<&Pool> for PoolView {
                 fees,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(&asset_account_ids([
-                    &assets.0.asset_id,
-                    &assets.1.asset_id,
-                ])),
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
+                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
                 fee_configuration: FeeConfiguration::V1(fees.clone()),
                 owner_id: owner_id.clone(),
                 locked: false,
@@ -2296,10 +2085,10 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(&asset_account_ids([
-                    &assets.0.asset_id,
-                    &assets.1.asset_id,
-                ])),
+                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
+                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
                 fee_configuration: FeeConfiguration::V1(fees.clone()),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
@@ -2311,10 +2100,10 @@ impl From<&Pool> for PoolView {
             } => PoolView::Launch {
                 near_amount: *near_amount,
                 launched_asset: launched_asset.clone(),
-                fees: fees.with_protocol_fee(&asset_account_ids([
-                    &AssetId::Near,
-                    &launched_asset.asset_id,
-                ])),
+                fees: fees.with_protocol_fee(
+                    &asset_account_ids([&AssetId::Near, &launched_asset.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
                 fee_configuration: fees.clone(),
                 phantom_liquidity_near: *phantom_liquidity_near,
             },
@@ -2325,10 +2114,10 @@ impl From<&Pool> for PoolView {
                 locked,
             } => PoolView::Private {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(&asset_account_ids([
-                    &assets.0.asset_id,
-                    &assets.1.asset_id,
-                ])),
+                fees: fees.with_protocol_fee(
+                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
                 fee_configuration: fees.clone(),
                 owner_id: owner_id.clone(),
                 locked: *locked,
@@ -2340,10 +2129,10 @@ impl From<&Pool> for PoolView {
                 user_shares: _,
             } => PoolView::Public {
                 assets: assets.clone(),
-                fees: fees.with_protocol_fee(&asset_account_ids([
-                    &assets.0.asset_id,
-                    &assets.1.asset_id,
-                ])),
+                fees: fees.with_protocol_fee(
+                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
                 fee_configuration: fees.clone(),
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
@@ -2351,319 +2140,31 @@ impl From<&Pool> for PoolView {
     }
 }
 
-/// When a public pool is created, the creator gets
-/// 1e18 shares, which represents 100% of the pool.
-/// When someone adds liquidity, the rate of tokens
-/// per share is calculated by dividing the total
-/// pool value by the total shares, and shares are
-/// minted or burnt accordingly.
-type SharesBalance = NonZeroU128;
-
-/// Should add up to less than 1000000 (1% = 10000)
-#[near(serializers=[borsh, json])]
-#[derive(Clone)]
-#[serde(untagged)]
-pub enum FeeConfiguration {
-    V1(CurrentFees),
-    V2(V2FeeConfiguration),
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone)]
-pub struct CurrentFees {
-    receivers: Vec<(FeeReceiver, FeeFraction)>,
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone)]
-pub struct V2FeeConfiguration {
-    receivers: Vec<(FeeReceiver, FeeAmount)>,
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-pub enum FeeAmount {
-    Fixed(FeeFraction),
-    Scheduled {
-        start: (Timestamp, FeeFraction),
-        end: (Timestamp, FeeFraction),
-        curve: ScheduledFeeCurve,
-    },
-    Dynamic {
-        min: FeeFraction,
-        max: FeeFraction,
-    },
-}
-
-impl FeeAmount {
-    pub fn validate(&self) {
-        match self {
-            FeeAmount::Fixed(fee_fraction) => {
-                expect!(
-                    *fee_fraction < MAX_FEE_FRACTION,
-                    "Fee must be less than {MAX_FEE_FRACTION}"
-                );
-            }
-            FeeAmount::Scheduled {
-                start,
-                end,
-                curve: _,
-            } => {
-                expect!(
-                    start.0 < end.0,
-                    "Scheduled fee start time must be before end time"
-                );
-                expect!(
-                    start.1 > end.1,
-                    "Start fee fraction must be greater than end fee"
-                );
-                expect!(
-                    start.1 < MAX_FEE_FRACTION,
-                    "Start fee fraction must be less than {MAX_FEE_FRACTION}"
-                );
-            }
-            FeeAmount::Dynamic { min, max } => {
-                expect!(
-                    *min < *max,
-                    "Min fee fraction must be less than max fee fraction"
-                );
-                expect!(
-                    *max < MAX_FEE_FRACTION,
-                    "Max fee fraction must be less than {MAX_FEE_FRACTION}"
-                );
-                unimplemented!("Dynamic fee configuration is not implemented yet");
-            }
-        }
+fn with_referral_fee(
+    mut fees: CurrentFees,
+    referrer_account_id: Option<AccountId>,
+    referral_settings: &LookupMap<AccountId, ReferralSettings>,
+    fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
+    fee_asset_id: AssetId,
+    asset_account_ids: &[&AccountIdRef],
+) -> CurrentFees {
+    let Some(referrer_account_id) = referrer_account_id else {
+        return fees;
+    };
+    let Some(referral_settings) = referral_settings.get(&referrer_account_id) else {
+        return fees;
+    };
+    let referral_fee_fraction = referral_settings.fee_fraction(asset_account_ids);
+    if referral_fee_fraction == 0
+        || fees_collected_by_users
+            .get(&(referrer_account_id.clone(), fee_asset_id))
+            .is_none()
+    {
+        return fees;
     }
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-pub enum ScheduledFeeCurve {
-    Linear,
-}
-
-impl FeeAmount {
-    pub fn get_fee_fraction(&self) -> FeeFraction {
-        match self {
-            FeeAmount::Fixed(fee_fraction) => *fee_fraction,
-            FeeAmount::Scheduled { start, end, curve } => {
-                let (start_time, start_fee_fraction) = *start;
-                let (end_time, end_fee_fraction) = *end;
-                let current_timestamp = near_sdk::env::block_timestamp();
-                let Some(time_elapsed) = current_timestamp.checked_sub(start_time) else {
-                    return start_fee_fraction;
-                };
-                if current_timestamp >= end_time {
-                    return end_fee_fraction;
-                }
-
-                // Was checked in .validate() check
-                let total_duration = end_time.checked_sub(start_time).unwrap();
-                let fee_range = start_fee_fraction.checked_sub(end_fee_fraction).unwrap();
-
-                let fee_decrease = match curve {
-                    ScheduledFeeCurve::Linear => {
-                        // total_duration is not 0 due to .validate() check
-                        FeeFraction::try_from(mul_div(
-                            fee_range as u128,
-                            time_elapsed as u128,
-                            total_duration as u128,
-                        ))
-                        .expect("Fee decrease overflows u32")
-                    }
-                };
-
-                expect!(
-                    fee_decrease <= fee_range,
-                    "Fee decrease must be less than end and start fee difference"
-                );
-
-                start_fee_fraction
-                    .checked_sub(fee_decrease)
-                    .expect("Fee calculation underflow")
-            }
-            FeeAmount::Dynamic { min: _, max: _ } => {
-                unimplemented!("Dynamic fee configuration is not implemented yet");
-            }
-        }
-    }
-}
-
-/// 100% = 1000000
-type FeeFraction = u32;
-
-impl FeeConfiguration {
-    fn receivers(&self) -> Vec<(FeeReceiver, FeeFraction)> {
-        match self {
-            FeeConfiguration::V1(fees) => fees.receivers.clone(),
-            FeeConfiguration::V2(fees) => fees
-                .receivers
-                .iter()
-                .map(|(receiver, fee)| (receiver.clone(), fee.get_fee_fraction()))
-                .collect(),
-        }
-    }
-
-    fn validate(&self, pool_type: &PoolType) {
-        match self {
-            FeeConfiguration::V1(_) => {}
-            FeeConfiguration::V2(fees) => {
-                fees.receivers
-                    .iter()
-                    .for_each(|(_, fee_amount)| fee_amount.validate());
-            }
-        }
-        let receivers = self.receivers();
-        expect!(receivers.len() <= 42, "Too many fee receivers");
-        expect!(
-            receivers.iter().all(|(_, fee)| *fee < MAX_FEE_FRACTION),
-            "Fee must be less than {MAX_FEE_FRACTION} per receiver"
-        );
-        expect!(
-            receivers
-                .iter()
-                .map(|(_, fee)| *fee)
-                .try_fold(0u32, |acc, fee| acc.checked_add(fee))
-                .unwrap()
-                < MAX_FEE_FRACTION / 2,
-            "Fees must add up to less than 50% ({})",
-            MAX_FEE_FRACTION / 2,
-        );
-        expect!(
-            !receivers.iter().any(|(receiver, _)| matches!(
-                receiver,
-                FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID
-            )),
-            "Protocol fee receiver can't be set by users"
-        );
-        if receivers
-            .iter()
-            .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)))
-        {
-            expect!(
-                matches!(
-                    pool_type,
-                    PoolType::LaunchV1 { .. } | PoolType::LaunchLatest { .. }
-                ),
-                "Community fee receiver is only supported in Launch pools"
-            );
-        }
-    }
-}
-
-impl From<&FeeConfiguration> for CurrentFees {
-    fn from(fee_configuration: &FeeConfiguration) -> Self {
-        Self {
-            receivers: fee_configuration.receivers(),
-        }
-    }
-}
-
-impl CurrentFees {
-    fn with_referral_fee(
-        mut self,
-        referrer_account_id: Option<AccountId>,
-        referral_settings: &LookupMap<AccountId, ReferralSettings>,
-        fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
-        fee_asset_id: AssetId,
-        asset_account_ids: &[&AccountIdRef],
-    ) -> Self {
-        let Some(referrer_account_id) = referrer_account_id else {
-            return self;
-        };
-        let Some(referral_settings) = referral_settings.get(&referrer_account_id) else {
-            return self;
-        };
-        let referral_fee_fraction = referral_settings.fee_fraction(asset_account_ids);
-        if referral_fee_fraction == 0
-            || fees_collected_by_users
-                .get(&(referrer_account_id.clone(), fee_asset_id))
-                .is_none()
-        {
-            return self;
-        }
-        self.receivers.push((
-            FeeReceiver::Account(referrer_account_id),
-            referral_fee_fraction,
-        ));
-        self
-    }
-}
-
-impl FeeConfiguration {
-    fn with_protocol_fee(&self, asset_account_ids: &[&AccountIdRef]) -> CurrentFees {
-        match self {
-            FeeConfiguration::V1(fees) => {
-                let mut receivers = fees.receivers.clone();
-                let mut protocol_fee = PROTOCOL_FEE;
-                if receivers.is_empty() {
-                    protocol_fee = 0;
-                } else if should_reduce_fee(asset_account_ids) {
-                    protocol_fee = PROTOCOL_FEE_REDUCED;
-                }
-                receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
-                    protocol_fee,
-                ));
-                CurrentFees { receivers }
-            }
-            FeeConfiguration::V2(fees) => {
-                let mut receivers = Vec::new();
-                let mut protocol_fee = if fees.receivers.is_empty() {
-                    0
-                } else if should_reduce_fee(asset_account_ids) {
-                    PROTOCOL_FEE_REDUCED
-                } else {
-                    PROTOCOL_FEE
-                };
-                for (receiver, amount) in fees.receivers.iter() {
-                    match amount {
-                        FeeAmount::Fixed(fee_fraction) => {
-                            receivers.push((receiver.clone(), *fee_fraction));
-                        }
-                        FeeAmount::Scheduled {
-                            end: (end_time, _), ..
-                        } => {
-                            let mut fraction = amount.get_fee_fraction();
-                            if near_sdk::env::block_timestamp() < *end_time {
-                                const PROTOCOL_SHARE_PERCENT: u32 = 5;
-                                let protocol_share = fraction
-                                    .checked_mul(PROTOCOL_SHARE_PERCENT)
-                                    .unwrap()
-                                    .checked_div(100)
-                                    .unwrap();
-                                fraction = fraction.checked_sub(protocol_share).unwrap();
-                                protocol_fee = protocol_fee.checked_add(protocol_share).unwrap();
-                            }
-                            receivers.push((receiver.clone(), fraction));
-                        }
-                        FeeAmount::Dynamic { .. } => {
-                            unimplemented!("Dynamic fee configuration is not implemented yet");
-                        }
-                    }
-                }
-                receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
-                    protocol_fee,
-                ));
-                CurrentFees { receivers }
-            }
-        }
-    }
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(PartialEq, Clone)]
-pub enum FeeReceiver {
-    Account(AccountId),
-    Pool,
-    Community(AccountId),
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone)]
-pub struct AssetWithBalance {
-    asset_id: AssetId,
-    balance: U128,
+    fees.receivers.push((
+        FeeReceiver::Account(referrer_account_id),
+        referral_fee_fraction,
+    ));
+    fees
 }

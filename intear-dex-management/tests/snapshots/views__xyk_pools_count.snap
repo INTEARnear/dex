@@ -1,0 +1,12 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"pools\", \"count\"])"
+---
+$ near-intear-dex-management xyk pools count network-config sandbox now
+exit code: 0
+--- stdout ---
+4
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pools count network-config sandbox now

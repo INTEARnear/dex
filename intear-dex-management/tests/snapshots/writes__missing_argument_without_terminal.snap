@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.run_as_given(&[\"engine\", \"pause\"])"
+---
+$ near-intear-dex-management engine pause
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine pause
+
+Error:
+   0: `near intear-dex-management engine pause` needs more arguments, and they can't be asked for because stdin isn't a terminal
+
+Suggestion: Add what comes next: [SIGNER_ACCOUNT_ID] [COMMAND], where COMMAND is network-config

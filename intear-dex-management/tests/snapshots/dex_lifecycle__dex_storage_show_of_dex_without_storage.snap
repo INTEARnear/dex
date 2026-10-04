@@ -1,0 +1,12 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.view(&[\"dex\", \"storage\", \"show\", \"alice.near/xyk\"])"
+---
+$ near-intear-dex-management dex storage show alice.near/xyk network-config sandbox now
+exit code: 0
+--- stdout ---
+alice.near/xyk has no storage balance on dex.intear.near, and no code
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management dex storage show alice.near/xyk network-config sandbox now

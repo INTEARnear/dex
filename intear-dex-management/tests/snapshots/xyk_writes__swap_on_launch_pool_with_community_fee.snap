@@ -1,0 +1,139 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "transaction_with_registration(&sandbox, &cli, \"bob.near\",\n&[\"xyk\", \"swap\", \"bob.near\", \"6\", \"buy\", \"10 INTEL\", \"max-slippage\", \"1%\",\n\"from-wallet\", \"to-balance\"]).await"
+---
+$ near-intear-dex-management xyk swap bob.near 6 buy '10 INTEL' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer bob.near · dex.intear.near
+│  Register nep141:intel.tkn.near for bob.near, which takes about 0.00107 NEAR of bob.near's storage balance
+│  Deposit 0.051577452993024277149658 NEAR from bob.near's wallet into bob.near's balance on dex.intear.near
+│  Buy 10 INTEL on pool #6 (NEAR / INTEL) of slimedragon.near/xyk for at most 0.051577452993024277149658 NEAR, 0.051066785141608195197681 NEAR at the current price
+│  The NEAR comes from bob.near's balance on dex.intear.near
+│  What the swap doesn't use of the deposit stays in that balance
+│  The INTEL goes to bob.near's balance on dex.intear.near
+│  Actions: register_assets (1 yoctoNEAR, 8 Tgas), deposit_near (0.051577452993024277149658 NEAR, 10 Tgas), execute_operations (1 yoctoNEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    bob.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  register_assets
+│                       args:         {
+│                                       "asset_ids": [
+│                                         "nep141:intel.tkn.near"
+│                                       ],
+│                                       "for": null
+│                                     }
+│                       gas:          8.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│       -- function call:
+│                       method name:  deposit_near
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      0.051577452993024277149658 NEAR
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "SwapSimple": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "message": "BgAAAA==",
+│                                             "asset_in": "near",
+│                                             "asset_out": "nep141:intel.tkn.near",
+│                                             "amount": {
+│                                               "Amount": {
+│                                                 "ExactOut": "10000000000000000000"
+│                                               }
+│                                             },
+│                                             "constraint": "51577452993024277149658"
+│                                           }
+│                                         }
+│                                       ],
+│                                       "referrer": null
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"51577452993024277149658"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"51577452993024277149658"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":6,"pool":{"Launch":{"near_amount":"5050505050505050505050508","launched_asset":{"asset_id":"nep141:intel.tkn.near","balance":"990000000000000000000"},"fees":{"receivers":[[{"Community":"carol.near"},10000],[{"Account":"plach.intear.near"},1000]]},"fee_configuration":{"receivers":[[{"Community":"carol.near"},10000]]},"phantom_liquidity_near":"5000000000000000000000000"}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":6,"request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","fees_breakdown":[[{"Community":"carol.near"},"near","510667851416081951976"],[{"Account":"plach.intear.near"},"near","51066785141608195197"]],"amount_out":"10000000000000000000"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"510667851416081951977"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"155035412458359257193119030"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:intel.tkn.near","balance":"7996089001009020948045001"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:intel.tkn.near","balance":"10000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","amount_out":"10000000000000000000","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"51577452993024277149658"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"51577452993024277149658"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":6,"pool":{"Launch":{"near_amount":"5050505050505050505050508","launched_asset":{"asset_id":"nep141:intel.tkn.near","balance":"990000000000000000000"},"fees":{"receivers":[[{"Community":"carol.near"},10000],[{"Account":"plach.intear.near"},1000]]},"fee_configuration":{"receivers":[[{"Community":"carol.near"},10000]]},"phantom_liquidity_near":"5000000000000000000000000"}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":6,"request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","fees_breakdown":[[{"Community":"carol.near"},"near","510667851416081951976"],[{"Account":"plach.intear.near"},"near","51066785141608195197"]],"amount_out":"10000000000000000000"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"510667851416081951977"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"155035412458359257193119030"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:intel.tkn.near","balance":"7996089001009020948045001"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:intel.tkn.near","balance":"10000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","amount_out":"10000000000000000000","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"51577452993024277149658"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"51577452993024277149658"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":6,"pool":{"Launch":{"near_amount":"5050505050505050505050508","launched_asset":{"asset_id":"nep141:intel.tkn.near","balance":"990000000000000000000"},"fees":{"receivers":[[{"Community":"carol.near"},10000],[{"Account":"plach.intear.near"},1000]]},"fee_configuration":{"receivers":[[{"Community":"carol.near"},10000]]},"phantom_liquidity_near":"5000000000000000000000000"}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":6,"request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","fees_breakdown":[[{"Community":"carol.near"},"near","510667851416081951976"],[{"Account":"plach.intear.near"},"near","51066785141608195197"]],"amount_out":"10000000000000000000"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"510667851416081951977"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"155035412458359257193119030"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:intel.tkn.near","balance":"7996089001009020948045001"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:intel.tkn.near","balance":"10000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"BgAAAA==","asset_in":"near","asset_out":"nep141:intel.tkn.near","amount":{"ExactOut":"10000000000000000000"},"referrer":null},"amount_in":"51066785141608195197681","amount_out":"10000000000000000000","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "register_assets" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+The "deposit_near" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+The "execute_operations" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+
+├  ✓ Swapped on pool #6 (NEAR / INTEL) of slimedragon.near/xyk; the INTEL went to bob.near's balance on dex.intear.near
+│  Pool #6 of slimedragon.near/xyk now holds 5.050505050505050505050508 NEAR and 990 INTEL
+│  Pool #6 of slimedragon.near/xyk swapped 0.051066785141608195197681 NEAR for 10 INTEL
+│  bob.near now has 0.000510667851416081951977 NEAR on dex.intear.near
+│  bob.near now has 10 INTEL on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk swap bob.near 6 buy '10 INTEL' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send

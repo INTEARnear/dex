@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use intear_dex_types::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest, DexCallResponse, DexId,
-    SwapRequest, SwapRequestAmount, SwapResponse, expect,
+    AccountOrDexId, AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest,
+    DexCallResponse, DexId, DirectWithdrawAmount, Operation, SwapOperationAmount, SwapRequest,
+    SwapRequestAmount, SwapResponse, WithdrawAmount, expect,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -14,19 +15,7 @@ use near_sdk::{
 };
 use wasmi::{Engine, Func, Linker, Module, Store};
 
-use crate::{
-    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData,
-    internal_asset_operations::AccountOrDexId,
-};
-
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[json])]
-pub enum SwapOperationAmount {
-    Amount(SwapRequestAmount),
-    OutputOfLastIn,
-    EntireBalanceIn,
-}
+use crate::{CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData};
 
 pub enum TradeAccount<'a> {
     User(AccountId),
@@ -34,82 +23,6 @@ pub enum TradeAccount<'a> {
         assets: &'a mut HashMap<AssetId, U128>,
         alleged_trader: AccountId,
     },
-}
-
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[json])]
-pub enum Operation {
-    /// Register storage for assets. No-op if assets are
-    /// already registered for the given account or dex.
-    RegisterAssets {
-        asset_ids: Vec<AssetId>,
-        r#for: Option<AccountOrDexId>,
-    },
-    /// Deploy new code to your dex.
-    DeployDexCode {
-        last_part_of_id: String,
-        code_base64: Base64VecU8,
-    },
-    /// Withdraw assets from the dex engine contract's inner
-    /// balance to the user. If amount is None, the entire
-    /// balance of the asset will be withdrawn.
-    Withdraw {
-        asset_id: AssetId,
-        amount: WithdrawAmount,
-        to: Option<AccountId>,
-        /// If the withdrawal fails and current user doesn't have
-        /// a registerd balance in this asset, the assets will be
-        /// refunded to this address. It's required that either
-        /// the user address or rescue address is registered.
-        rescue_address: Option<AccountId>,
-    },
-    /// Swap assets between two assets on the selected dex.
-    SwapSimple {
-        dex_id: DexId,
-        message: Base64VecU8,
-        asset_in: AssetId,
-        asset_out: AssetId,
-        amount: SwapOperationAmount,
-        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
-        constraint: Option<U128>,
-    },
-    /// Call a method on a dex.
-    DexCall {
-        dex_id: DexId,
-        method: String,
-        args: Base64VecU8,
-        attached_assets: HashMap<AssetId, U128>,
-    },
-    /// Transfer assets to a different account or dex.
-    TransferAsset {
-        to: AccountOrDexId,
-        asset_id: AssetId,
-        amount: U128,
-    },
-    /// Convert some of AssetId::Near to storage for an account
-    /// or a dex.
-    StorageDeposit {
-        amount: U128,
-        r#for: Option<AccountOrDexId>,
-    },
-}
-
-#[near(serializers=[json])]
-#[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum WithdrawAmount {
-    Full { at_least: Option<U128> },
-    Exact(U128),
-    PreviousSwapOutput,
-}
-
-#[near(serializers=[json])]
-#[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum DirectWithdrawAmount {
-    Full { at_least: Option<U128> },
-    Exact(U128),
 }
 
 impl DexEngine {
@@ -580,7 +493,11 @@ impl DexEngine {
                         .is_none()
                     {
                         self.user_balances
-                            .insert((account, asset_id.clone()), U128(0));
+                            .insert((account.clone(), asset_id.clone()), U128(0));
+                        self.user_registered_assets
+                            .entry(account)
+                            .or_default()
+                            .push(asset_id.clone());
                     }
                 }
                 AccountOrDexId::Dex(dex_id) => {
@@ -599,6 +516,7 @@ impl DexEngine {
             }
         }
         self.user_balances.flush();
+        self.user_registered_assets.flush();
         self.dex_balances.flush();
         self.total_in_custody.flush();
         let storage_usage_after = near_sdk::env::storage_usage();

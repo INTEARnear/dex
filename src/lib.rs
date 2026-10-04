@@ -11,19 +11,19 @@ pub mod storage_management;
 use std::collections::HashMap;
 
 use crate::{
-    internal_asset_operations::AccountOrDexId,
-    internal_operations::{DirectWithdrawAmount, Operation, TradeAccount},
+    internal_operations::TradeAccount,
     storage_management::{StorageBalances, StorageUsed},
 };
-use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
+use intear_dex_types::{
+    AccountOrDexId, AssetId, CAN_PAUSE, DexId, DirectWithdrawAmount, IntearDexEvent, Operation,
+    SwapRequestAmount, expect,
+};
 use near_sdk::{
     AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
-    json_types::{Base58CryptoHash, Base64VecU8, U128},
+    json_types::{Base64VecU8, U128},
     near,
     store::{IterableMap, LookupMap},
 };
-
-const CAN_PAUSE: &[&str] = &["slimedragon.near", "pause.slimedragon.near"];
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -47,6 +47,8 @@ pub struct DexEngine {
     /// contract for faster access. This reduces the need for
     /// ft_transfer_call, which takes time.
     user_balances: LookupMap<(AccountId, AssetId), U128>,
+    /// Assets registered for each user.
+    user_registered_assets: LookupMap<AccountId, Vec<AssetId>>,
     /// Storage balances for each user, translated to storage
     /// of this smart contract. use storage management methods
     /// to interact with it, such as storage_deposit.
@@ -75,6 +77,7 @@ enum StorageKey {
     UserBalances,
     UserStorageBalances,
     ContractTrackedBalance,
+    UserRegisteredAssets,
 }
 
 impl DexEngine {
@@ -85,62 +88,13 @@ impl DexEngine {
             dex_codes: LookupMap::new(StorageKey::DexCodes),
             dex_storage_balances: StorageBalances::new(StorageKey::DexStorageBalances),
             user_balances: LookupMap::new(StorageKey::UserBalances),
+            user_registered_assets: LookupMap::new(StorageKey::UserRegisteredAssets),
             user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
             total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
             paused: false,
             trusted_code_deployer,
         }
     }
-}
-
-#[near(event_json(standard = "inteardex"))]
-pub enum IntearDexEvent {
-    #[event_version("1.0.0")]
-    DexDeployed {
-        dex_id: DexId,
-        code_hash: Base58CryptoHash,
-    },
-    #[event_version("1.0.0")]
-    DexEvent {
-        dex_id: DexId,
-        event: near_sdk::serde_json::Value,
-        referrer: Option<AccountId>,
-        user: Option<AccountId>,
-    },
-    #[event_version("1.0.0")]
-    UserDeposit {
-        account_id: AccountId,
-        asset_id: AssetId,
-        amount: U128,
-    },
-    #[event_version("1.0.0")]
-    Withdraw {
-        from: AccountOrDexId,
-        to: AccountId,
-        asset_id: AssetId,
-        amount: U128,
-    },
-    #[event_version("1.0.0")]
-    UserBalanceUpdate {
-        account_id: AccountId,
-        asset_id: AssetId,
-        balance: U128,
-    },
-    #[event_version("1.0.0")]
-    DexBalanceUpdate {
-        dex_id: DexId,
-        asset_id: AssetId,
-        balance: U128,
-    },
-    #[event_version("1.0.0")]
-    Swap {
-        dex_id: DexId,
-        request: SwapRequest,
-        amount_in: U128,
-        amount_out: U128,
-        trader: AccountId,
-        referrer: Option<AccountId>,
-    },
 }
 
 enum CallType<'a> {
@@ -355,6 +309,7 @@ impl DexEngine {
                 },
             ),
             user_balances: old_state.user_balances,
+            user_registered_assets: LookupMap::new(StorageKey::UserRegisteredAssets),
             user_storage_balances: StorageBalances::from_parts(
                 old_state.user_storage_balances,
                 StorageUsed {
@@ -365,6 +320,22 @@ impl DexEngine {
             total_in_custody: old_state.total_in_custody,
             paused: old_state.paused,
             trusted_code_deployer,
+        }
+    }
+
+    /// Lists assets registered before `user_registered_assets` existed.
+    /// Listed entries are skipped. Storage is paid from untracked NEAR.
+    #[private]
+    pub fn backfill_registered_assets(&mut self, entries: Vec<(AccountId, AssetId)>) {
+        for (account_id, asset_id) in entries {
+            self.assert_asset_registered(
+                AccountOrDexId::Account(account_id.clone()),
+                asset_id.clone(),
+            );
+            let registered_assets = self.user_registered_assets.entry(account_id).or_default();
+            if !registered_assets.contains(&asset_id) {
+                registered_assets.push(asset_id);
+            }
         }
     }
 
@@ -401,6 +372,10 @@ impl DexEngine {
             "Only authorized accounts can pause the contract"
         );
         self.paused = false;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
     }
 
     /// Deploy or upgrade the code for a dex.
@@ -562,6 +537,31 @@ impl DexEngine {
             }
             AccountOrDexId::Dex(dex_id) => self.dex_balances.get(&(dex_id, asset_id)).copied(),
         }
+    }
+
+    pub fn registered_assets_of(
+        &self,
+        account_id: AccountId,
+        from_index: u32,
+        limit: u32,
+    ) -> Vec<(AssetId, U128)> {
+        let Some(registered_assets) = self.user_registered_assets.get(&account_id) else {
+            return Vec::new();
+        };
+        registered_assets
+            .iter()
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|asset_id| {
+                let balance = self
+                    .user_balances
+                    .get(&(account_id.clone(), asset_id.clone()))
+                    .unwrap_or_else(|| {
+                        panic!("Registered asset {asset_id} of {account_id} has no balance")
+                    });
+                (asset_id.clone(), *balance)
+            })
+            .collect()
     }
 
     pub fn total_in_custody(&self, asset_id: AssetId) -> Option<U128> {

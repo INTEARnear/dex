@@ -1,0 +1,13 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.view(&[\"engine\", \"admin\", \"custody\", \"near\"])"
+---
+$ near-intear-dex-management engine admin custody near network-config sandbox now
+exit code: 0
+--- stdout ---
+In custody                              204.79 NEAR
+Untracked (beyond custody and storage)  [BUILD DEPENDENT] NEAR
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin custody near network-config sandbox now

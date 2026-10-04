@@ -1,0 +1,82 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"liquidity\", \"remove\", \"alice.near\", \"4\", \"all\", \"max-slippage\",\n\"1%\"]).await"
+---
+$ near-intear-dex-management xyk liquidity remove alice.near 4 all max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Remove 100% of the liquidity of pool #4 (NEAR / INTEL) of slimedragon.near/xyk: about 0.1 NEAR and 2,000 INTEL, at least 0.099 NEAR and 1,980 INTEL, to alice.near's wallet
+│  Actions: execute_operations (1 yoctoNEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "DexCall": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "method": "remove_liquidity",
+│                                             "args": "BAAAAAABAADgF4Uz/sz2FAAAAAAAAAAAcKmCFQVWawAAAAAAAAA=",
+│                                             "attached_assets": {}
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"liquidity_removed","data":{"pool_id":4,"asset_0":"near","asset_1":"nep141:intel.tkn.near","removed_amount_0":"100000000000000000000000","removed_amount_1":"2000000000000000000000","burned_shares":"0","new_owned_asset_0":"0","new_owned_asset_1":"0","new_owned_shares":"0","new_total_asset_0":"0","new_total_asset_1":"0","new_total_shares":"0"}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":4,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"0"},{"asset_id":"nep141:intel.tkn.near","balance":"0"}],"fees":{"receivers":[["Pool",3000],[{"Account":"plach.intear.near"},1000]]},"fee_configuration":{"receivers":[["Pool",3000]]},"owner_id":"alice.near","locked":false}}}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150665965698645329550560245"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:intel.tkn.near","balance":"8001100000000000000000001"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Ok(())
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"withdraw","data":{"from":{"Dex":"slimedragon.near/xyk"},"to":"alice.near","asset_id":"near","amount":"100000000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [intel.tkn.near]:
+│      EVENT_JSON:{"standard":"nep141","version":"1.0.0","event":"ft_transfer","data":[{"old_owner_id":"dex.intear.near","new_owner_id":"alice.near","amount":"2000000000000000000000"}]}
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Ok(())
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"withdraw","data":{"from":{"Dex":"slimedragon.near/xyk"},"to":"alice.near","asset_id":"nep141:intel.tkn.near","amount":"2000000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Removed 100% of the liquidity of pool #4 (NEAR / INTEL) of slimedragon.near/xyk
+│  Removed 0.1 NEAR and 2,000 INTEL from pool #4 of slimedragon.near/xyk
+│  Pool #4 of slimedragon.near/xyk now holds 0 NEAR and 0 INTEL
+│  slimedragon.near/xyk sent 0.1 NEAR to alice.near's wallet
+│  slimedragon.near/xyk sent 2,000 INTEL to alice.near's wallet
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk liquidity remove alice.near 4 all max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"engine\", \"transfer\", \"alice.near\", \"near\", \"1 NEAR\", \"to\",\n\"alice.near\"]).await"
+---
+$ near-intear-dex-management engine transfer alice.near near '1 NEAR' to alice.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine transfer alice.near near '1 NEAR' to alice.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: alice.near can't transfer to itself

@@ -1,185 +1,28 @@
 mod common;
 use common::*;
 
-use intear_dex::internal_asset_operations::AccountOrDexId;
-use intear_dex::internal_operations::{Operation, SwapOperationAmount, WithdrawAmount};
-use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
+use intear_dex_types::{
+    AccountOrDexId, AssetId, DexId, Operation, SwapOperationAmount, SwapRequestAmount,
+    WithdrawAmount,
+};
 use near_sdk::AccountId;
 use near_sdk::serde_json::json;
 use near_sdk::{
     NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base64VecU8, U128},
-    near,
 };
 use near_workspaces::Contract;
 use near_workspaces::result::ExecutionFinalResult;
 use std::collections::HashMap;
-
-#[near(serializers=[borsh])]
-struct CreatePoolArgs {
-    assets: (AssetId, AssetId),
-    fees: FeeConfiguration,
-    pool_type: PoolType,
-}
-
-#[near(serializers=[borsh])]
-enum PoolType {
-    PrivateLatest,
-    PublicLatest,
-    LaunchLatest { phantom_liquidity_near: U128 },
-    LaunchV1 { phantom_liquidity_near: U128 },
-    PrivateV1,
-    PublicV1,
-    PrivateV2,
-    PublicV2,
-}
-
-type PoolId = u32;
-
-#[near(serializers=[borsh])]
-struct RegisterLiquidityArgs {
-    pool_id: PoolId,
-}
-
-type SharesBalance = U128;
-
-#[near(serializers=[borsh])]
-struct AddLiquidityArgs {
-    pool_id: PoolId,
-    min_shares_received: Option<SharesBalance>,
-}
-
-#[near(serializers=[borsh])]
-struct RemoveLiquidityArgs {
-    pool_id: PoolId,
-    shares_to_remove: Option<SharesBalance>,
-    min_assets_received: Option<(U128, U128)>,
-}
-
-#[near(serializers=[borsh])]
-struct UpgradePoolArgs {
-    pool_id: PoolId,
-}
-
-#[near(serializers=[borsh])]
-struct LockPoolArgs {
-    pool_id: PoolId,
-}
-
-#[near(serializers=[borsh])]
-struct SwapArgs {
-    pool_id: PoolId,
-}
-
-#[near(serializers=[borsh])]
-enum ReferralSettings {
-    V1 {
-        fee_fraction: u32,
-        fee_fraction_reduced: u32,
-    },
-}
-
-#[near(serializers=[borsh])]
-struct SetReferrerSettingsArgs {
-    new_settings: ReferralSettings,
-}
-
-#[near(serializers=[borsh])]
-struct RegisterFeeAssetsArgs {
-    asset_ids: Vec<AssetId>,
-}
-
-#[near(serializers=[borsh, json])]
-enum FeeConfiguration {
-    V1(CurrentFees),
-    V2(V1FeeConfiguration),
-}
-
-#[near(serializers=[borsh, json])]
-struct CurrentFees {
-    receivers: Vec<(FeeReceiver, u32)>,
-}
-
-#[near(serializers=[borsh, json])]
-struct V1FeeConfiguration {
-    receivers: Vec<(FeeReceiver, FeeAmount)>,
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-enum FeeAmount {
-    Fixed(u32),
-    Scheduled {
-        start: (u64, u32),
-        end: (u64, u32),
-        curve: ScheduledFeeCurve,
-    },
-    Dynamic {
-        min: u32,
-        max: u32,
-    },
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
-enum ScheduledFeeCurve {
-    Linear,
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-enum FeeReceiver {
-    Account(AccountId),
-    Pool,
-    Community(AccountId),
-}
-
-#[near(serializers=[borsh])]
-struct GetPoolArgs {
-    pool_id: PoolId,
-}
-
-#[derive(PartialEq, Debug)]
-#[near(serializers=[borsh])]
-struct AssetWithBalance {
-    asset_id: AssetId,
-    balance: U128,
-}
-
-#[near(serializers=[borsh])]
-enum PoolView {
-    Private {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        owner_id: AccountId,
-        locked: bool,
-    },
-    Public {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        total_shares: Option<U128>,
-    },
-    Launch {
-        near_amount: U128,
-        launched_asset: AssetWithBalance,
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        phantom_liquidity_near: U128,
-    },
-}
-
-#[near(serializers=[borsh])]
-struct WithdrawFeesArgs {
-    assets: Vec<AssetId>,
-}
-
-#[near(serializers=[borsh])]
-struct WithdrawCommunityFeeArgs {
-    account_id: AccountId,
-}
+use xyk_dex_types::{
+    AddLiquidityArgs, CreatePoolArgs, CurrentFees, FeeAmount, FeeConfiguration, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    GetReferralSettingsArgs, LockPoolArgs, PoolId, PoolType, PoolView, ReferralSettings,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve,
+    SetReferrerSettingsArgs, SwapArgs, UpgradePoolArgs, V2FeeConfiguration,
+    WithdrawCommunityFeeArgs, WithdrawFeesArgs,
+};
 
 async fn get_pool(
     dex_engine_contract: &Contract,
@@ -223,7 +66,10 @@ async fn get_pool_shares(
         .args_json(json!({
             "dex_id": dex_id,
             "method": "get_pool_shares",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&(vec![pool_id], account_id.clone())).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetPoolSharesArgs {
+                pool_ids: vec![pool_id],
+                account_id: account_id.clone(),
+            }).unwrap()),
         }))
         .await
         .unwrap();
@@ -242,7 +88,10 @@ async fn get_pending_fees(
         .args_json(json!({
             "dex_id": dex_id,
             "method": "get_pending_fees",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&(account_id.clone(), asset_ids)).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetPendingFeesArgs {
+                account_id: account_id.clone(),
+                asset_ids,
+            }).unwrap()),
         }))
         .await
         .unwrap();
@@ -259,7 +108,28 @@ async fn get_community_owned_fees(
         .args_json(json!({
             "dex_id": dex_id,
             "method": "get_community_owned_fees",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(account_id).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetCommunityOwnedFeesArgs {
+                account_id: account_id.clone(),
+            }).unwrap()),
+        }))
+        .await
+        .unwrap();
+    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+}
+
+async fn get_referral_settings(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+    account_id: &AccountId,
+) -> Option<ReferralSettings> {
+    let result = dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_referral_settings",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetReferralSettingsArgs {
+                account_id: account_id.clone(),
+            }).unwrap()),
         }))
         .await
         .unwrap();
@@ -2208,7 +2078,7 @@ async fn test_xyk_scheduled_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V2(V1FeeConfiguration {
+                            fees: FeeConfiguration::V2(V2FeeConfiguration {
                                 receivers: vec![(
                                     FeeReceiver::Account(user2.id().clone()),
                                     FeeAmount::Scheduled {
@@ -3629,6 +3499,11 @@ async fn test_xyk_referral_fee_requires_registered_fee_asset() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    assert!(
+        get_referral_settings(&dex_engine_contract, &dex_id, user2.id())
+            .await
+            .is_none()
+    );
     let result = user2
         .call(dex_engine_contract.id(), "execute_operations")
         .max_gas()
@@ -3658,6 +3533,14 @@ async fn test_xyk_referral_fee_requires_registered_fee_asset() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+    assert!(matches!(
+        get_referral_settings(&dex_engine_contract, &dex_id, user2.id()).await,
+        Some(ReferralSettings::V1 {
+            fee_fraction,
+            fee_fraction_reduced,
+        }) if fee_fraction == referral_fee_fraction
+            && fee_fraction_reduced == referral_fee_fraction_reduced
+    ));
 
     let result = user1
         .call(dex_engine_contract.id(), "execute_operations")

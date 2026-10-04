@@ -1,0 +1,70 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "without_code_size(cli.transaction(\"slimedragon.near\",\n&[\"xyk\", \"deploy\", \"slimedragon.near\", \"--name\", \"xyk-test\", \"use-file\",\nxyk_wasm_path]).await).replace(xyk_wasm_path, \"[TEMP]/xyk_dex.wasm\")"
+---
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer slimedragon.near · dex.intear.near
+│  Deposit [AMOUNT] NEAR into slimedragon.near/xyk-test's storage balance on dex.intear.near, which then covers the code
+│  Deploy [SIZE] bytes of code (sha256 [HASH]) to slimedragon.near/xyk-test, a new dex
+│  Actions: dex_storage_deposit ([AMOUNT] NEAR, 10 Tgas), deploy_dex_code (1 yoctoNEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  dex_storage_deposit
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk-test"
+│                                     }
+│                       gas:          10.0 Tgas
+│                       deposit:      [AMOUNT] NEAR
+│       -- function call:
+│                       method name:  deploy_dex_code
+│                       args:         {
+│                                       "last_part_of_id": "xyk-test",
+│                                       "code_base64": "<[LENGTH] characters>"
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_deployed","data":{"dex_id":"slimedragon.near/xyk-test","code_hash":"[HASH]"}}
+│    Logs [slimedragon.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_deployed","data":{"dex_id":"slimedragon.near/xyk-test","code_hash":"[HASH]"}}
+│    Logs [slimedragon.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "dex_storage_deposit" call to <dex.intear.near> on behalf of <slimedragon.near> succeeded.
+The "deploy_dex_code" call to <dex.intear.near> on behalf of <slimedragon.near> succeeded.
+
+├  ✓ Deployed [SIZE] bytes of code (sha256 [HASH]) to slimedragon.near/xyk-test
+│  Next, initialize it: near intear-dex-management xyk --dex slimedragon.near/xyk-test init slimedragon.near network-config sandbox
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

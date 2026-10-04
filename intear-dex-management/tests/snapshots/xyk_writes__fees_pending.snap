@@ -1,0 +1,18 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"fees\", \"pending\", \"alice.near\", \"all\"])"
+---
+$ near-intear-dex-management xyk fees pending alice.near all network-config sandbox now
+exit code: 0
+--- stdout ---
++-------------------------------+-------------+
+| Asset                         | Pending     |
++-------------------------------+-------------+
+| near                          | 0.0005 NEAR |
+| nep141:usdt.tether-token.near | 0.0005 USDt |
+| nep141:intel.tkn.near         | 0 INTEL     |
++-------------------------------+-------------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk fees pending alice.near all network-config sandbox now

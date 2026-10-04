@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"bob.near\",\n&[\"xyk\", \"liquidity\", \"remove\", \"bob.near\", \"2\", \"all\", \"max-slippage\",\n\"1%\"]).await"
+---
+$ near-intear-dex-management xyk liquidity remove bob.near 2 all max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk liquidity remove bob.near 2 all max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+
+Error:
+   0: bob.near has no shares in pool #2 of slimedragon.near/xyk
+
+Suggestion: `xyk liquidity show` shows the shares of an account

@@ -1,9 +1,7 @@
 mod common;
 use common::*;
 
-use intear_dex::internal_asset_operations::AccountOrDexId;
-use intear_dex::internal_operations::Operation;
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation};
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::json_types::U64;
 use near_sdk::serde_json::json;

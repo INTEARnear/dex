@@ -1,0 +1,15 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"quote\", \"2\", \"sell\", \"1000000000000000000000000 raw near\"])"
+---
+$ near-intear-dex-management xyk quote 2 sell '1000000000000000000000000 raw near' network-config sandbox now
+exit code: 0
+--- stdout ---
+Pool         #2 (NEAR / INTEL) on slimedragon.near/xyk
+You pay      1 NEAR
+You receive  19,530.943603419876068711 INTEL
+Fees         0.4% of the input, included
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk quote 2 sell '1000000000000000000000000 raw near' network-config sandbox now

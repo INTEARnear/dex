@@ -1,0 +1,12 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"storage\", \"show\", \"bob.near\"])"
+---
+$ near-intear-dex-management engine storage show bob.near network-config sandbox now
+exit code: 0
+--- stdout ---
+bob.near has no storage balance on dex.intear.near
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine storage show bob.near network-config sandbox now

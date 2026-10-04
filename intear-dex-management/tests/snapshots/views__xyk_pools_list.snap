@@ -1,0 +1,19 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"pools\", \"list\"])"
+---
+$ near-intear-dex-management xyk pools list network-config sandbox now
+exit code: 0
+--- stdout ---
++------+---------+--------------+------------------------------+---------+
+| Pool | Kind    | Pair         | Reserves                     | Fee     |
++------+---------+--------------+------------------------------+---------+
+| #0   | private | NEAR / USDt  | 100 NEAR / 300 USDt          | 0.2501% |
+| #1   | private | USDt / INTEL | 1,000 USDt / 2,000,000 INTEL | 1.2%    |
+| #2   | public  | NEAR / INTEL | 50 NEAR / 1,000,000 INTEL    | 0.4%    |
+| #3   | launch  | NEAR / INTEL | 10 NEAR / 5,000,000 INTEL    | 0%      |
++------+---------+--------------+------------------------------+---------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pools list network-config sandbox now

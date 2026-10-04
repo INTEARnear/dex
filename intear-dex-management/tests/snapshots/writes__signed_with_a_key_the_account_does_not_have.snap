@@ -1,0 +1,32 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"bob.near\",\n&[\"engine\", \"storage\", \"deposit\", \"alice.near\", \"0.01 NEAR\"]).await"
+---
+$ near-intear-dex-management engine storage deposit alice.near '0.01 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+exit code: 1
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Deposit 0.01 NEAR into alice.near's storage balance on dex.intear.near
+│  Actions: storage_deposit (0.01 NEAR, 10 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  storage_deposit
+│                       args:         {
+│                                       "account_id": "alice.near"
+│                                     }
+│                       gas:          10.0 Tgas
+│                       deposit:      0.01 NEAR
+│
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine storage deposit alice.near '0.01 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+
+Error:
+   0: Cannot sign a transaction due to an error while fetching the most recent nonce value on network <sandbox>
+   1: handler error: [Access key for public key ed25519:[HASH] does not exist while viewing]
+
+Suggestion: The signing key isn't one of the signer's access keys. Sign with a key the account has

@@ -1,0 +1,12 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"liquidity\", \"show\", \"carol.near\"])"
+---
+$ near-intear-dex-management xyk liquidity show carol.near network-config sandbox now
+exit code: 0
+--- stdout ---
+carol.near has no liquidity on slimedragon.near/xyk
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk liquidity show carol.near network-config sandbox now

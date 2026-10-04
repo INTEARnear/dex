@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"info\"])"
+---
+$ near-intear-dex-management engine info network-config sandbox now
+exit code: 0
+--- stdout ---
+Paused                 no
+Trusted code deployer  slimedragon.near
+User storage           2 NEAR total, 1.98304 NEAR available
+Dex storage            20.01591 NEAR total, [BUILD DEPENDENT] NEAR available
+NEAR in custody        204.79 NEAR
+Untracked NEAR         [BUILD DEPENDENT] NEAR
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine info network-config sandbox now

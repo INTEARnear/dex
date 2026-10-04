@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"liquidity\", \"show\", \"alice.near\"])"
+---
+$ near-intear-dex-management xyk liquidity show alice.near network-config sandbox now
+exit code: 0
+--- stdout ---
++------+--------------+---------+-----------------+---------+---------------------------------------------------+
+| Pool | Pair         | Kind    | Shares          | Share   | Holds                                             |
++------+--------------+---------+-----------------+---------+---------------------------------------------------+
+| #2   | NEAR / INTEL | public  | 199999999999999 | 0.0199% | 0.00999999999999995 NEAR / 199.999999999999 INTEL |
+| #4   | NEAR / INTEL | private | owner           | 100%    | 0.1 NEAR / 2,000 INTEL                            |
++------+--------------+---------+-----------------+---------+---------------------------------------------------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk liquidity show alice.near network-config sandbox now

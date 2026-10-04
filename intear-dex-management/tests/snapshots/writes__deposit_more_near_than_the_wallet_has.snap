@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"carol.near\",\n&[\"engine\", \"deposit\", \"carol.near\", \"near\", \"1000 NEAR\"]).await"
+---
+$ near-intear-dex-management engine deposit carol.near near '1000 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine deposit carol.near near '1000 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send
+
+Error:
+   0: carol.near can spend 100 NEAR from its wallet, but this transaction needs up to 1,000.007800000000000000000001 NEAR

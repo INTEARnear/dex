@@ -1,0 +1,78 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "transaction_with_registration(&sandbox, &cli, \"alice.near\",\n&[\"engine\", \"transfer\", \"alice.near\", \"nep141:usdt.tether-token.near\",\n\"0.5 USDt\", \"to\", \"carol.near\",]).await"
+---
+$ near-intear-dex-management engine transfer alice.near nep141:usdt.tether-token.near '0.5 USDt' to carol.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Register nep141:usdt.tether-token.near for carol.near, which takes about 0.00125 NEAR of alice.near's storage balance
+│  Transfer 0.5 USDt from alice.near to carol.near on dex.intear.near
+│  Actions: execute_operations (1 yoctoNEAR, 15 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "RegisterAssets": {
+│                                             "asset_ids": [
+│                                               "nep141:usdt.tether-token.near"
+│                                             ],
+│                                             "for": {
+│                                               "Account": "carol.near"
+│                                             }
+│                                           }
+│                                         },
+│                                         {
+│                                           "TransferAsset": {
+│                                             "to": {
+│                                               "Account": "carol.near"
+│                                             },
+│                                             "asset_id": "nep141:usdt.tether-token.near",
+│                                             "amount": "500000"
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          15.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      Fully authorized: true
+│      Executing operation 0
+│      Executing operation 1
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"nep141:usdt.tether-token.near","balance":"243000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"nep141:usdt.tether-token.near","balance":"500000"}}
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Transferred 0.5 USDt from alice.near to carol.near on dex.intear.near
+│  alice.near now has 243 USDt on dex.intear.near
+│  carol.near now has 0.5 USDt on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine transfer alice.near nep141:usdt.tether-token.near '0.5 USDt' to carol.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

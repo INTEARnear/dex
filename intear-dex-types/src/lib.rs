@@ -1,7 +1,15 @@
 #![deny(clippy::arithmetic_side_effects)]
 
+#[cfg(feature = "json")]
+mod engine_api;
+
 use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
 
+#[cfg(feature = "json")]
+pub use engine_api::{
+    AccountOrDexId, DepositMessage, DirectWithdrawAmount, IntearDexEvent, Operation,
+    SwapOperationAmount, WithdrawAmount,
+};
 #[cfg(feature = "json")]
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use near_sdk::{
@@ -9,6 +17,8 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near,
 };
+
+pub const CAN_PAUSE: &[&str] = &["slimedragon.near", "pause.slimedragon.near"];
 
 /// Request for a swap operation.
 #[derive(Clone)]
@@ -182,7 +192,7 @@ pub enum SwapRequestAmount {
     ExactOut(U128),
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 #[near(serializers=[borsh])]
 pub struct DexId {

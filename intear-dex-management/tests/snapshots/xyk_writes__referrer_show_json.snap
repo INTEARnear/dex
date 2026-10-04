@@ -1,0 +1,29 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"referrer\", \"show\", \"carol.near\"])"
+---
+$ near-intear-dex-management --json xyk referrer show carol.near network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "account_id": "carol.near",
+  "dex_id": "slimedragon.near/xyk",
+  "referral_fees": {
+    "fee": {
+      "fraction": 1000,
+      "percent": "0.1"
+    },
+    "reduced_fee": {
+      "fraction": 500,
+      "percent": "0.05"
+    }
+  },
+  "fee_asset_ids": [
+    "near",
+    "nep141:usdt.tether-token.near"
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk referrer show carol.near network-config sandbox now

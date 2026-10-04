@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.view(&[\"engine\", \"admin\", \"custody\", \"nep141:usdt.tether-token.near\"])"
+---
+$ near-intear-dex-management engine admin custody nep141:usdt.tether-token.near network-config sandbox now
+exit code: 0
+--- stdout ---
+In custody               5,250.5 USDt
+Held by dex.intear.near  5,250.5 USDt
+Untracked                0 USDt
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin custody nep141:usdt.tether-token.near network-config sandbox now

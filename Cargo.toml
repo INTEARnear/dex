@@ -1,5 +1,14 @@
 [workspace]
-members = ["intear-dex-types", "dexes/simple-amm", "dexes/minimal", "dexes/otc", "dexes/xyk", "manage"]
+members = [
+    "intear-dex-types",
+    "dexes/simple-amm",
+    "dexes/minimal",
+    "dexes/otc",
+    "dexes/xyk",
+    "dexes/xyk/types",
+    "intear-dex-management",
+    "test-support",
+]
 
 [package]
 name = "intear-dex"
@@ -36,6 +45,8 @@ near-sdk = { version = "5.29", features = ["unit-testing"] }
 near-workspaces = { version = "0.22", features = ["unstable"] }
 tokio = { version = "1.12.0", features = ["full"] }
 near-crypto = "0.34.2"
+xyk-dex-types = { path = "./dexes/xyk/types" }
+intear-dex-test-support = { path = "./test-support" }
 
 [profile.release]
 codegen-units = 1

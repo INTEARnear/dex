@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"liquidity\", \"add\", \"alice.near\", \"6\", \"0.1 NEAR\", \"10 INTEL\",\n\"max-slippage\", \"1%\"]).await"
+---
+$ near-intear-dex-management xyk liquidity add alice.near 6 '0.1 NEAR' '10 INTEL' max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk liquidity add alice.near 6 '0.1 NEAR' '10 INTEL' max-slippage '1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: Pool #6 of slimedragon.near/xyk is a launch pool, and it takes no liquidity after it's created

@@ -1,0 +1,5 @@
+---
+source: intear-dex-management/src/outcome/mod.rs
+expression: report.to_string()
+---
+The withdrawal failed on-chain: dex.intear.near refused it: Asset nep141:usdt.tether-token.near is not registered for Account(bob.near)

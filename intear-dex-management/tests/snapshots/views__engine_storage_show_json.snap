@@ -1,0 +1,25 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"engine\", \"storage\", \"show\", \"alice.near\"])"
+---
+$ near-intear-dex-management --json engine storage show alice.near network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "account_id": "alice.near",
+  "registered": true,
+  "total": {
+    "raw": "1000000000000000000000000",
+    "decimal": "1",
+    "symbol": "NEAR"
+  },
+  "available": {
+    "raw": "995470000000000000000000",
+    "decimal": "0.99547",
+    "symbol": "NEAR"
+  }
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine storage show alice.near network-config sandbox now

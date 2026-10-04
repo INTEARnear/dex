@@ -1,0 +1,70 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"--dex\", \"slimedragon.near/xyk-test\", \"init\", \"alice.near\"]).await"
+---
+$ near-intear-dex-management xyk --dex slimedragon.near/xyk-test init alice.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+""
+""
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Deposit 0.005 NEAR into slimedragon.near/xyk-test's storage balance on dex.intear.near, which then covers the state
+│  Initialize slimedragon.near/xyk-test with no pools, so that pools can be created on it
+│  Actions: dex_storage_deposit (0.005 NEAR, 10 Tgas), dex_call (1 yoctoNEAR, 50 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  dex_storage_deposit
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk-test"
+│                                     }
+│                       gas:          10.0 Tgas
+│                       deposit:      0.005 NEAR
+│       -- function call:
+│                       method name:  dex_call
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk-test",
+│                                       "method": "new",
+│                                       "args": "",
+│                                       "attached_assets": {},
+│                                       "referrer": null
+│                                     }
+│                       gas:          50.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+
+
+The "dex_storage_deposit" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+The "dex_call" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Initialized slimedragon.near/xyk-test
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk --dex slimedragon.near/xyk-test init alice.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

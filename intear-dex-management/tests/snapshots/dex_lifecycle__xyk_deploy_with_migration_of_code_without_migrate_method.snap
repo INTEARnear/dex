@@ -1,0 +1,49 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.transaction(\"slimedragon.near\",\n&deploy_test_dex_code(empty_wasm_path,\ntrue).iter().map(String::as_str).collect::<Vec<_>>()).await.replace(empty_wasm_path,\n\"[TEMP]/empty.wasm\")"
+---
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 1
+--- stdout ---
+--- stderr ---
+├  sandbox · signer slimedragon.near · dex.intear.near
+│  Deploy 8 bytes of code (sha256 [HASH]) to slimedragon.near/xyk-test, replacing its code
+│  Migrate the state of slimedragon.near/xyk-test to the new code's layout in the same receipt; if the migration fails, the deploy is reverted too
+│  Actions: deploy_dex_code (1 yoctoNEAR, 100 Tgas), dex_call (1 yoctoNEAR, 50 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  deploy_dex_code
+│                       args:         {
+│                                       "last_part_of_id": "xyk-test",
+│                                       "code_base64": "AGFzbQEAAAA="
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│       -- function call:
+│                       method name:  dex_call
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk-test",
+│                                       "method": "migrate",
+│                                       "args": "",
+│                                       "attached_assets": {},
+│                                       "referrer": null
+│                                     }
+│                       gas:          50.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+
+Error:
+   0: The deploy failed on-chain: dex.intear.near refused it: Failed to get function 'migrate'
+
+Note: Transaction: http://[SANDBOX RPC]/transactions/[HASH]
+Suggestion: The new code has no migrate method, so the deploy was reverted with the migration; deploy it without --migrate

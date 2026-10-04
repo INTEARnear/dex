@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.view(&[\"--json\", \"dex\", \"view\", \"slimedragon.near/xyk\", \"get_pool_count\",\n\"\"])"
+---
+$ near-intear-dex-management --json dex view slimedragon.near/xyk get_pool_count '' network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "dex_id": "slimedragon.near/xyk",
+  "method": "get_pool_count",
+  "result_base64": "BAAAAA=="
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json dex view slimedragon.near/xyk get_pool_count '' network-config sandbox now

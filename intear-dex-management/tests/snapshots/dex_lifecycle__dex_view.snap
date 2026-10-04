@@ -1,0 +1,15 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.view(&[\"dex\", \"view\", \"slimedragon.near/xyk\", \"get_pool_count\", \"\"])"
+---
+$ near-intear-dex-management dex view slimedragon.near/xyk get_pool_count '' network-config sandbox now
+exit code: 0
+--- stdout ---
+Dex              slimedragon.near/xyk
+Method           get_pool_count
+Result (base64)  BAAAAA==
+Result size      4 bytes
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management dex view slimedragon.near/xyk get_pool_count '' network-config sandbox now

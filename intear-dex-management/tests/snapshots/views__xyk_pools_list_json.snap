@@ -1,0 +1,272 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"pools\", \"list\"])"
+---
+$ near-intear-dex-management --json xyk pools list network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "dex_id": "slimedragon.near/xyk",
+  "pools": [
+    {
+      "pool_id": 0,
+      "kind": "private",
+      "assets": [
+        {
+          "asset_id": "near",
+          "reserve": {
+            "raw": "100000000000000000000000000",
+            "decimal": "100",
+            "symbol": "NEAR"
+          }
+        },
+        {
+          "asset_id": "nep141:usdt.tether-token.near",
+          "reserve": {
+            "raw": "300000000",
+            "decimal": "300",
+            "symbol": "USDt"
+          }
+        }
+      ],
+      "fees": {
+        "total": {
+          "fraction": 2501,
+          "percent": "0.2501"
+        },
+        "receivers": [
+          {
+            "receiver": "pool",
+            "fee": {
+              "fraction": 2000,
+              "percent": "0.2"
+            }
+          },
+          {
+            "receiver": "alice.near",
+            "fee": {
+              "fraction": 500,
+              "percent": "0.05"
+            }
+          },
+          {
+            "receiver": "protocol",
+            "fee": {
+              "fraction": 1,
+              "percent": "0.0001"
+            }
+          }
+        ]
+      },
+      "fee_configuration": {
+        "receivers": [
+          {
+            "receiver": "pool",
+            "fixed": {
+              "fraction": 2000,
+              "percent": "0.2"
+            }
+          },
+          {
+            "receiver": "alice.near",
+            "fixed": {
+              "fraction": 500,
+              "percent": "0.05"
+            }
+          }
+        ]
+      },
+      "owner_id": "slimedragon.near",
+      "locked": false
+    },
+    {
+      "pool_id": 1,
+      "kind": "private",
+      "assets": [
+        {
+          "asset_id": "nep141:usdt.tether-token.near",
+          "reserve": {
+            "raw": "1000000000",
+            "decimal": "1000",
+            "symbol": "USDt"
+          }
+        },
+        {
+          "asset_id": "nep141:intel.tkn.near",
+          "reserve": {
+            "raw": "2000000000000000000000000",
+            "decimal": "2000000",
+            "symbol": "INTEL"
+          }
+        }
+      ],
+      "fees": {
+        "total": {
+          "fraction": 12000,
+          "percent": "1.2"
+        },
+        "receivers": [
+          {
+            "receiver": "alice.near",
+            "fee": {
+              "fraction": 10000,
+              "percent": "1"
+            }
+          },
+          {
+            "receiver": "pool",
+            "fee": {
+              "fraction": 1000,
+              "percent": "0.1"
+            }
+          },
+          {
+            "receiver": "protocol",
+            "fee": {
+              "fraction": 1000,
+              "percent": "0.1"
+            }
+          }
+        ]
+      },
+      "fee_configuration": {
+        "receivers": [
+          {
+            "receiver": "alice.near",
+            "scheduled": {
+              "start": {
+                "time": "2025-01-01T00:00:00Z",
+                "fee": {
+                  "fraction": 20000,
+                  "percent": "2"
+                }
+              },
+              "end": {
+                "time": "2025-07-01T00:00:00Z",
+                "fee": {
+                  "fraction": 10000,
+                  "percent": "1"
+                }
+              },
+              "curve": "linear"
+            }
+          },
+          {
+            "receiver": "pool",
+            "fixed": {
+              "fraction": 1000,
+              "percent": "0.1"
+            }
+          }
+        ]
+      },
+      "owner_id": "slimedragon.near",
+      "locked": true
+    },
+    {
+      "pool_id": 2,
+      "kind": "public",
+      "assets": [
+        {
+          "asset_id": "near",
+          "reserve": {
+            "raw": "50000000000000000000000000",
+            "decimal": "50",
+            "symbol": "NEAR"
+          }
+        },
+        {
+          "asset_id": "nep141:intel.tkn.near",
+          "reserve": {
+            "raw": "1000000000000000000000000",
+            "decimal": "1000000",
+            "symbol": "INTEL"
+          }
+        }
+      ],
+      "fees": {
+        "total": {
+          "fraction": 4000,
+          "percent": "0.4"
+        },
+        "receivers": [
+          {
+            "receiver": "pool",
+            "fee": {
+              "fraction": 3000,
+              "percent": "0.3"
+            }
+          },
+          {
+            "receiver": "protocol",
+            "fee": {
+              "fraction": 1000,
+              "percent": "0.1"
+            }
+          }
+        ]
+      },
+      "fee_configuration": {
+        "receivers": [
+          {
+            "receiver": "pool",
+            "fixed": {
+              "fraction": 3000,
+              "percent": "0.3"
+            }
+          }
+        ]
+      },
+      "total_shares": "1000000000000000000"
+    },
+    {
+      "pool_id": 3,
+      "kind": "launch",
+      "assets": [
+        {
+          "asset_id": "near",
+          "reserve": {
+            "raw": "10000000000000000000000000",
+            "decimal": "10",
+            "symbol": "NEAR"
+          }
+        },
+        {
+          "asset_id": "nep141:intel.tkn.near",
+          "reserve": {
+            "raw": "5000000000000000000000000",
+            "decimal": "5000000",
+            "symbol": "INTEL"
+          }
+        }
+      ],
+      "fees": {
+        "total": {
+          "fraction": 0,
+          "percent": "0"
+        },
+        "receivers": [
+          {
+            "receiver": "protocol",
+            "fee": {
+              "fraction": 0,
+              "percent": "0"
+            }
+          }
+        ]
+      },
+      "fee_configuration": {
+        "receivers": []
+      },
+      "phantom_liquidity_near": {
+        "raw": "10000000000000000000000000",
+        "decimal": "10",
+        "symbol": "NEAR"
+      }
+    }
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk pools list network-config sandbox now

@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"info\"])"
+---
+$ near-intear-dex-management engine info network-config sandbox now
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine info network-config sandbox now
+
+Error:
+   0: dex.intear.near doesn't exist on network sandbox (RPC http://[SANDBOX RPC]/)

@@ -1,0 +1,60 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"slimedragon.near\",\n&[\"engine\", \"deposit\", \"slimedragon.near\", \"nep141:usdt.tether-token.near\",\n\"10 USDt\"]).await"
+---
+$ near-intear-dex-management engine deposit slimedragon.near nep141:usdt.tether-token.near '10 USDt' network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 0
+--- stdout ---
+"10000000"
+--- stderr ---
+├  sandbox · signer slimedragon.near · usdt.tether-token.near
+│  Send 10 USDt to dex.intear.near with ft_transfer_call, into slimedragon.near's balance there
+│  Actions: ft_transfer_call (1 yoctoNEAR, 50 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  usdt.tether-token.near
+│    actions:
+│       -- function call:
+│                       method name:  ft_transfer_call
+│                       args:         {
+│                                       "receiver_id": "dex.intear.near",
+│                                       "amount": "10000000",
+│                                       "msg": ""
+│                                     }
+│                       gas:          50.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [usdt.tether-token.near]:
+│      EVENT_JSON:{"standard":"nep141","version":"1.0.0","event":"ft_transfer","data":[{"old_owner_id":"slimedragon.near","new_owner_id":"dex.intear.near","amount":"10000000"}]}
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"slimedragon.near","asset_id":"nep141:usdt.tether-token.near","balance":"3710000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"slimedragon.near","asset_id":"nep141:usdt.tether-token.near","amount":"10000000"}}
+│    Logs [slimedragon.near]:   No logs
+│    Logs [usdt.tether-token.near]:   No logs
+│    Logs [slimedragon.near]:   No logs
+│    Logs [slimedragon.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+
+
+The "ft_transfer_call" call to <usdt.tether-token.near> on behalf of <slimedragon.near> succeeded.
+
+├  ✓ Deposited 10 USDt into slimedragon.near's balance on dex.intear.near
+│  slimedragon.near now has 3,710 USDt on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine deposit slimedragon.near nep141:usdt.tether-token.near '10 USDt' network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

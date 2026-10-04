@@ -1,0 +1,55 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "transaction_with_registration(&sandbox, &cli, \"slimedragon.near\",\n&[\"engine\", \"assets\", \"register\", \"slimedragon.near\", \"nep141:intel.tkn.near\",\n\"--for\", \"carol.near\",]).await"
+---
+$ near-intear-dex-management engine assets register slimedragon.near nep141:intel.tkn.near --for carol.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer slimedragon.near · dex.intear.near
+│  Register nep141:intel.tkn.near for carol.near, which takes about 0.00168 NEAR of slimedragon.near's storage balance
+│  Actions: register_assets (1 yoctoNEAR, 8 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  register_assets
+│                       args:         {
+│                                       "asset_ids": [
+│                                         "nep141:intel.tkn.near"
+│                                       ],
+│                                       "for": {
+│                                         "Account": "carol.near"
+│                                       }
+│                                     }
+│                       gas:          8.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [slimedragon.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "register_assets" call to <dex.intear.near> on behalf of <slimedragon.near> succeeded.
+
+├  ✓ Registered nep141:intel.tkn.near for carol.near on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine assets register slimedragon.near nep141:intel.tkn.near --for carol.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

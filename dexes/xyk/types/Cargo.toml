@@ -1,0 +1,8 @@
+[package]
+name = "xyk-dex-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+near-sdk = { version = "5", default-features = false }
+intear-dex-types = { path = "../../../intear-dex-types", features = ["json"] }

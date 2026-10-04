@@ -1,0 +1,65 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"liquidity\", \"show\", \"alice.near\"])"
+---
+$ near-intear-dex-management --json xyk liquidity show alice.near network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "account_id": "alice.near",
+  "dex_id": "slimedragon.near/xyk",
+  "positions": [
+    {
+      "pool_id": 2,
+      "kind": "public",
+      "shares": "199999999999999",
+      "share_of_pool": "0.0199%",
+      "holds": [
+        {
+          "asset_id": "near",
+          "amount": {
+            "raw": "9999999999999950000000",
+            "decimal": "0.00999999999999995",
+            "symbol": "NEAR"
+          }
+        },
+        {
+          "asset_id": "nep141:intel.tkn.near",
+          "amount": {
+            "raw": "199999999999999000000",
+            "decimal": "199.999999999999",
+            "symbol": "INTEL"
+          }
+        }
+      ]
+    },
+    {
+      "pool_id": 4,
+      "kind": "private",
+      "shares": null,
+      "share_of_pool": "100%",
+      "holds": [
+        {
+          "asset_id": "near",
+          "amount": {
+            "raw": "100000000000000000000000",
+            "decimal": "0.1",
+            "symbol": "NEAR"
+          }
+        },
+        {
+          "asset_id": "nep141:intel.tkn.near",
+          "amount": {
+            "raw": "2000000000000000000000",
+            "decimal": "2000",
+            "symbol": "INTEL"
+          }
+        }
+      ]
+    }
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk liquidity show alice.near network-config sandbox now

@@ -1,0 +1,43 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"engine\", \"balance\", \"alice.near\", \"all\"])"
+---
+$ near-intear-dex-management --json engine balance alice.near all network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "owner": "alice.near",
+  "balances": [
+    {
+      "asset_id": "near",
+      "registered": true,
+      "balance": {
+        "raw": "5000000000000000000000000",
+        "decimal": "5",
+        "symbol": "NEAR"
+      }
+    },
+    {
+      "asset_id": "nep141:usdt.tether-token.near",
+      "registered": true,
+      "balance": {
+        "raw": "250500000",
+        "decimal": "250.5",
+        "symbol": "USDt"
+      }
+    },
+    {
+      "asset_id": "nep141:intel.tkn.near",
+      "registered": true,
+      "balance": {
+        "raw": "0",
+        "decimal": "0",
+        "symbol": "INTEL"
+      }
+    }
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine balance alice.near all network-config sandbox now

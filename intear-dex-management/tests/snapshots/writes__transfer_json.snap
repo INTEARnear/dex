@@ -1,0 +1,66 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"--json\", \"engine\", \"transfer\", \"alice.near\", \"near\", \"0.1 NEAR\", \"to\",\n\"slimedragon.near/xyk\",]).await"
+---
+$ near-intear-dex-management --json engine transfer alice.near near '0.1 NEAR' to slimedragon.near/xyk network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+{"transaction_hash":"[HASH]","status":"succeeded","message":"Transferred 0.1 NEAR from alice.near to slimedragon.near/xyk on dex.intear.near","events":[{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4900000000000000000000000"}},{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150100000000000000000000000"}}]}
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Transfer 0.1 NEAR from alice.near to slimedragon.near/xyk on dex.intear.near
+│  Actions: execute_operations (1 yoctoNEAR, 15 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "TransferAsset": {
+│                                             "to": {
+│                                               "Dex": "slimedragon.near/xyk"
+│                                             },
+│                                             "asset_id": "near",
+│                                             "amount": "100000000000000000000000"
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          15.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4900000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150100000000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Transferred 0.1 NEAR from alice.near to slimedragon.near/xyk on dex.intear.near
+│  alice.near now has 4.9 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine transfer alice.near near '0.1 NEAR' to slimedragon.near/xyk network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

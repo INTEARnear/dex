@@ -1,0 +1,34 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.view(&[\"--json\", \"engine\", \"admin\", \"custody\",\n\"nep141:usdt.tether-token.near\"])"
+---
+$ near-intear-dex-management --json engine admin custody nep141:usdt.tether-token.near network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "asset_id": "nep141:usdt.tether-token.near",
+  "in_custody": {
+    "raw": "5250500000",
+    "decimal": "5250.5",
+    "symbol": "USDt"
+  },
+  "held": {
+    "raw": "5258000000",
+    "decimal": "5258",
+    "symbol": "USDt"
+  },
+  "untracked": {
+    "raw": "7500000",
+    "decimal": "7.5",
+    "symbol": "USDt"
+  },
+  "deficit": {
+    "raw": "0",
+    "decimal": "0",
+    "symbol": "USDt"
+  }
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine admin custody nep141:usdt.tether-token.near network-config sandbox now

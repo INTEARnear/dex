@@ -1,0 +1,71 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "xyk_transaction_paying_storage(&sandbox, &cli, \"alice.near\", XYK_DEX_ID,\n&[\"xyk\", \"pool\", \"upgrade\", \"alice.near\", \"0\"]).await"
+---
+$ near-intear-dex-management xyk pool upgrade alice.near 0 network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Upgrade pool #0 (NEAR / USDt) of slimedragon.near/xyk to the latest version, which takes fee schedules and can be locked
+│  Attach 0.00002 NEAR from alice.near's wallet for the storage this takes; slimedragon.near/xyk sends back what it doesn't use
+│  Actions: execute_operations (0.00002 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "DexCall": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "method": "upgrade_pool",
+│                                             "args": "AAAAAA==",
+│                                             "attached_assets": {
+│                                               "near": "20000000000000000000"
+│                                             }
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0.00002 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4228554301354670449439756"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"100660964698645329550560244"},{"asset_id":"nep141:usdt.tether-token.near","balance":"298038028"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4228534301354670449439756"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150665985698645329550560245"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150665965698645329550560245"}}
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Upgraded pool #0 (NEAR / USDt) of slimedragon.near/xyk to the latest version
+│  Pool #0 of slimedragon.near/xyk now holds 100.660964698645329550560244 NEAR and 298.038028 USDt
+│  alice.near now has 4.228534301354670449439756 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pool upgrade alice.near 0 network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

@@ -1,0 +1,76 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "xyk_transaction_paying_storage(&sandbox, &cli, \"alice.near\", XYK_DEX_ID,\n&[\"xyk\", \"create-pool\", \"launch\", \"alice.near\", \"nep141:intel.tkn.near\",\n\"1000 INTEL\", \"phantom-liquidity\", \"5 NEAR\", \"fees\",\n\"community:carol.near=1%\"]).await"
+---
+$ near-intear-dex-management xyk create-pool launch alice.near nep141:intel.tkn.near '1000 INTEL' phantom-liquidity '5 NEAR' fees 'community:carol.near=1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Create a launch NEAR / INTEL pool on slimedragon.near/xyk with fees community:carol.near 1%, plus the protocol fee
+│  Put 1,000 INTEL from alice.near's balance on dex.intear.near into the pool, priced against 5 NEAR of phantom liquidity
+│  Attach 0.0028 NEAR from alice.near's wallet for the pool's storage, which takes about that; slimedragon.near/xyk sends back what it doesn't use
+│  Actions: execute_operations (0.0028 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "DexCall": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "method": "create_pool",
+│                                             "args": "AAEOAAAAaW50ZWwudGtuLm5lYXIAAQAAAAIKAAAAY2Fyb2wubmVhchAnAAACAAAAJaQACovKIgQAAAAAAA==",
+│                                             "attached_assets": {
+│                                               "near": "2800000000000000000000",
+│                                               "nep141:intel.tkn.near": "1000000000000000000000"
+│                                             }
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0.0028 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4341334301354670449439756"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":6,"pool":{"Launch":{"near_amount":"5000000000000000000000000","launched_asset":{"asset_id":"nep141:intel.tkn.near","balance":"1000000000000000000000"},"fees":{"receivers":[[{"Community":"carol.near"},10000],[{"Account":"plach.intear.near"},1000]]},"fee_configuration":{"receivers":[[{"Community":"carol.near"},10000]]},"phantom_liquidity_near":"5000000000000000000000000"}}}},"referrer":null,"user":"alice.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"nep141:intel.tkn.near","balance":"4000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:intel.tkn.near","balance":"8001000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4338534301354670449439756"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150663765698645329550560244"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150660965698645329550560244"}}
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Created a launch NEAR / INTEL pool on slimedragon.near/xyk
+│  Pool #6 of slimedragon.near/xyk now holds 5 NEAR and 1,000 INTEL
+│  alice.near now has 4.338534301354670449439756 NEAR on dex.intear.near
+│  alice.near now has 4,000 INTEL on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk create-pool launch alice.near nep141:intel.tkn.near '1000 INTEL' phantom-liquidity '5 NEAR' fees 'community:carol.near=1%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

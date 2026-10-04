@@ -1,0 +1,18 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"balance\", \"alice.near\",\n\"near,nep141:usdt.tether-token.near,nep141:wrap.near\",])"
+---
+$ near-intear-dex-management engine balance alice.near near,nep141:usdt.tether-token.near,nep141:wrap.near network-config sandbox now
+exit code: 0
+--- stdout ---
++-------------------------------+----------------+
+| Asset                         | Balance        |
++-------------------------------+----------------+
+| near                          | 5 NEAR         |
+| nep141:usdt.tether-token.near | 250.5 USDt     |
+| nep141:wrap.near              | not registered |
++-------------------------------+----------------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine balance alice.near near,nep141:usdt.tether-token.near,nep141:wrap.near network-config sandbox now

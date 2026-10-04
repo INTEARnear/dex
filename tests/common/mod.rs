@@ -1,9 +1,7 @@
 #![allow(unused)]
 
-use intear_dex::internal_asset_operations::AccountOrDexId;
-use intear_dex::internal_operations::Operation;
 use intear_dex::storage_management::TotalStorageBalances;
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation};
 use near_contract_standards::storage_management::StorageBalance;
 use near_crypto::{KeyType, SecretKey};
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
@@ -15,166 +13,8 @@ use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::sync::OnceCell;
 
-pub struct CompiledWasms {
-    pub contract_wasm: Vec<u8>,
-    pub simple_amm_dex_wasm: Vec<u8>,
-    pub minimal_dex_wasm: Vec<u8>,
-    pub otc_dex_wasm: Vec<u8>,
-    pub xyk_dex_wasm: Vec<u8>,
-    pub ft_wasm: Vec<u8>,
-}
-
-static COMPILED_WASMS: OnceCell<CompiledWasms> = OnceCell::const_new();
-
-pub async fn get_compiled_wasms() -> &'static CompiledWasms {
-    COMPILED_WASMS
-        .get_or_init(|| async {
-            println!("Compiling intear-dex");
-            let contract_wasm = near_workspaces::compile_project("./").await.unwrap();
-
-            println!("Compiling simple-amm-dex");
-            assert!(
-                Command::new("cargo")
-                    .args([
-                        "build",
-                        "--package=simple-amm-dex",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                Command::new("wasm-opt")
-                    .args([
-                        "-O",
-                        "./target/wasm32-unknown-unknown/release/simple_amm_dex.wasm",
-                        "-o",
-                        "./target/wasm32-unknown-unknown/release/simple_amm_dex.wasm"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-
-            println!("Compiling minimal-dex");
-            assert!(
-                Command::new("cargo")
-                    .args([
-                        "build",
-                        "--package=minimal-dex",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                Command::new("wasm-opt")
-                    .args([
-                        "-O",
-                        "./target/wasm32-unknown-unknown/release/minimal_dex.wasm",
-                        "-o",
-                        "./target/wasm32-unknown-unknown/release/minimal_dex.wasm"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-
-            println!("Compiling otc-dex");
-            assert!(
-                Command::new("cargo")
-                    .args([
-                        "build",
-                        "--package=otc-dex",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                Command::new("wasm-opt")
-                    .args([
-                        "-O",
-                        "./target/wasm32-unknown-unknown/release/otc_dex.wasm",
-                        "-o",
-                        "./target/wasm32-unknown-unknown/release/otc_dex.wasm"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-
-            println!("Compiling xyk-dex");
-            assert!(
-                Command::new("cargo")
-                    .args([
-                        "build",
-                        "--package=xyk-dex",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                Command::new("wasm-opt")
-                    .args([
-                        "-O",
-                        "./target/wasm32-unknown-unknown/release/xyk_dex.wasm",
-                        "-o",
-                        "./target/wasm32-unknown-unknown/release/xyk_dex.wasm"
-                    ])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-
-            println!("Compilation complete");
-
-            let simple_amm_dex_wasm =
-                std::fs::read("./target/wasm32-unknown-unknown/release/simple_amm_dex.wasm")
-                    .unwrap();
-            let minimal_dex_wasm =
-                std::fs::read("./target/wasm32-unknown-unknown/release/minimal_dex.wasm").unwrap();
-            let otc_dex_wasm =
-                std::fs::read("./target/wasm32-unknown-unknown/release/otc_dex.wasm").unwrap();
-            let xyk_dex_wasm =
-                std::fs::read("./target/wasm32-unknown-unknown/release/xyk_dex.wasm").unwrap();
-            let ft_wasm = include_bytes!("../assets/ft.wasm").to_vec();
-
-            CompiledWasms {
-                contract_wasm,
-                simple_amm_dex_wasm,
-                minimal_dex_wasm,
-                otc_dex_wasm,
-                xyk_dex_wasm,
-                ft_wasm,
-            }
-        })
-        .await
-}
+pub use intear_dex_test_support::get_compiled_wasms;
 
 /// Track tokens burnt from a transaction result and add to total_near_burnt.
 pub fn track_tokens_burnt(result: &ExecutionFinalResult, total_near_burnt: &mut NearToken) {
@@ -254,6 +94,24 @@ pub async fn get_inner_asset_balance(
         .await?
         .json::<Option<U128>>()?;
     Ok(balance)
+}
+
+pub async fn get_registered_assets(
+    dex_engine_contract: &Contract,
+    account_id: &AccountId,
+    from_index: u32,
+    limit: u32,
+) -> Result<Vec<(AssetId, U128)>, Box<dyn std::error::Error>> {
+    let registered_assets = dex_engine_contract
+        .view("registered_assets_of")
+        .args_json(json!({
+            "account_id": account_id,
+            "from_index": from_index,
+            "limit": limit,
+        }))
+        .await?
+        .json::<Vec<(AssetId, U128)>>()?;
+    Ok(registered_assets)
 }
 
 /// Assert the balance of an asset that is custodied by the dex
@@ -679,6 +537,15 @@ pub async fn set_paused(dex_engine_contract: &Contract, pauser: &Account, paused
         .await
         .unwrap();
     assert_success(&result).unwrap();
+}
+
+pub async fn is_paused(dex_engine_contract: &Contract) -> Result<bool, Box<dyn std::error::Error>> {
+    let paused = dex_engine_contract
+        .view("is_paused")
+        .args_json(json!({}))
+        .await?
+        .json::<bool>()?;
+    Ok(paused)
 }
 
 /// Get the sum of storage balances of all users and all dexes.

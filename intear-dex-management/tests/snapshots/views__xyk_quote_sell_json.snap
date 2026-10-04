@@ -1,0 +1,36 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"quote\", \"0\", \"sell\", \"10 NEAR\"])"
+---
+$ near-intear-dex-management --json xyk quote 0 sell '10 NEAR' network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "dex_id": "slimedragon.near/xyk",
+  "pool_id": 0,
+  "direction": "sell",
+  "amount_in": {
+    "asset_id": "near",
+    "amount": {
+      "raw": "10000000000000000000000000",
+      "decimal": "10",
+      "symbol": "NEAR"
+    }
+  },
+  "amount_out": {
+    "asset_id": "nep141:usdt.tether-token.near",
+    "amount": {
+      "raw": "27210704",
+      "decimal": "27.210704",
+      "symbol": "USDt"
+    }
+  },
+  "fee": {
+    "fraction": 2501,
+    "percent": "0.2501"
+  }
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk quote 0 sell '10 NEAR' network-config sandbox now

@@ -1,0 +1,12 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"fees\", \"pending\", \"bob.near\", \"all\"])"
+---
+$ near-intear-dex-management xyk fees pending bob.near all network-config sandbox now
+exit code: 0
+--- stdout ---
+bob.near collects no fees in any pool asset on slimedragon.near/xyk
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk fees pending bob.near all network-config sandbox now

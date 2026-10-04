@@ -1,0 +1,21 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"pool\", \"show\", \"0\"])"
+---
+$ near-intear-dex-management xyk pool show 0 network-config sandbox now
+exit code: 0
+--- stdout ---
+Pool               #0 on slimedragon.near/xyk
+Kind               private
+Pair               NEAR / USDt
+Assets             near / nep141:usdt.tether-token.near
+Reserves           100.660964698645329550560244 NEAR / 298.038028 USDt
+Owner              slimedragon.near
+Locked             no
+Fees now           0.3501% (pool 0.285%, bob.near 0.05%, protocol 0.0151%)
+Fee configuration  pool 0.3%..0.2% from 2100-01-01T00:00:00Z to 2100-07-01T00:00:00Z (linear), bob.near 0.05%
+Upgrade available  no
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pool show 0 network-config sandbox now

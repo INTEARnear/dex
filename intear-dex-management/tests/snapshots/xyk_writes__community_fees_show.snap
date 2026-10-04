@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"community-fees\", \"show\", \"carol.near\"])"
+---
+$ near-intear-dex-management xyk community-fees show carol.near network-config sandbox now
+exit code: 0
+--- stdout ---
+Account         carol.near
+Dex             slimedragon.near/xyk
+Community fees  0.000510667851416081951976 NEAR
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk community-fees show carol.near network-config sandbox now

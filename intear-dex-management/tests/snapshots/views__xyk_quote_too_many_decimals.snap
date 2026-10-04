@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"quote\", \"0\", \"sell\", \"0.0000001 USDt\"])"
+---
+$ near-intear-dex-management xyk quote 0 sell '0.0000001 USDt' network-config sandbox now
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk quote 0 sell '0.0000001 USDt' network-config sandbox now
+
+Error:
+   0: USDt has 6 decimals, but '0.0000001 USDt' has 7 digits after the dot

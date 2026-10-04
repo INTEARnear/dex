@@ -1,0 +1,87 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "transaction_with_registration(&sandbox, &cli, \"carol.near\",\n&[\"engine\", \"deposit\", \"carol.near\", \"near\", \"1 NEAR\"]).await"
+---
+$ near-intear-dex-management engine deposit carol.near near '1 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer carol.near · dex.intear.near
+│  Deposit 0.005 NEAR into carol.near's storage balance on dex.intear.near
+│  Register near for carol.near, which takes about 0.0016 NEAR of its storage balance
+│  Deposit 1 NEAR into carol.near's balance on dex.intear.near
+│  Actions: storage_deposit (0.005 NEAR, 10 Tgas), register_assets (1 yoctoNEAR, 8 Tgas), deposit_near (1 NEAR, 10 Tgas)
+├  Unsigned transaction:
+│    signer_id:    carol.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  storage_deposit
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      0.005 NEAR
+│       -- function call:
+│                       method name:  register_assets
+│                       args:         {
+│                                       "asset_ids": [
+│                                         "near"
+│                                       ]
+│                                     }
+│                       gas:          8.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│       -- function call:
+│                       method name:  deposit_near
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      1 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"carol.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│    Logs [carol.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"carol.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│    Logs [carol.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"carol.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"carol.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│    Logs [carol.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "storage_deposit" call to <dex.intear.near> on behalf of <carol.near> succeeded.
+The "register_assets" call to <dex.intear.near> on behalf of <carol.near> succeeded.
+The "deposit_near" call to <dex.intear.near> on behalf of <carol.near> succeeded.
+
+├  ✓ Deposited 1 NEAR into carol.near's balance on dex.intear.near
+│  carol.near now has 1 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine deposit carol.near near '1 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2zF4Msijmc39gdTqTfG7pxt7SSH6MW3nX9muBLz36JF4r5xWWvxCSeAXJdWTiuy6f2MeDLTh4NDEQJVzhemXLcf5 send

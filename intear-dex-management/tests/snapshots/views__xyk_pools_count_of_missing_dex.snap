@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"--dex\", \"alice.near/xyk\", \"pools\", \"count\"])"
+---
+$ near-intear-dex-management xyk --dex alice.near/xyk pools count network-config sandbox now
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk --dex alice.near/xyk pools count network-config sandbox now
+
+Error:
+   0: dex.intear.near failed in dex_view on network sandbox: Dex code not found
+
+Suggestion: There's no dex alice.near/xyk on dex.intear.near. Check --dex

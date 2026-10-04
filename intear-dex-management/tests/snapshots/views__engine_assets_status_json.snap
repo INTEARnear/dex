@@ -1,0 +1,30 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"--json\", \"engine\", \"assets\", \"status\", \"slimedragon.near/xyk\",\n\"near,nep141:wrap.near\",])"
+---
+$ near-intear-dex-management --json engine assets status slimedragon.near/xyk near,nep141:wrap.near network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "owner": "slimedragon.near/xyk",
+  "assets": [
+    {
+      "asset_id": "near",
+      "registered": true,
+      "balance": {
+        "raw": "150000000000000000000000000",
+        "decimal": "150",
+        "symbol": "NEAR"
+      }
+    },
+    {
+      "asset_id": "nep141:wrap.near",
+      "registered": false,
+      "balance": null
+    }
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json engine assets status slimedragon.near/xyk near,nep141:wrap.near network-config sandbox now

@@ -1,0 +1,54 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.transaction(\"slimedragon.near\",\n&[\"xyk\", \"--dex\", \"slimedragon.near/xyk-test\", \"migrate\",\n\"slimedragon.near\"]).await"
+---
+$ near-intear-dex-management xyk --dex slimedragon.near/xyk-test migrate slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 0
+--- stdout ---
+""
+--- stderr ---
+├  sandbox · signer slimedragon.near · dex.intear.near
+│  Migrate the state of slimedragon.near/xyk-test to the layout of its code
+│  Actions: dex_call (1 yoctoNEAR, 50 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  dex_call
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk-test",
+│                                       "method": "migrate",
+│                                       "args": "",
+│                                       "attached_assets": {},
+│                                       "referrer": null
+│                                     }
+│                       gas:          50.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:   No logs
+│    Logs [slimedragon.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+
+
+The "dex_call" call to <dex.intear.near> on behalf of <slimedragon.near> succeeded.
+
+├  ✓ Migrated the state of slimedragon.near/xyk-test
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk --dex slimedragon.near/xyk-test migrate slimedragon.near network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"xyk\", \"pool\", \"show\", \"4\"])"
+---
+$ near-intear-dex-management xyk pool show 4 network-config sandbox now
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pool show 4 network-config sandbox now
+
+Error:
+   0: Pool #4 doesn't exist on slimedragon.near/xyk, which has 4 pools

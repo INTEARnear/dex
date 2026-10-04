@@ -1,0 +1,17 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: misspelled_field_record
+---
+$ near-intear-dex-management engine operations run alice.near [TEMPORARY DIRECTORY]/misspelled-field.json network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine operations run alice.near [TEMPORARY DIRECTORY]/misspelled-field.json network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: [TEMPORARY DIRECTORY]/misspelled-field.json isn't valid arguments of execute_operations: unknown field `operation`, expected `operations` or `referrer` at line 2 column 13
+
+Suggestion: The arguments look like this:
+    {"operations": [{"Withdraw": {"asset_id": "near", "amount": {"Exact": "1000000000000000000000000"}, "to": null, "rescue_address": null}}], "referrer": null}

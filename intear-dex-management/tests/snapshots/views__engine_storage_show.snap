@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"storage\", \"show\", \"alice.near\"])"
+---
+$ near-intear-dex-management engine storage show alice.near network-config sandbox now
+exit code: 0
+--- stdout ---
+Total      1 NEAR
+Used       0.00453 NEAR
+Available  0.99547 NEAR
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine storage show alice.near network-config sandbox now

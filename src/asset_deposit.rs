@@ -1,42 +1,13 @@
 use std::collections::HashMap;
 
-use intear_dex_types::{AssetId, expect};
+use intear_dex_types::{AccountOrDexId, AssetId, DepositMessage, expect};
 use near_contract_standards::{
     fungible_token::receiver::FungibleTokenReceiver,
     non_fungible_token::{self, core::NonFungibleTokenReceiver},
 };
 use near_sdk::{AccountId, PromiseOrValue, json_types::U128, near};
 
-use crate::{
-    DexEngine, DexEngineExt, IntearDexEvent, internal_asset_operations::AccountOrDexId,
-    internal_operations::Operation,
-};
-
-#[near(serializers=[json])]
-#[serde(untagged)]
-pub enum DepositMessage {
-    Operations(Vec<Operation>),
-    Advanced {
-        operations: Vec<Operation>,
-        referrer: Option<AccountId>,
-    },
-}
-
-impl DepositMessage {
-    fn operations(&self) -> Vec<Operation> {
-        match self {
-            Self::Operations(operations) => operations.clone(),
-            Self::Advanced { operations, .. } => operations.clone(),
-        }
-    }
-
-    fn referrer(&self) -> Option<AccountId> {
-        match self {
-            Self::Advanced { referrer, .. } => referrer.clone(),
-            _ => None,
-        }
-    }
-}
+use crate::{DexEngine, DexEngineExt, IntearDexEvent};
 
 #[near]
 impl DexEngine {

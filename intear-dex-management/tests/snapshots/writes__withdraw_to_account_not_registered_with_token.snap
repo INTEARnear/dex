@@ -1,0 +1,80 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"engine\", \"withdraw\", \"alice.near\", \"nep141:usdt.tether-token.near\",\n\"1 USDt\", \"--to\", \"bob.near\",]).await"
+---
+$ near-intear-dex-management engine withdraw alice.near nep141:usdt.tether-token.near '1 USDt' --to bob.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Withdraw 1 USDt from alice.near's balance on dex.intear.near to bob.near
+│  Actions: execute_operations (1 yoctoNEAR, 50 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "Withdraw": {
+│                                             "asset_id": "nep141:usdt.tether-token.near",
+│                                             "amount": {
+│                                               "Exact": "1000000"
+│                                             },
+│                                             "to": "bob.near",
+│                                             "rescue_address": null
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          50.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"nep141:usdt.tether-token.near","balance":"249500000"}}
+│    Logs [usdt.tether-token.near]:   No logs
+│    Logs [dex.intear.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Err(Failed)
+│      Refunding to bob.near (recipient) because withdrawal to bob.near failed: Failed
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:usdt.tether-token.near","balance":"1000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine withdraw alice.near nep141:usdt.tether-token.near '1 USDt' --to bob.near network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: The withdrawal failed on-chain
+      usdt.tether-token.near failed: The account bob.near is not registered
+      dex.intear.near put the withdrawal back into bob.near's balance
+      alice.near now has 249.5 USDt on dex.intear.near
+      bob.near now has 1 USDt on dex.intear.near
+
+Note: Transaction: http://[SANDBOX RPC]/transactions/[HASH]
+Suggestion: The receiver has no storage on the token contract, so it can't receive the tokens. It needs a storage_deposit there first

@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"engine\", \"withdraw\", \"alice.near\", \"near\", \"1 NEAR\"]).await"
+---
+$ near-intear-dex-management engine withdraw alice.near near '1 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine withdraw alice.near near '1 NEAR' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: dex.intear.near is paused, so nothing can change until it's unpaused
+
+Suggestion: `engine info` shows whether it's still paused; slimedragon.near or pause.slimedragon.near can unpause it

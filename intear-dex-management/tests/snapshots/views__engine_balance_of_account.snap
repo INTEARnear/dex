@@ -1,0 +1,18 @@
+---
+source: intear-dex-management/tests/views.rs
+expression: "cli.view(&[\"engine\", \"balance\", \"slimedragon.near\", \"all\"])"
+---
+$ near-intear-dex-management engine balance slimedragon.near all network-config sandbox now
+exit code: 0
+--- stdout ---
++-------------------------------+-----------------+
+| Asset                         | Balance         |
++-------------------------------+-----------------+
+| near                          | 49.79 NEAR      |
+| nep141:usdt.tether-token.near | 3,700 USDt      |
+| nep141:intel.tkn.near         | 2,000,000 INTEL |
++-------------------------------+-----------------+
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine balance slimedragon.near all network-config sandbox now

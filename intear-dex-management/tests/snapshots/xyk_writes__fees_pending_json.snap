@@ -1,0 +1,41 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"--json\", \"xyk\", \"fees\", \"pending\", \"alice.near\", \"all\"])"
+---
+$ near-intear-dex-management --json xyk fees pending alice.near all network-config sandbox now
+exit code: 0
+--- stdout ---
+{
+  "account_id": "alice.near",
+  "dex_id": "slimedragon.near/xyk",
+  "pending": [
+    {
+      "asset_id": "near",
+      "amount": {
+        "raw": "500000000000000000000",
+        "decimal": "0.0005",
+        "symbol": "NEAR"
+      }
+    },
+    {
+      "asset_id": "nep141:usdt.tether-token.near",
+      "amount": {
+        "raw": "500",
+        "decimal": "0.0005",
+        "symbol": "USDt"
+      }
+    },
+    {
+      "asset_id": "nep141:intel.tkn.near",
+      "amount": {
+        "raw": "0",
+        "decimal": "0",
+        "symbol": "INTEL"
+      }
+    }
+  ]
+}
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management --json xyk fees pending alice.near all network-config sandbox now

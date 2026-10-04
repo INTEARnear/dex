@@ -1,0 +1,16 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.view(&[\"xyk\", \"referrer\", \"show\", \"carol.near\"])"
+---
+$ near-intear-dex-management xyk referrer show carol.near network-config sandbox now
+exit code: 0
+--- stdout ---
+Referrer              carol.near
+Dex                   slimedragon.near/xyk
+Referral fee          0.1%
+Reduced referral fee  0.05%, for pairs of NEAR, USDC, USDT and tokens bridged through omft.near or omni.hot.tg
+Collects fees in      NEAR, USDt
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk referrer show carol.near network-config sandbox now

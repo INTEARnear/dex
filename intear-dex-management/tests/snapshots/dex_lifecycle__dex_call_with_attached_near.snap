@@ -1,0 +1,69 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"dex\", \"call\", \"alice.near\", \"slimedragon.near/xyk\", \"register_fee_assets\",\n&register_wrapped_near_fees, \"--attach\", \"near=0.01 NEAR\", \"--prepaid-gas\",\n\"60 Tgas\",]).await"
+---
+$ near-intear-dex-management dex call alice.near slimedragon.near/xyk register_fee_assets AQAAAAEJAAAAd3JhcC5uZWFy --attach 'near=0.01 NEAR' --prepaid-gas '60 Tgas' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 0
+--- stdout ---
+""
+--- stderr ---
+├  sandbox · signer alice.near · dex.intear.near
+│  Call register_fee_assets on slimedragon.near/xyk with 18 bytes of arguments
+│  Attach 0.01 NEAR from alice.near's balance on dex.intear.near
+│  Actions: dex_call (1 yoctoNEAR, 60 Tgas)
+├  Unsigned transaction:
+│    signer_id:    alice.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  dex_call
+│                       args:         {
+│                                       "dex_id": "slimedragon.near/xyk",
+│                                       "method": "register_fee_assets",
+│                                       "args": "AQAAAAEJAAAAd3JhcC5uZWFy",
+│                                       "attached_assets": {
+│                                         "near": "10000000000000000000000"
+│                                       },
+│                                       "referrer": null
+│                                     }
+│                       gas:          60.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4990000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150010000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150001210000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150000000000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│    Logs [dex.intear.near]:
+│      After withdraw: Ok(())
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"withdraw","data":{"from":{"Dex":"slimedragon.near/xyk"},"to":"alice.near","asset_id":"near","amount":"8790000000000000000000"}}
+│    Logs [alice.near]:   No logs
+│    Logs [alice.near]:   No logs
+│
+
+Function execution return value (printed to stdout):
+
+
+The "dex_call" call to <dex.intear.near> on behalf of <alice.near> succeeded.
+
+├  ✓ Called register_fee_assets on slimedragon.near/xyk
+│  slimedragon.near/xyk sent 0.00879 NEAR to alice.near's wallet
+│  alice.near now has 4.99 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management dex call alice.near slimedragon.near/xyk register_fee_assets AQAAAAEJAAAAd3JhcC5uZWFy --attach 'near=0.01 NEAR' --prepaid-gas '60.0 Tgas' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send

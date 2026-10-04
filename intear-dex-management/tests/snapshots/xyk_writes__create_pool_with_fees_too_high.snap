@@ -1,0 +1,14 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "cli.transaction(\"alice.near\",\n&[\"xyk\", \"create-pool\", \"private\", \"alice.near\", \"near\",\n\"nep141:usdt.tether-token.near\", \"fees\", \"pool=30%,alice.near=25%\"]).await"
+---
+$ near-intear-dex-management xyk create-pool private alice.near near nep141:usdt.tether-token.near fees 'pool=30%,alice.near=25%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+exit code: 1
+--- stdout ---
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk create-pool private alice.near near nep141:usdt.tether-token.near fees 'pool=30%,alice.near=25%' network-config sandbox sign-with-plaintext-private-key ed25519:2wyRcSwSuHtRVmkMCGjPwnzZmQLeXLzLLyED1NDMt4BjnKgQL6tF85yBx6Jr26D2dUNeC716RBoTxntVHsegogYw send
+
+Error:
+   0: These fees aren't allowed: the fees must add up to less than 50%

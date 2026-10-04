@@ -1,0 +1,71 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "xyk_transaction_paying_storage(&sandbox, &cli, \"slimedragon.near\", XYK_DEX_ID,\n&[\"xyk\", \"pool\", \"edit-fees\", \"slimedragon.near\", \"0\",\n\"pool=0.3%..0.2%@2100-01-01T00:00:00Z..2100-07-01T00:00:00Z,bob.near=0.05%\"]).await"
+---
+$ near-intear-dex-management xyk pool edit-fees slimedragon.near 0 'pool=0.3%..0.2%@2100-01-01T00:00:00Z..2100-07-01T00:00:00Z,bob.near=0.05%' network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer slimedragon.near · dex.intear.near
+│  Change the fees of pool #0 (NEAR / USDt) of slimedragon.near/xyk from pool 0.2%, alice.near 0.05% to pool 0.3%..0.2% from 2100-01-01T00:00:00Z to 2100-07-01T00:00:00Z (linear), bob.near 0.05%, plus the protocol fee
+│  Attach 0.00127 NEAR from slimedragon.near's wallet for the storage this takes; slimedragon.near/xyk sends back what it doesn't use
+│  Actions: execute_operations (0.00127 NEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    slimedragon.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "DexCall": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "method": "edit_fees",
+│                                             "args": "AAAAAAECAAAAAQEAAKZWz8/uOLgLAAAAAIET2l4mOdAHAAAAAAgAAABib2IubmVhcgD0AQAA",
+│                                             "attached_assets": {
+│                                               "near": "1270000000000000000000"
+│                                             }
+│                                           }
+│                                         }
+│                                       ]
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      0.00127 NEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"slimedragon.near","asset_id":"near","balance":"49791270000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"100660964698645329550560244"},{"asset_id":"nep141:usdt.tether-token.near","balance":"298038028"}],"fees":{"receivers":[["Pool",2850],[{"Account":"bob.near"},500],[{"Account":"plach.intear.near"},151]]},"fee_configuration":{"receivers":[["Pool",{"Scheduled":{"start":[4102444800000000000,3000],"end":[4118083200000000000,2000],"curve":"Linear"}}],[{"Account":"bob.near"},{"Fixed":500}]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"slimedragon.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"slimedragon.near","asset_id":"near","balance":"49790000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150667235698645329550560245"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150665965698645329550560245"}}
+│    Logs [slimedragon.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "execute_operations" call to <dex.intear.near> on behalf of <slimedragon.near> succeeded.
+
+├  ✓ Changed the fees of pool #0 (NEAR / USDt) of slimedragon.near/xyk
+│  Pool #0 of slimedragon.near/xyk now holds 100.660964698645329550560244 NEAR and 298.038028 USDt
+│  slimedragon.near now has 49.79 NEAR on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk pool edit-fees slimedragon.near 0 'pool=0.3%..0.2%@2100-01-01T00:00:00Z..2100-07-01T00:00:00Z,bob.near=0.05%' network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

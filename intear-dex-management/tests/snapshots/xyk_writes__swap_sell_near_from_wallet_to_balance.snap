@@ -1,0 +1,164 @@
+---
+source: intear-dex-management/tests/xyk_writes.rs
+expression: "transaction_with_registration(&sandbox, &cli, \"bob.near\",\n&[\"xyk\", \"swap\", \"bob.near\", \"0\", \"sell\", \"1 NEAR\", \"max-slippage\", \"1%\",\n\"from-wallet\", \"to-balance\"]).await"
+---
+$ near-intear-dex-management xyk swap bob.near 0 sell '1 NEAR' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · signer bob.near · dex.intear.near
+│  Deposit 0.005 NEAR into bob.near's storage balance on dex.intear.near
+│  Register near, nep141:usdt.tether-token.near for bob.near, which takes about 0.00336 NEAR of bob.near's storage balance
+│  Deposit 1 NEAR from bob.near's wallet into bob.near's balance on dex.intear.near
+│  Sell 1 NEAR on pool #0 (NEAR / USDt) of slimedragon.near/xyk for at least 2.837432 USDt, 2.866093 USDt at the current price
+│  The NEAR comes from bob.near's balance on dex.intear.near
+│  The USDt goes to bob.near's balance on dex.intear.near
+│  Actions: storage_deposit (0.005 NEAR, 10 Tgas), register_assets (1 yoctoNEAR, 11 Tgas), deposit_near (1 NEAR, 10 Tgas), execute_operations (1 yoctoNEAR, 100 Tgas)
+├  Unsigned transaction:
+│    signer_id:    bob.near
+│    receiver_id:  dex.intear.near
+│    actions:
+│       -- function call:
+│                       method name:  storage_deposit
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      0.005 NEAR
+│       -- function call:
+│                       method name:  register_assets
+│                       args:         {
+│                                       "asset_ids": [
+│                                         "near",
+│                                         "nep141:usdt.tether-token.near"
+│                                       ],
+│                                       "for": null
+│                                     }
+│                       gas:          11.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│       -- function call:
+│                       method name:  deposit_near
+│                       args:         {}
+│                       gas:          10.0 Tgas
+│                       deposit:      1 NEAR
+│       -- function call:
+│                       method name:  execute_operations
+│                       args:         {
+│                                       "operations": [
+│                                         {
+│                                           "SwapSimple": {
+│                                             "dex_id": "slimedragon.near/xyk",
+│                                             "message": "AAAAAA==",
+│                                             "asset_in": "near",
+│                                             "asset_out": "nep141:usdt.tether-token.near",
+│                                             "amount": {
+│                                               "Amount": {
+│                                                 "ExactIn": "1000000000000000000000000"
+│                                               }
+│                                             },
+│                                             "constraint": "2837432"
+│                                           }
+│                                         }
+│                                       ],
+│                                       "referrer": null
+│                                     }
+│                       gas:          100.0 Tgas
+│                       deposit:      1 yoctoNEAR
+│
+├  Your transaction was signed successfully.
+│    Public key: ed25519:[HASH]
+│    Signature:  ed25519:[SIGNATURE]
+│
+├  Transaction Execution Info:
+│    Gas burned: [GAS]
+│    Transaction fee: [FEE]
+│    Transaction ID: [HASH]
+│    To see the transaction in the transaction explorer, please open this url in your browser:
+│    http://[SANDBOX RPC]/transactions/[HASH]
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"102685027102968829952057221"},{"asset_id":"nep141:usdt.tether-token.near","balance":"292170966"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":0,"request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","fees_breakdown":[["Pool","near","2000000000000000000000"],[{"Account":"alice.near"},"near","500000000000000000000"],[{"Account":"plach.intear.near"},"near","1000000000000000000"]],"amount_out":"2866093"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"0"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"152686372975829720642098912"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:usdt.tether-token.near","balance":"1292170966"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:usdt.tether-token.near","balance":"2866093"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","amount_out":"2866093","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"102685027102968829952057221"},{"asset_id":"nep141:usdt.tether-token.near","balance":"292170966"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":0,"request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","fees_breakdown":[["Pool","near","2000000000000000000000"],[{"Account":"alice.near"},"near","500000000000000000000"],[{"Account":"plach.intear.near"},"near","1000000000000000000"]],"amount_out":"2866093"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"0"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"152686372975829720642098912"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:usdt.tether-token.near","balance":"1292170966"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:usdt.tether-token.near","balance":"2866093"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","amount_out":"2866093","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"102685027102968829952057221"},{"asset_id":"nep141:usdt.tether-token.near","balance":"292170966"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":0,"request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","fees_breakdown":[["Pool","near","2000000000000000000000"],[{"Account":"alice.near"},"near","500000000000000000000"],[{"Account":"plach.intear.near"},"near","1000000000000000000"]],"amount_out":"2866093"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"0"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"152686372975829720642098912"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:usdt.tether-token.near","balance":"1292170966"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:usdt.tether-token.near","balance":"2866093"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","amount_out":"2866093","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+├  Function execution logs:
+│    Logs [dex.intear.near]:
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"1000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_deposit","data":{"account_id":"bob.near","asset_id":"near","amount":"1000000000000000000000000"}}
+│      Fully authorized: true
+│      Executing operation 0
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"pool_updated","data":{"pool_id":0,"pool":{"Private":{"assets":[{"asset_id":"near","balance":"102685027102968829952057221"},{"asset_id":"nep141:usdt.tether-token.near","balance":"292170966"}],"fees":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500],[{"Account":"plach.intear.near"},1]]},"fee_configuration":{"receivers":[["Pool",2000],[{"Account":"alice.near"},500]]},"owner_id":"slimedragon.near","locked":false}}}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_event","data":{"dex_id":"slimedragon.near/xyk","event":{"standard":"xyk","version":"1.0.0","event":"swap","data":{"pool_id":0,"request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","fees_breakdown":[["Pool","near","2000000000000000000000"],[{"Account":"alice.near"},"near","500000000000000000000"],[{"Account":"plach.intear.near"},"near","1000000000000000000"]],"amount_out":"2866093"}},"referrer":null,"user":"bob.near"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"near","balance":"0"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"152686372975829720642098912"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"nep141:usdt.tether-token.near","balance":"1292170966"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"bob.near","asset_id":"nep141:usdt.tether-token.near","balance":"2866093"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"swap","data":{"dex_id":"slimedragon.near/xyk","request":{"message":"AAAAAA==","asset_in":"near","asset_out":"nep141:usdt.tether-token.near","amount":{"ExactIn":"1000000000000000000000000"},"referrer":null},"amount_in":"1000000000000000000000000","amount_out":"2866093","trader":"bob.near","referrer":null}}
+│    Logs [bob.near]:   No logs
+│
+├  Function execution return value:
+│    Empty return value
+│
+
+
+The "storage_deposit" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+The "register_assets" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+The "deposit_near" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+The "execute_operations" call to <dex.intear.near> on behalf of <bob.near> succeeded.
+
+├  ✓ Swapped on pool #0 (NEAR / USDt) of slimedragon.near/xyk; the USDt went to bob.near's balance on dex.intear.near
+│  Pool #0 of slimedragon.near/xyk now holds 102.685027102968829952057221 NEAR and 292.170966 USDt
+│  Pool #0 of slimedragon.near/xyk swapped 1 NEAR for 2.866093 USDt
+│  bob.near now has 0 NEAR on dex.intear.near
+│  bob.near now has 2.866093 USDt on dex.intear.near
+
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk swap bob.near 0 sell '1 NEAR' max-slippage '1%' from-wallet to-balance network-config sandbox sign-with-plaintext-private-key ed25519:2y9ToyGhuue7muH4Y5sStZpcGuQ7Wmaq5g5MnT1c2LSn3rr6rSJh5f99BBi4qr3umKDznj6LTV71XGtji1dadTbt send
