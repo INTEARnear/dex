@@ -11,7 +11,7 @@ use near_sdk::json_types::U128;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use xyk_dex_types::{
-    AddLiquidityArgs, INITIAL_SHARES, FULL_FEE_FRACTION, PoolId, PoolView, RegisterLiquidityArgs,
+    AddLiquidityArgs, FULL_FEE_FRACTION, INITIAL_SHARES, PoolId, PoolView, RegisterLiquidityArgs,
     RemoveLiquidityArgs,
 };
 

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use xyk_dex_types::{FeeFraction, FULL_FEE_FRACTION};
+use xyk_dex_types::{FULL_FEE_FRACTION, FeeFraction};
 
 use crate::display;
 

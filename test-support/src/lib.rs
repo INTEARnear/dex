@@ -38,11 +38,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             assert!(
                 Command::new("cargo")
                     .current_dir(workspace_root)
-                    .args([
-                        "near",
-                        "build",
-                        "non-reproducible-wasm",
-                    ])
+                    .args(["near", "build", "non-reproducible-wasm",])
                     .status()
                     .await
                     .unwrap()

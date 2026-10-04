@@ -626,7 +626,10 @@ impl fmt::Display for FeeAmountError {
                 write!(f, "Start fee fraction must be greater than end fee")
             }
             Self::ScheduledStartFeeTooHigh => {
-                write!(f, "Start fee fraction must be less than {FULL_FEE_FRACTION}")
+                write!(
+                    f,
+                    "Start fee fraction must be less than {FULL_FEE_FRACTION}"
+                )
             }
             Self::DynamicMinNotBelowMax => {
                 write!(f, "Min fee fraction must be less than max fee fraction")

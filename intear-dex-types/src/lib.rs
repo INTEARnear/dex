@@ -193,7 +193,6 @@ pub enum SwapRequestAmount {
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug)]
-#[cfg_attr(debug_assertions, derive(Debug))]
 #[near(serializers=[borsh])]
 pub struct DexId {
     pub deployer: AccountId,

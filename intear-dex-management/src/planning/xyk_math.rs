@@ -4,7 +4,7 @@
 
 use color_eyre::eyre::eyre;
 use crypto_bigint::{CheckedMul, U256};
-use xyk_dex_types::{FeeFraction, FULL_FEE_FRACTION};
+use xyk_dex_types::{FULL_FEE_FRACTION, FeeFraction};
 
 fn u256_to_u128(value: U256) -> Option<u128> {
     if value.bits() > u128::BITS {
