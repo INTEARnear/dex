@@ -12,6 +12,8 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near,
 };
+use near_workspaces::Contract;
+use near_workspaces::result::ExecutionFinalResult;
 use std::collections::HashMap;
 
 #[near(serializers=[borsh])]
@@ -180,7 +182,7 @@ struct WithdrawCommunityFeeArgs {
 }
 
 async fn get_pool(
-    dex_engine_contract: &near_workspaces::Contract,
+    dex_engine_contract: &Contract,
     dex_id: &DexId,
     pool_id: PoolId,
 ) -> Option<PoolView> {
@@ -196,8 +198,22 @@ async fn get_pool(
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
 }
 
+/// Inner events of the xyk dex with the given name, emitted in the transaction
+fn xyk_events(result: &ExecutionFinalResult, event: &str) -> Vec<near_sdk::serde_json::Value> {
+    result
+        .logs()
+        .into_iter()
+        .filter_map(|log| log.strip_prefix("EVENT_JSON:"))
+        .map(|log| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(log).unwrap())
+        .filter(|outer| outer["standard"] == "inteardex" && outer["event"] == "dex_event")
+        .map(|outer| outer["data"]["event"].clone())
+        .filter(|inner| inner["standard"] == "xyk" && inner["event"] == event)
+        .map(|inner| inner["data"].clone())
+        .collect()
+}
+
 async fn get_pool_shares(
-    dex_engine_contract: &near_workspaces::Contract,
+    dex_engine_contract: &Contract,
     dex_id: &DexId,
     pool_id: PoolId,
     account_id: &AccountId,
@@ -216,7 +232,7 @@ async fn get_pool_shares(
 }
 
 async fn get_pending_fees(
-    dex_engine_contract: &near_workspaces::Contract,
+    dex_engine_contract: &Contract,
     dex_id: &DexId,
     account_id: &AccountId,
     asset_ids: Vec<AssetId>,
@@ -234,7 +250,7 @@ async fn get_pending_fees(
 }
 
 async fn get_community_owned_fees(
-    dex_engine_contract: &near_workspaces::Contract,
+    dex_engine_contract: &Contract,
     dex_id: &DexId,
     account_id: &AccountId,
 ) -> NearToken {
@@ -250,7 +266,7 @@ async fn get_community_owned_fees(
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
 }
 
-async fn get_ft_balance(token: &near_workspaces::Contract, account_id: &AccountId) -> U128 {
+async fn get_ft_balance(token: &Contract, account_id: &AccountId) -> U128 {
     token
         .view("ft_balance_of")
         .args_json(json!({
@@ -4057,6 +4073,31 @@ async fn test_xyk_launch_pool_community_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    let pool_updated_events = xyk_events(&result, "pool_updated");
+    assert!(!pool_updated_events.is_empty());
+    for event in &pool_updated_events {
+        assert_eq!(
+            event["pool"]["Launch"]["fee_configuration"]["receivers"][0][0],
+            json!({ "Community": community_account_id })
+        );
+    }
+    match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
+        .await
+        .unwrap()
+    {
+        PoolView::Launch {
+            fee_configuration: FeeConfiguration::V1(CurrentFees { receivers }),
+            ..
+        } => {
+            assert!(matches!(
+                &receivers[..],
+                [(FeeReceiver::Community(account_id), fraction)]
+                    if *account_id == community_account_id && *fraction == fee_fraction
+            ));
+        }
+        _ => panic!("Expected launch pool with V1 fee configuration"),
+    }
+
     assert_eq!(
         get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
         NearToken::from_yoctonear(0)
@@ -4112,6 +4153,19 @@ async fn test_xyk_launch_pool_community_fees() {
         / (phantom_liquidity_near + buy_amount_after_fees);
     let near_reserve_after_buy = phantom_liquidity_near + buy_amount_after_fees;
     let token_reserve_after_buy = launch_liquidity_ft2 - buy_token_out;
+
+    let swap_events = xyk_events(&result, "swap");
+    assert_eq!(swap_events.len(), 1);
+    assert!(
+        swap_events[0]["fees_breakdown"]
+            .as_array()
+            .unwrap()
+            .contains(&json!([
+                { "Community": community_account_id },
+                "near",
+                buy_community_fee_near.to_string(),
+            ]))
+    );
 
     assert_eq!(
         get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
