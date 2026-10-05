@@ -21,8 +21,8 @@ repository = "https://github.com/INTEARnear/dex"
 crate-type = ["cdylib", "rlib"]
 
 [package.metadata.near.reproducible_build]
-image = "sourcescan/cargo-near:0.16.2-rust-1.86.0"
-image_digest = "sha256:74c24d4d912f893198b8b13e01d43e0f78f3b00b3df45bf555a707eb4918a54e"
+image = "sourcescan/cargo-near:0.22.0-rust-1.99.0"
+image_digest = "sha256:51ab40efd798eae26c0dc71180909303f10bb4988b15ce3a18522c5be06e277e"
 passed_env = []
 container_build_command = [
     "cargo",
