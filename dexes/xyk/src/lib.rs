@@ -15,7 +15,7 @@ use near_sdk::{
     store::{LookupMap, Vector},
 };
 use xyk_dex_types::{
-    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
+    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CreatePoolArgs,
     CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration,
     FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
     GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
@@ -553,32 +553,6 @@ impl XykDex {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
             referral_settings: LookupMap::new(StorageKey::ReferralSettings),
-            community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
-        }
-    }
-
-    #[init(ignore_state)]
-    #[payable]
-    pub fn migrate() -> Self {
-        assert_one_yocto();
-        expect!(
-            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
-            "Only owner can migrate"
-        );
-
-        #[near(serializers=[borsh])]
-        pub struct OldXykDex {
-            pools: Vector<Pool>,
-            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-            referral_settings: LookupMap<AccountId, ReferralSettings>,
-        }
-
-        let old_state: OldXykDex = near_sdk::env::state_read().expect("State read failed");
-
-        XykDex {
-            pools: old_state.pools,
-            fees_collected_by_users: old_state.fees_collected_by_users,
-            referral_settings: old_state.referral_settings,
             community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
         }
     }
