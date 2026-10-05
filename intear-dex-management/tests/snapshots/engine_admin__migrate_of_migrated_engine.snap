@@ -1,0 +1,13 @@
+---
+source: intear-dex-management/tests/engine_admin.rs
+expression: "cli.run_as_given(&[\"engine\", \"admin\", \"migrate\", \"pause.slimedragon.near\",\n\"slimedragon.near\", engine_code_path, \"sign-with-legacy-keychain\",\n\"network-config\", \"sandbox\",])"
+---
+$ near-intear-dex-management engine admin migrate pause.slimedragon.near slimedragon.near [ENGINE CODE] sign-with-legacy-keychain network-config sandbox
+exit code: 0
+--- stdout ---
+--- stderr ---
+├  sandbox · migrate dex.intear.near to code [HASH] ([BUILD DEPENDENT] bytes)
+├  dex.intear.near already runs this code, and its balances are migrated
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management engine admin migrate pause.slimedragon.near slimedragon.near [ENGINE CODE] sign-with-legacy-keychain network-config sandbox

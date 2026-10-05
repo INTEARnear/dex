@@ -7,8 +7,8 @@ exit code: 0
 --- stdout ---
 Code       deployed
 Total      20.01591 NEAR
-Used       1.59179 NEAR
-Available  18.42412 NEAR
+Used       1.5889 NEAR
+Available  18.42701 NEAR
 --- stderr ---
 
 Here is your console command if you need to script it or re-run:

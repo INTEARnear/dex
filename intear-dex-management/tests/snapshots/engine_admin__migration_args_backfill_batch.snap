@@ -1,5 +1,0 @@
----
-source: intear-dex-management/tests/engine_admin.rs
-expression: "std::fs::read_to_string(output_directory.path().join(\"engine-upgrade/backfill-001.json\")).unwrap()"
----
-{"entries":[["alice.near","near"],["alice.near","nep141:intel.tkn.near"],["alice.near","nep141:usdt.tether-token.near"],["slimedragon.near","near"],["slimedragon.near","nep141:intel.tkn.near"],["slimedragon.near","nep141:usdt.tether-token.near"]]}

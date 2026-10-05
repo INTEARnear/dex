@@ -216,21 +216,15 @@ impl Preflight {
         registrations: &[(AccountOrDexId, AssetId)],
     ) -> color_eyre::eyre::Result<RegistrationStorage> {
         let mut bytes = Vec::new();
-        let mut accounts_with_registered_assets: Vec<AccountId> = Vec::new();
+        let mut owners_with_registered_assets: Vec<&AccountOrDexId> = Vec::new();
         let mut assets_in_custody: Vec<AssetId> = Vec::new();
         for (owner, asset_id) in registrations {
-            let owner_has_registered_assets = match owner {
-                AccountOrDexId::Account(account_id) => {
-                    accounts_with_registered_assets.contains(account_id)
-                        || !engine::registered_assets_of(
-                            &self.network_config,
-                            &self.block_reference,
-                            account_id,
-                        )?
-                        .is_empty()
-                }
-                AccountOrDexId::Dex(_) => true,
-            };
+            let owner_has_registered_assets = owners_with_registered_assets.contains(&owner)
+                || engine::has_registered_assets(
+                    &self.network_config,
+                    &self.block_reference,
+                    owner,
+                )?;
             let asset_is_in_custody = assets_in_custody.contains(asset_id)
                 || engine::total_in_custody(&self.network_config, &self.block_reference, asset_id)?
                     .is_some();
@@ -241,9 +235,7 @@ impl Preflight {
                 asset_is_in_custody,
                 self.protocol_limits.extra_bytes_per_record,
             )?);
-            if let AccountOrDexId::Account(account_id) = owner {
-                accounts_with_registered_assets.push(account_id.clone());
-            }
+            owners_with_registered_assets.push(owner);
             assets_in_custody.push(asset_id.clone());
         }
         let storage_balance = engine::storage_balance_of(

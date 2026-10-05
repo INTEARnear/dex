@@ -190,6 +190,7 @@ impl DepositContext {
             &previous_context,
             signer_id,
             move |preflight| {
+                preflight.ensure_engine_not_paused()?;
                 if amount.is_zero() {
                     return Err(PreflightError::ZeroAmount.into_report());
                 }
@@ -286,6 +287,7 @@ impl WithdrawContext {
             &previous_context,
             signer_id,
             move |preflight| {
+                preflight.ensure_engine_not_paused()?;
                 let storage_balance = engine::storage_balance_of(
                     &preflight.network_config,
                     &preflight.block_reference,

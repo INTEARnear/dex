@@ -7,7 +7,7 @@ exit code: 0
 --- stdout ---
 {
   "total": "20015910000000000000000000",
-  "available": "18424120000000000000000000"
+  "available": "18427010000000000000000000"
 }
 --- stderr ---
 ├  sandbox · signer slimedragon.near · dex.intear.near

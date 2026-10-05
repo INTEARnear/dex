@@ -484,39 +484,19 @@ impl DexEngine {
     ) {
         let r#for = r#for.unwrap_or_else(|| AccountOrDexId::Account(storage_payer.clone()));
         let storage_usage_before = near_sdk::env::storage_usage();
-        for asset_id in asset_ids {
-            match r#for.clone() {
-                AccountOrDexId::Account(account) => {
-                    if self
-                        .user_balances
-                        .get(&(account.clone(), asset_id.clone()))
-                        .is_none()
-                    {
-                        self.user_balances
-                            .insert((account.clone(), asset_id.clone()), U128(0));
-                        self.user_registered_assets
-                            .entry(account)
-                            .or_default()
-                            .push(asset_id.clone());
-                    }
-                }
-                AccountOrDexId::Dex(dex_id) => {
-                    if self
-                        .dex_balances
-                        .get(&(dex_id.clone(), asset_id.clone()))
-                        .is_none()
-                    {
-                        self.dex_balances
-                            .insert((dex_id, asset_id.clone()), U128(0));
-                    }
-                }
+        let asset_balances = self.asset_balances_or_new(&r#for);
+        for asset_id in &asset_ids {
+            if !asset_balances.contains_key(asset_id) {
+                asset_balances.insert(asset_id.clone(), U128(0));
             }
+        }
+        asset_balances.flush();
+        for asset_id in asset_ids {
             if self.total_in_custody.get(&asset_id).is_none() {
                 self.total_in_custody.insert(asset_id, U128(0));
             }
         }
         self.user_balances.flush();
-        self.user_registered_assets.flush();
         self.dex_balances.flush();
         self.total_in_custody.flush();
         let storage_usage_after = near_sdk::env::storage_usage();

@@ -3,10 +3,15 @@ use intear_dex_types::{AccountOrDexId, AssetId, DexId};
 use near_sdk::NearToken;
 
 // The engine's collections live under a one-byte prefix (a StorageKey
-// variant); total_in_custody is an IterableMap, whose key list and value map
-// add one more byte each
+// variant). IterableMaps add one more byte for their key list and their
+// value map, and keep values under a hash of the key. The balances of an
+// account or a dex are an IterableMap under a prefix of their own: a
+// StorageKey variant and a hash of the owner.
 const COLLECTION_PREFIX_BYTES: usize = 1;
 const ITERABLE_MAP_PART_PREFIX_BYTES: usize = 1;
+const HASHED_KEY_BYTES: usize = 32;
+const OWNER_BALANCES_PREFIX_BYTES: usize = COLLECTION_PREFIX_BYTES + 32;
+const BORSH_LENGTH_BYTES: usize = 4;
 const U32_BYTES: usize = 4;
 const U128_BYTES: usize = 16;
 
@@ -29,6 +34,77 @@ fn sum(bytes: &[u64]) -> color_eyre::eyre::Result<u64> {
         .ok_or_else(|| eyre!("Storage size overflow"))
 }
 
+fn owner_bytes(owner: &AccountOrDexId) -> color_eyre::eyre::Result<usize> {
+    Ok(match owner {
+        AccountOrDexId::Account(account_id) => near_sdk::borsh::to_vec(account_id)?.len(),
+        AccountOrDexId::Dex(dex_id) => near_sdk::borsh::to_vec(dex_id)?.len(),
+    })
+}
+
+/// The record that the first balance of an account or a dex creates: where
+/// its balances are, as the length and prefix of their key list and the
+/// prefix of their value map
+pub fn owner_balances_record_bytes(
+    owner: &AccountOrDexId,
+    extra_bytes_per_record: u64,
+) -> color_eyre::eyre::Result<u64> {
+    let part_prefix_bytes = BORSH_LENGTH_BYTES
+        .checked_add(OWNER_BALANCES_PREFIX_BYTES)
+        .and_then(|bytes| bytes.checked_add(ITERABLE_MAP_PART_PREFIX_BYTES))
+        .ok_or_else(|| eyre!("Storage size overflow"))?;
+    record_bytes(
+        &[
+            COLLECTION_PREFIX_BYTES,
+            owner_bytes(owner)?,
+            U32_BYTES,
+            part_prefix_bytes,
+            part_prefix_bytes,
+        ],
+        extra_bytes_per_record,
+    )
+}
+
+/// The records of one balance among the balances of its owner: the asset in
+/// their key list, and the balance with its index in the list under a hash
+pub fn balance_record_bytes(
+    asset_id: &AssetId,
+    extra_bytes_per_record: u64,
+) -> color_eyre::eyre::Result<u64> {
+    sum(&[
+        record_bytes(
+            &[
+                OWNER_BALANCES_PREFIX_BYTES,
+                ITERABLE_MAP_PART_PREFIX_BYTES,
+                U32_BYTES,
+                near_sdk::borsh::to_vec(asset_id)?.len(),
+            ],
+            extra_bytes_per_record,
+        )?,
+        record_bytes(
+            &[HASHED_KEY_BYTES, U128_BYTES, U32_BYTES],
+            extra_bytes_per_record,
+        )?,
+    ])
+}
+
+/// A balance in the layout from before the engine's migration: one record
+/// keyed by owner and asset
+pub fn flat_balance_record_bytes(
+    owner: &AccountOrDexId,
+    asset_id: &AssetId,
+    extra_bytes_per_record: u64,
+) -> color_eyre::eyre::Result<u64> {
+    record_bytes(
+        &[
+            COLLECTION_PREFIX_BYTES,
+            owner_bytes(owner)?,
+            near_sdk::borsh::to_vec(asset_id)?.len(),
+            U128_BYTES,
+        ],
+        extra_bytes_per_record,
+    )
+}
+
 /// What registering `asset_id` for `owner` adds to the engine's state; the
 /// engine charges it to the account that pays for the registration
 pub fn asset_registration_bytes(
@@ -38,41 +114,9 @@ pub fn asset_registration_bytes(
     asset_is_in_custody: bool,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
-    let asset_bytes = near_sdk::borsh::to_vec(asset_id)?.len();
-    let mut bytes = Vec::new();
-    match owner {
-        AccountOrDexId::Account(account_id) => {
-            bytes.push(record_bytes(
-                &[
-                    COLLECTION_PREFIX_BYTES,
-                    near_sdk::borsh::to_vec(&(account_id, asset_id))?.len(),
-                    U128_BYTES,
-                ],
-                extra_bytes_per_record,
-            )?);
-            // user_registered_assets keeps a Vec<AssetId> per account
-            bytes.push(if owner_has_registered_assets {
-                u64::try_from(asset_bytes)?
-            } else {
-                record_bytes(
-                    &[
-                        COLLECTION_PREFIX_BYTES,
-                        near_sdk::borsh::to_vec(account_id)?.len(),
-                        U32_BYTES,
-                        asset_bytes,
-                    ],
-                    extra_bytes_per_record,
-                )?
-            });
-        }
-        AccountOrDexId::Dex(dex_id) => bytes.push(record_bytes(
-            &[
-                COLLECTION_PREFIX_BYTES,
-                near_sdk::borsh::to_vec(&(dex_id, asset_id))?.len(),
-                U128_BYTES,
-            ],
-            extra_bytes_per_record,
-        )?),
+    let mut bytes = vec![balance_record_bytes(asset_id, extra_bytes_per_record)?];
+    if !owner_has_registered_assets {
+        bytes.push(owner_balances_record_bytes(owner, extra_bytes_per_record)?);
     }
     if !asset_is_in_custody {
         bytes.push(record_bytes(
@@ -80,18 +124,12 @@ pub fn asset_registration_bytes(
                 COLLECTION_PREFIX_BYTES,
                 ITERABLE_MAP_PART_PREFIX_BYTES,
                 U32_BYTES,
-                asset_bytes,
+                near_sdk::borsh::to_vec(asset_id)?.len(),
             ],
             extra_bytes_per_record,
         )?);
         bytes.push(record_bytes(
-            &[
-                COLLECTION_PREFIX_BYTES,
-                ITERABLE_MAP_PART_PREFIX_BYTES,
-                asset_bytes,
-                U128_BYTES,
-                U32_BYTES,
-            ],
+            &[HASHED_KEY_BYTES, U128_BYTES, U32_BYTES],
             extra_bytes_per_record,
         )?);
     }
@@ -186,8 +224,8 @@ mod tests {
     fn registering_an_asset_counts_every_new_record() {
         let account_id: AccountId = "alice.near".parse().unwrap();
         let usdt: AssetId = "nep141:usdt.tether-token.near".parse().unwrap();
-        // balance: 1 + (4 + 10) + (1 + 4 + 22) + 16 + 40, index entry grows by the asset
-        let existing_index_bytes = asset_registration_bytes(
+        // key list entry: (33 + 1 + 4) + (1 + 4 + 22) + 40, value: 32 + 16 + 4 + 40
+        let bytes_for_owner_with_balances = asset_registration_bytes(
             &AccountOrDexId::Account(account_id.clone()),
             &usdt,
             true,
@@ -195,12 +233,12 @@ mod tests {
             40,
         )
         .unwrap();
-        assert_eq!(existing_index_bytes, 98 + 27);
-        // a new index entry: 1 + (4 + 10) + 4 + 27 + 40
-        let new_index_bytes =
+        assert_eq!(bytes_for_owner_with_balances, 105 + 92);
+        // where the owner's balances are: 1 + (4 + 10) + 4 + 2 * (4 + 33 + 1) + 40
+        let bytes_for_new_owner =
             asset_registration_bytes(&AccountOrDexId::Account(account_id), &usdt, false, true, 40)
                 .unwrap();
-        assert_eq!(new_index_bytes, 98 + 86);
+        assert_eq!(bytes_for_new_owner, 105 + 92 + 135);
     }
 
     #[test]

@@ -203,6 +203,7 @@ impl DepositContext {
             &previous_context,
             signer_id,
             move |preflight| {
+                preflight.ensure_engine_not_paused()?;
                 if amount.is_zero() {
                     return Err(PreflightError::ZeroAmount.into_report());
                 }
@@ -307,6 +308,7 @@ impl WithdrawContext {
             &previous_context,
             signer_id,
             move |preflight| {
+                preflight.ensure_engine_not_paused()?;
                 if dex_id.deployer != preflight.signer_id {
                     return Err(PreflightError::NotDexDeployer {
                         dex_id: dex_id.clone(),

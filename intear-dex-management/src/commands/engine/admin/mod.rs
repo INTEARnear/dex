@@ -1,7 +1,7 @@
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 pub mod custody;
-pub mod migration_args;
+pub mod migrate;
 pub mod rescue;
 pub mod trusted_code_deployer;
 
@@ -33,8 +33,8 @@ pub enum AdminAction {
     /// Send out what the engine holds of an asset that no balance accounts for
     Rescue(self::rescue::Rescue),
     #[strum_discriminants(strum(
-        message = "migration-args             - Arguments of the engine's migrate and backfill_registered_assets, from its state"
+        message = "migrate                    - Pause, migrate the engine to code that keeps balances by owner, unpause"
     ))]
-    /// Arguments of the engine's migrate and backfill_registered_assets, from its state
-    MigrationArgs(self::migration_args::MigrationArgs),
+    /// Pause, migrate the engine to code that keeps balances by owner, unpause
+    Migrate(self::migrate::Migrate),
 }

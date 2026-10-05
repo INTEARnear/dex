@@ -64,6 +64,11 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
         self.sum
     }
 
+    /// Used by migration
+    pub const fn set_sum(&mut self, sum: StorageUsed) {
+        self.sum = sum;
+    }
+
     fn add_to_sum_total(&mut self, amount: NearToken) {
         self.sum.total = self
             .sum
@@ -252,6 +257,7 @@ impl StorageManagement for DexEngine {
         account_id: Option<AccountId>,
         registration_only: Option<bool>,
     ) -> StorageBalance {
+        self.assert_not_paused();
         self.user_storage_balances.storage_deposit(
             account_id.unwrap_or_else(near_sdk::env::predecessor_account_id),
             registration_only,
@@ -262,6 +268,7 @@ impl StorageManagement for DexEngine {
     #[payable]
     fn storage_withdraw(&mut self, amount: Option<NearToken>) -> StorageBalance {
         near_sdk::assert_one_yocto();
+        self.assert_not_paused();
         self.user_storage_balances
             .storage_withdraw(near_sdk::env::predecessor_account_id(), amount)
     }
@@ -290,6 +297,7 @@ impl DexEngine {
         dex_id: DexId,
         registration_only: Option<bool>,
     ) -> StorageBalance {
+        self.assert_not_paused();
         self.dex_storage_balances.storage_deposit(
             dex_id,
             registration_only,
@@ -304,6 +312,7 @@ impl DexEngine {
         amount: Option<NearToken>,
     ) -> StorageBalance {
         near_sdk::assert_one_yocto();
+        self.assert_not_paused();
         expect!(
             dex_id.deployer == near_sdk::env::predecessor_account_id(),
             "Only the deployer can withdraw dex storage"

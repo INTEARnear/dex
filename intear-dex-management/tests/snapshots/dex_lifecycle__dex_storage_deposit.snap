@@ -7,7 +7,7 @@ exit code: 0
 --- stdout ---
 {
   "total": "20515910000000000000000000",
-  "available": "18924120000000000000000000"
+  "available": "18927010000000000000000000"
 }
 --- stderr ---
 ├  sandbox · signer alice.near · dex.intear.near

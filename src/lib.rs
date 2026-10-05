@@ -5,14 +5,14 @@ pub mod asset_deposit;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
+pub mod migration;
 pub mod rescue;
 pub mod storage_management;
 
 use std::collections::HashMap;
 
 use crate::{
-    internal_operations::TradeAccount,
-    storage_management::{StorageBalances, StorageUsed},
+    internal_operations::TradeAccount, migration::FlatBalances, storage_management::StorageBalances,
 };
 use intear_dex_types::{
     AccountOrDexId, AssetId, CAN_PAUSE, DexId, DirectWithdrawAmount, IntearDexEvent, Operation,
@@ -25,13 +25,15 @@ use near_sdk::{
     store::{IterableMap, LookupMap},
 };
 
+pub type AssetBalances = IterableMap<AssetId, U128>;
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct DexEngine {
     /// Assets that are custodied by the dex engine contract
     /// for the dexes that run inside it. Other dexes or users
     /// can't access other dexes' balances.
-    dex_balances: LookupMap<(DexId, AssetId), U128>,
+    dex_balances: LookupMap<DexId, AssetBalances>,
     /// Persistent storage for each dex, similar to contract
     /// storage of traditional smart contract dexes. It's
     /// public, but currently there's no way to access other
@@ -46,9 +48,7 @@ pub struct DexEngine {
     /// Balances for each user, custodied by the dex engine
     /// contract for faster access. This reduces the need for
     /// ft_transfer_call, which takes time.
-    user_balances: LookupMap<(AccountId, AssetId), U128>,
-    /// Assets registered for each user.
-    user_registered_assets: LookupMap<AccountId, Vec<AssetId>>,
+    user_balances: LookupMap<AccountId, AssetBalances>,
     /// Storage balances for each user, translated to storage
     /// of this smart contract. use storage management methods
     /// to interact with it, such as storage_deposit.
@@ -62,6 +62,10 @@ pub struct DexEngine {
     /// without causing any issues.
     total_in_custody: IterableMap<AssetId, U128>,
     paused: bool,
+    /// Balances in the layout from before `migrate`, until
+    /// `migrate_balances` moved all of them and `finish_migration`
+    /// ended the migration. The engine stays paused until then.
+    balances_to_migrate: Option<FlatBalances>,
     /// The only account that can deploy dex code. Dex code isn't
     /// validated when it's loaded, so it must come from a trusted source.
     trusted_code_deployer: AccountId,
@@ -70,31 +74,25 @@ pub struct DexEngine {
 #[derive(BorshStorageKey)]
 #[near(serializers=[borsh])]
 enum StorageKey {
-    DexBalances,
+    /// Dex balances before `migrate`, keyed by dex and asset
+    #[allow(dead_code)]
+    FlatDexBalances,
     DexStorage,
     DexCodes,
     DexStorageBalances,
-    UserBalances,
+    /// User balances before `migrate`, keyed by account and asset
+    #[allow(dead_code)]
+    FlatUserBalances,
     UserStorageBalances,
     ContractTrackedBalance,
-    UserRegisteredAssets,
-}
-
-impl DexEngine {
-    fn new_state(trusted_code_deployer: AccountId) -> Self {
-        Self {
-            dex_balances: LookupMap::new(StorageKey::DexBalances),
-            dex_storage: LookupMap::new(StorageKey::DexStorage),
-            dex_codes: LookupMap::new(StorageKey::DexCodes),
-            dex_storage_balances: StorageBalances::new(StorageKey::DexStorageBalances),
-            user_balances: LookupMap::new(StorageKey::UserBalances),
-            user_registered_assets: LookupMap::new(StorageKey::UserRegisteredAssets),
-            user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
-            total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
-            paused: false,
-            trusted_code_deployer,
-        }
-    }
+    UserBalances,
+    UserBalancesOf {
+        account_id: AccountId,
+    },
+    DexBalances,
+    DexBalancesOf {
+        dex_id: DexId,
+    },
 }
 
 enum CallType<'a> {
@@ -257,85 +255,17 @@ pub struct RunnerData<'a> {
 impl DexEngine {
     #[init]
     pub fn new(trusted_code_deployer: AccountId) -> Self {
-        Self::new_state(trusted_code_deployer)
-    }
-
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate(
-        trusted_code_deployer: AccountId,
-        dex_storage_balances_total: NearToken,
-        dex_storage_balances_used: NearToken,
-        user_storage_balances_total: NearToken,
-        user_storage_balances_used: NearToken,
-    ) -> Self {
-        // Before 3adeba3, NEAR converted to dex storage deposits through
-        // `add_storage_deposit` was removed from the dex balance, but not from
-        // `total_in_custody`, so NEAR in custody was overcounted by this amount.
-        const NEAR_CUSTODY_OVERCOUNT: u128 = 2_455_360_000_000_000_000_000_001;
-
-        #[near(serializers=[borsh])]
-        struct OldState {
-            dex_balances: LookupMap<(DexId, AssetId), U128>,
-            dex_storage: DexStorage,
-            dex_codes: LookupMap<DexId, Vec<u8>>,
-            dex_storage_balances: LookupMap<DexId, StorageUsed>,
-            user_balances: LookupMap<(AccountId, AssetId), U128>,
-            user_storage_balances: LookupMap<AccountId, StorageUsed>,
-            total_in_custody: IterableMap<AssetId, U128>,
-            paused: bool,
-            code_deployment_allowed: bool,
-        }
-        let mut old_state: OldState =
-            near_sdk::env::state_read().expect("Failed to read old state");
-        let near_in_custody = old_state
-            .total_in_custody
-            .get_mut(&AssetId::Near)
-            .expect("NEAR is not in total_in_custody");
-        near_in_custody.0 = near_in_custody
-            .0
-            .checked_sub(NEAR_CUSTODY_OVERCOUNT)
-            .expect("NEAR in custody is less than the overcount");
-        old_state.total_in_custody.flush();
         Self {
-            dex_balances: old_state.dex_balances,
-            dex_storage: old_state.dex_storage,
-            dex_codes: old_state.dex_codes,
-            dex_storage_balances: StorageBalances::from_parts(
-                old_state.dex_storage_balances,
-                StorageUsed {
-                    total: dex_storage_balances_total,
-                    used: dex_storage_balances_used,
-                },
-            ),
-            user_balances: old_state.user_balances,
-            user_registered_assets: LookupMap::new(StorageKey::UserRegisteredAssets),
-            user_storage_balances: StorageBalances::from_parts(
-                old_state.user_storage_balances,
-                StorageUsed {
-                    total: user_storage_balances_total,
-                    used: user_storage_balances_used,
-                },
-            ),
-            total_in_custody: old_state.total_in_custody,
-            paused: old_state.paused,
+            dex_balances: LookupMap::new(StorageKey::DexBalances),
+            dex_storage: LookupMap::new(StorageKey::DexStorage),
+            dex_codes: LookupMap::new(StorageKey::DexCodes),
+            dex_storage_balances: StorageBalances::new(StorageKey::DexStorageBalances),
+            user_balances: LookupMap::new(StorageKey::UserBalances),
+            user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
+            total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
+            paused: false,
+            balances_to_migrate: None,
             trusted_code_deployer,
-        }
-    }
-
-    /// Lists assets registered before `user_registered_assets` existed.
-    /// Listed entries are skipped. Storage is paid from untracked NEAR.
-    #[private]
-    pub fn backfill_registered_assets(&mut self, entries: Vec<(AccountId, AssetId)>) {
-        for (account_id, asset_id) in entries {
-            self.assert_asset_registered(
-                AccountOrDexId::Account(account_id.clone()),
-                asset_id.clone(),
-            );
-            let registered_assets = self.user_registered_assets.entry(account_id).or_default();
-            if !registered_assets.contains(&asset_id) {
-                registered_assets.push(asset_id);
-            }
         }
     }
 
@@ -371,6 +301,7 @@ impl DexEngine {
             CAN_PAUSE.contains(&near_sdk::env::predecessor_account_id().as_str()),
             "Only authorized accounts can pause the contract"
         );
+        self.assert_not_migrating();
         self.paused = false;
     }
 
@@ -531,36 +462,31 @@ impl DexEngine {
     }
 
     pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<U128> {
-        match of {
-            AccountOrDexId::Account(account) => {
-                self.user_balances.get(&(account, asset_id)).copied()
-            }
-            AccountOrDexId::Dex(dex_id) => self.dex_balances.get(&(dex_id, asset_id)).copied(),
-        }
+        self.assert_not_migrating();
+        self.asset_balances(&of)?.get(&asset_id).copied()
     }
 
     pub fn registered_assets_of(
         &self,
-        account_id: AccountId,
+        account_id: Option<AccountId>,
+        dex_id: Option<DexId>,
         from_index: u32,
         limit: u32,
     ) -> Vec<(AssetId, U128)> {
-        let Some(registered_assets) = self.user_registered_assets.get(&account_id) else {
+        let of = match (account_id, dex_id) {
+            (Some(account_id), None) => AccountOrDexId::Account(account_id),
+            (None, Some(dex_id)) => AccountOrDexId::Dex(dex_id),
+            _ => panic!("account_id and dex_id are mutually exclusive"),
+        };
+        self.assert_not_migrating();
+        let Some(asset_balances) = self.asset_balances(&of) else {
             return Vec::new();
         };
-        registered_assets
+        asset_balances
             .iter()
             .skip(from_index as usize)
             .take(limit as usize)
-            .map(|asset_id| {
-                let balance = self
-                    .user_balances
-                    .get(&(account_id.clone(), asset_id.clone()))
-                    .unwrap_or_else(|| {
-                        panic!("Registered asset {asset_id} of {account_id} has no balance")
-                    });
-                (asset_id.clone(), *balance)
-            })
+            .map(|(asset_id, balance)| (asset_id.clone(), *balance))
             .collect()
     }
 
@@ -593,20 +519,25 @@ impl DexEngine {
     }
 
     pub fn are_assets_registered(&self, asset_ids: Vec<AssetId>, r#for: AccountOrDexId) -> bool {
-        match r#for {
-            AccountOrDexId::Account(account) => asset_ids.into_iter().all(|asset_id| {
-                self.user_balances
-                    .contains_key(&(account.clone(), asset_id))
-            }),
-            AccountOrDexId::Dex(dex_id) => asset_ids
-                .into_iter()
-                .all(|asset_id| self.dex_balances.contains_key(&(dex_id.clone(), asset_id))),
-        }
+        self.assert_not_migrating();
+        let Some(asset_balances) = self.asset_balances(&r#for) else {
+            return asset_ids.is_empty();
+        };
+        asset_ids
+            .iter()
+            .all(|asset_id| asset_balances.contains_key(asset_id))
     }
 }
 
 impl DexEngine {
     pub fn assert_not_paused(&self) {
         expect!(!self.paused, "Contract is paused");
+    }
+
+    pub fn assert_not_migrating(&self) {
+        expect!(
+            self.balances_to_migrate.is_none(),
+            "Balances are still being migrated, and the engine stays paused until the migration finishes"
+        );
     }
 }

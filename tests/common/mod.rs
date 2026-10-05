@@ -98,14 +98,23 @@ pub async fn get_inner_asset_balance(
 
 pub async fn get_registered_assets(
     dex_engine_contract: &Contract,
-    account_id: &AccountId,
+    of: &AccountOrDexId,
     from_index: u32,
     limit: u32,
 ) -> Result<Vec<(AssetId, U128)>, Box<dyn std::error::Error>> {
     let registered_assets = dex_engine_contract
         .view("registered_assets_of")
         .args_json(json!({
-            "account_id": account_id,
+            "account_id": if let AccountOrDexId::Account(account_id) = of {
+                Some(account_id)
+            } else {
+                None
+            },
+            "dex_id": if let AccountOrDexId::Dex(dex_id) = of {
+                Some(dex_id)
+            } else {
+                None
+            },
             "from_index": from_index,
             "limit": limit,
         }))

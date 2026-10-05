@@ -148,10 +148,31 @@ pub fn untracked_near(
     )
 }
 
+/// While balances move to their new layout, `migration_progress` says how
+/// many are left
+#[derive(serde::Deserialize)]
+pub struct MigrationProgress {
+    pub user_balances_left: u32,
+    pub dex_balances_left: u32,
+}
+
+pub fn migration_progress(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<Option<MigrationProgress>> {
+    super::view_json(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "migration_progress",
+        json!({}),
+    )
+}
+
 pub fn registered_assets_of(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
-    account_id: &AccountId,
+    owner: &AccountOrDexId,
 ) -> color_eyre::eyre::Result<Vec<(AssetId, U128)>> {
     const PAGE_SIZE: u32 = 100;
     let mut registered_assets = Vec::new();
@@ -162,7 +183,7 @@ pub fn registered_assets_of(
             block_reference,
             &ENGINE_ACCOUNT_ID.to_owned(),
             "registered_assets_of",
-            json!({ "account_id": account_id, "from_index": from_index, "limit": PAGE_SIZE }),
+            json!({ "of": owner, "from_index": from_index, "limit": PAGE_SIZE }),
         )?;
         let is_last_page = page.len() < PAGE_SIZE as usize;
         registered_assets.extend(page);
@@ -170,6 +191,23 @@ pub fn registered_assets_of(
             return Ok(registered_assets);
         }
     }
+}
+
+/// Whether an account or a dex has balances on the engine yet, which the
+/// first registration for it creates
+pub fn has_registered_assets(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    owner: &AccountOrDexId,
+) -> color_eyre::eyre::Result<bool> {
+    let first_asset: Vec<(AssetId, U128)> = super::view_json(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "registered_assets_of",
+        json!({ "of": owner, "from_index": 0, "limit": 1 }),
+    )?;
+    Ok(!first_asset.is_empty())
 }
 
 pub fn asset_balance_of(

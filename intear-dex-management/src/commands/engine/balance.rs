@@ -1,9 +1,7 @@
-use color_eyre::eyre::bail;
 use intear_dex_types::{AccountOrDexId, AssetId};
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
-use near_primitives::types::AccountId;
 use serde_json::json;
 
 use crate::chain::asset_metadata::AssetMetadataCache;
@@ -21,7 +19,7 @@ pub struct Balance {
     /// An account (alice.near) or a dex (slimedragon.near/xyk)
     owner: AccountOrDexIdArg,
     #[interactive_clap(skip_default_input_arg)]
-    /// Comma-separated asset ids, or all to list every asset registered for an account
+    /// Comma-separated asset ids, or all to list every asset registered for the account or dex
     assets: AssetSelectionArg,
     #[interactive_clap(named_arg)]
     /// Select network
@@ -41,13 +39,13 @@ impl Balance {
         _context: &crate::GlobalContext,
     ) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
         crate::inputs::prompt(
-            "Which assets? Comma-separated asset ids (near,nep141:usdt.tether-token.near), or all for every asset registered for an account",
+            "Which assets? Comma-separated asset ids (near,nep141:usdt.tether-token.near), or all for every registered asset",
         )
     }
 }
 
 enum BalanceQuery {
-    AllRegisteredAssetsOf(AccountId),
+    AllRegisteredAssetsOf(AccountOrDexId),
     ListedAssets(AccountOrDexId, Vec<AssetId>),
 }
 
@@ -59,15 +57,10 @@ impl BalanceContext {
         previous_context: crate::GlobalContext,
         scope: &<Balance as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let query = match (&scope.owner.0, &scope.assets) {
-            (AccountOrDexId::Account(account_id), AssetSelectionArg::All) => {
-                BalanceQuery::AllRegisteredAssetsOf(account_id.clone())
-            }
-            (AccountOrDexId::Dex(dex_id), AssetSelectionArg::All) => bail!(
-                "The assets of a dex can't be listed, so name them, e.g. `engine balance {dex_id} near,nep141:usdt.tether-token.near`"
-            ),
-            (owner, AssetSelectionArg::Listed(asset_ids)) => {
-                BalanceQuery::ListedAssets(owner.clone(), asset_ids.clone())
+        let query = match &scope.assets {
+            AssetSelectionArg::All => BalanceQuery::AllRegisteredAssetsOf(scope.owner.0.clone()),
+            AssetSelectionArg::Listed(asset_ids) => {
+                BalanceQuery::ListedAssets(scope.owner.0.clone(), asset_ids.clone())
             }
         };
         let owner = scope.owner.clone();
@@ -76,8 +69,8 @@ impl BalanceContext {
             std::sync::Arc::new(move |network_config, block_reference| {
                 let block_reference = engine::engine_view_block(network_config, block_reference)?;
                 let balances: Vec<(AssetId, Option<u128>)> = match &query {
-                    BalanceQuery::AllRegisteredAssetsOf(account_id) => {
-                        engine::registered_assets_of(network_config, &block_reference, account_id)?
+                    BalanceQuery::AllRegisteredAssetsOf(owner) => {
+                        engine::registered_assets_of(network_config, &block_reference, owner)?
                             .into_iter()
                             .map(|(asset_id, balance)| (asset_id, Some(balance.0)))
                             .collect()

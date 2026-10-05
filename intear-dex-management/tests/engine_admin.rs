@@ -1,6 +1,9 @@
 mod common;
 
-use common::{Cli, fixture_account, start_sandbox_with_xyk_pools};
+use common::{
+    Cli, fixture_account, start_sandbox_with_mainnet_engine, start_sandbox_with_xyk_pools,
+};
+use intear_dex_test_support::get_compiled_wasms;
 use intear_dex_types::{
     AccountOrDexId, AssetId, Operation, SwapOperationAmount, SwapRequestAmount, WithdrawAmount,
 };
@@ -288,106 +291,6 @@ async fn admin() {
             "nep141:usdt.tether-token.near"
         ])
     );
-
-    let output_directory = tempfile::tempdir().unwrap();
-    let output_directory_path = output_directory.path().join("engine-upgrade");
-    let output_directory_path = output_directory_path.to_str().unwrap();
-    insta::with_settings!({filters => vec![
-        (regex::escape(output_directory.path().to_str().unwrap()).as_str(), "[TEMPORARY DIRECTORY]"),
-        (r"(Block +)\d+", "$1[HEIGHT]"),
-        // The dex's code takes storage, which changes with every build
-        (r"(Dex storage balances +\S+ NEAR total, )\S+ NEAR", "$1[BUILD DEPENDENT] NEAR"),
-    ]}, {
-        insta::assert_snapshot!(
-            "migration_args_with_missing_trusted_code_deployer",
-            cli.view(&[
-                "engine",
-                "admin",
-                "migration-args",
-                "nobody.near",
-                output_directory_path
-            ])
-        );
-        insta::assert_snapshot!(
-            "migration_args",
-            cli.view(&[
-                "engine",
-                "admin",
-                "migration-args",
-                "bob.near",
-                output_directory_path
-            ])
-        );
-        insta::assert_snapshot!(
-            "migration_args_into_directory_with_files",
-            cli.view(&[
-                "engine",
-                "admin",
-                "migration-args",
-                "slimedragon.near",
-                output_directory_path
-            ])
-        );
-    });
-    let migrate_args: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            output_directory
-                .path()
-                .join("engine-upgrade/migrate-args.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let total_storage_balances = total_storage_balances(&sandbox).await;
-    let used = |storage_balance: &serde_json::Value| {
-        storage_balance["total"]
-            .as_str()
-            .unwrap()
-            .parse::<u128>()
-            .unwrap()
-            - storage_balance["available"]
-                .as_str()
-                .unwrap()
-                .parse::<u128>()
-                .unwrap()
-    };
-    assert_eq!(
-        migrate_args,
-        json!({
-            "trusted_code_deployer": "bob.near",
-            "dex_storage_balances_total": total_storage_balances["dexes"]["total"],
-            "dex_storage_balances_used": used(&total_storage_balances["dexes"]).to_string(),
-            "user_storage_balances_total": total_storage_balances["users"]["total"],
-            "user_storage_balances_used": used(&total_storage_balances["users"]).to_string(),
-        })
-    );
-    // The batch is what the engine's backfill takes, signed by itself
-    let engine_id: AccountId = ENGINE.parse().unwrap();
-    fixture_account(&sandbox, ENGINE)
-        .call(&engine_id, "backfill_registered_assets")
-        .args(
-            std::fs::read(
-                output_directory
-                    .path()
-                    .join("engine-upgrade/backfill-001.json"),
-            )
-            .unwrap(),
-        )
-        .max_gas()
-        .transact()
-        .await
-        .unwrap()
-        .into_result()
-        .unwrap();
-    insta::assert_snapshot!(
-        "migration_args_backfill_batch",
-        std::fs::read_to_string(
-            output_directory
-                .path()
-                .join("engine-upgrade/backfill-001.json")
-        )
-        .unwrap()
-    );
 }
 
 #[tokio::test]
@@ -490,4 +393,131 @@ async fn operations() {
         insta::assert_snapshot!("operations_run_without_operations", no_operations_record);
         insta::assert_snapshot!("operations_run", batch_record);
     });
+}
+
+/// The engine's code as a file, for `engine admin migrate`
+async fn engine_code_file() -> tempfile::NamedTempFile {
+    let engine_code = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        engine_code.path(),
+        &get_compiled_wasms().await.contract_wasm,
+    )
+    .unwrap();
+    engine_code
+}
+
+#[tokio::test]
+async fn migrate_checks() {
+    let sandbox = start_sandbox_with_xyk_pools().await;
+    let cli = Cli::connected_to(&sandbox);
+    let engine_code = engine_code_file().await;
+    let engine_code_path = engine_code.path().to_str().unwrap();
+    insta::with_settings!({filters => vec![
+        (regex::escape(engine_code_path).as_str(), "[ENGINE CODE]"),
+        // The code changes with every build
+        (r"to code \S+ \(\d+ bytes\)", "to code [HASH] ([BUILD DEPENDENT] bytes)"),
+    ]}, {
+        insta::assert_snapshot!(
+            "migrate_by_account_outside_can_pause",
+            cli.run_as_given(&[
+                "engine",
+                "admin",
+                "migrate",
+                "alice.near",
+                "slimedragon.near",
+                engine_code_path,
+                "sign-with-legacy-keychain",
+                "network-config",
+                "sandbox",
+            ])
+        );
+        // The sandbox's engine already runs this code with balances by owner
+        insta::assert_snapshot!(
+            "migrate_of_migrated_engine",
+            cli.run_as_given(&[
+                "engine",
+                "admin",
+                "migrate",
+                "pause.slimedragon.near",
+                "slimedragon.near",
+                engine_code_path,
+                "sign-with-legacy-keychain",
+                "network-config",
+                "sandbox",
+            ])
+        );
+    });
+}
+
+/// The whole migration of the engine as it is on mainnet: pause, deploy with
+/// migrate, move every balance, finish with the sums of storage balances,
+/// unpause. Mainnet's state changes, so this checks the result instead of a
+/// snapshot.
+#[tokio::test]
+async fn migrate_of_mainnet_engine() {
+    let sandbox = start_sandbox_with_mainnet_engine().await;
+    let cli = Cli::connected_to(&sandbox);
+    cli.save_key_to_legacy_keychain("pause.slimedragon.near");
+    cli.save_key_to_legacy_keychain(ENGINE);
+    let engine_code = engine_code_file().await;
+    let migrate = [
+        "--json",
+        "engine",
+        "admin",
+        "migrate",
+        "pause.slimedragon.near",
+        "slimedragon.near",
+        engine_code.path().to_str().unwrap(),
+        "sign-with-legacy-keychain",
+        "network-config",
+        "sandbox",
+    ];
+    let record = cli.run_as_given(&migrate);
+    assert!(record.contains("exit code: 0"), "{record}");
+    let summary: serde_json::Value = serde_json::from_str(
+        record
+            .split_once("--- stdout ---\n")
+            .and_then(|(_, rest)| rest.split_once("--- stderr ---"))
+            .map(|(stdout, _)| stdout)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(summary["paused"], json!(false));
+    assert_eq!(summary["trusted_code_deployer"], json!("slimedragon.near"));
+
+    sandbox.fast_forward(3).await.unwrap();
+    let engine_id: AccountId = ENGINE.parse().unwrap();
+    let view = |method_name: &'static str| {
+        let sandbox = &sandbox;
+        let engine_id = &engine_id;
+        async move {
+            sandbox
+                .view(engine_id, method_name)
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .unwrap()
+        }
+    };
+    assert_eq!(view("migration_progress").await, json!(null));
+    assert_eq!(view("is_paused").await, json!(false));
+    // The engine owes no more NEAR than it has
+    view("untracked_near").await;
+    let total_storage_balances = total_storage_balances(&sandbox).await;
+    assert_eq!(
+        total_storage_balances["users"]["total"],
+        summary["user_storage_balances"]["total"]
+    );
+    assert_eq!(
+        total_storage_balances["dexes"]["total"],
+        summary["dex_storage_balances"]["total"]
+    );
+
+    // Running it again finds nothing left to do
+    let record = cli.run_as_given(&migrate);
+    assert!(
+        record.contains("exit code: 0")
+            && record.contains("already runs this code, and its balances are migrated"),
+        "{record}"
+    );
 }
