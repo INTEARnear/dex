@@ -15,14 +15,14 @@ use near_sdk::{
     store::{LookupMap, Vector},
 };
 use xyk_dex_types::{
-    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CreatePoolArgs,
-    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration,
-    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
-    LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView,
-    ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, SetReferrerSettingsArgs, SharesBalance, SwapArgs, UpgradePoolArgs,
-    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CreatePoolArgs, CreatePoolResponse,
+    CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
+    GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs,
+    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
+    SetReferrerSettingsArgs, SharesBalance, SwapArgs, UpgradePoolArgs, WithdrawCommunityFeeArgs,
+    WithdrawFeesArgs, XykDexEvent, asset_account_ids,
 };
 
 #[cfg(target_arch = "wasm32")]

@@ -12,7 +12,7 @@ pub const LAST_CREATED_POOL_ID_MARKER: PoolId = PoolId::MAX;
 /// 100% = 1000000
 pub type FeeFraction = u32;
 pub const FULL_FEE_FRACTION: FeeFraction = 1000000;
-pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 2; // 50%
+pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 10 * 9; // 90%
 pub const MAX_FEE_RECEIVERS: usize = 42;
 pub const PROTOCOL_FEE: FeeFraction = FULL_FEE_FRACTION / 1000; // 0.1%
 pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
@@ -32,6 +32,10 @@ pub const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
 ];
 pub const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 pub const MAX_REFERRAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 20; // 5%
+const _: () = assert!(
+    MAX_TOTAL_FEE_FRACTION + PROTOCOL_FEE + MAX_REFERRAL_FEE_FRACTION < FULL_FEE_FRACTION,
+    "Pool, protocol, and referral fees combined must stay below 100%"
+);
 
 pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
 
@@ -481,7 +485,7 @@ impl FeeConfiguration {
             .map(|(_, fee)| *fee)
             .try_fold(0u32, |acc, fee| acc.checked_add(fee))
             .unwrap();
-        if total_fee >= MAX_TOTAL_FEE_FRACTION {
+        if total_fee > MAX_TOTAL_FEE_FRACTION {
             return Err(FeeConfigurationError::TotalFeeTooHigh);
         }
         if receivers.iter().any(|(receiver, _)| {
@@ -577,10 +581,10 @@ impl ReferralSettings {
                 fee_fraction,
                 fee_fraction_reduced,
             } => {
-                if *fee_fraction >= MAX_REFERRAL_FEE_FRACTION {
+                if *fee_fraction > MAX_REFERRAL_FEE_FRACTION {
                     return Err(ReferralSettingsError::FeeFractionTooHigh);
                 }
-                if *fee_fraction_reduced >= MAX_REFERRAL_FEE_FRACTION {
+                if *fee_fraction_reduced > MAX_REFERRAL_FEE_FRACTION {
                     return Err(ReferralSettingsError::FeeFractionReducedTooHigh);
                 }
             }
@@ -664,10 +668,9 @@ impl fmt::Display for FeeConfigurationError {
             Self::ReceiverFeeTooHigh => {
                 write!(f, "Fee must be less than {FULL_FEE_FRACTION} per receiver")
             }
-            Self::TotalFeeTooHigh => write!(
-                f,
-                "Fees must add up to less than 50% ({MAX_TOTAL_FEE_FRACTION})"
-            ),
+            Self::TotalFeeTooHigh => {
+                write!(f, "Fees must add up to at most {MAX_TOTAL_FEE_FRACTION}")
+            }
             Self::ProtocolFeeReceiverSet => {
                 write!(f, "Protocol fee receiver can't be set by users")
             }
@@ -694,11 +697,11 @@ impl fmt::Display for ReferralSettingsError {
         match self {
             Self::FeeFractionTooHigh => write!(
                 f,
-                "Fee fraction must be less than {MAX_REFERRAL_FEE_FRACTION}"
+                "Fee fraction must be at most {MAX_REFERRAL_FEE_FRACTION}"
             ),
             Self::FeeFractionReducedTooHigh => write!(
                 f,
-                "Fee fraction reduced must be less than {MAX_REFERRAL_FEE_FRACTION}"
+                "Fee fraction reduced must be at most {MAX_REFERRAL_FEE_FRACTION}"
             ),
         }
     }
