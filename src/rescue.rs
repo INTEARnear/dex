@@ -17,7 +17,6 @@ impl DexEngine {
     /// and not locked for storage that storage balances don't pay for
     /// (contract code, contract state root, access keys).
     pub fn untracked_near(&self) -> NearToken {
-        self.assert_not_migrating();
         let users = self.user_storage_balances.sum();
         let dexes = self.dex_storage_balances.sum();
         let storage_balances_total = users

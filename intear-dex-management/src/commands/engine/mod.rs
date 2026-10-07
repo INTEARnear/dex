@@ -68,8 +68,8 @@ pub enum EngineAction {
     /// Let the engine run again
     Unpause(self::pause::Unpause),
     #[strum_discriminants(strum(
-        message = "admin     - Trusted code deployer, custody and rescue of untracked assets, migration"
+        message = "admin     - Trusted code deployer, custody and rescue of untracked assets"
     ))]
-    /// Trusted code deployer, custody and rescue of untracked assets, migration
+    /// Trusted code deployer, custody and rescue of untracked assets
     Admin(self::admin::AdminCommands),
 }

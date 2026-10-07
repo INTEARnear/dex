@@ -1,15 +1,10 @@
-use std::num::NonZeroU32;
-
-use color_eyre::Section;
 use color_eyre::eyre::{Context, bail};
 use intear_dex_types::{AccountOrDexId, AssetId, DexId};
 use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
 use near_jsonrpc_client::methods::block::RpcBlockRequest;
-use near_jsonrpc_client::methods::query::RpcQueryRequest;
-use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_primitives::types::{AccountId, BlockId, BlockReference};
-use near_primitives::views::{BlockView, QueryRequest};
+use near_primitives::views::BlockView;
 use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
 use serde_json::json;
@@ -144,27 +139,6 @@ pub fn untracked_near(
         block_reference,
         &ENGINE_ACCOUNT_ID.to_owned(),
         "untracked_near",
-        json!({}),
-    )
-}
-
-/// While balances move to their new layout, `migration_progress` says how
-/// many are left
-#[derive(serde::Deserialize)]
-pub struct MigrationProgress {
-    pub user_balances_left: u32,
-    pub dex_balances_left: u32,
-}
-
-pub fn migration_progress(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-) -> color_eyre::eyre::Result<Option<MigrationProgress>> {
-    super::view_json(
-        network_config,
-        block_reference,
-        &ENGINE_ACCOUNT_ID.to_owned(),
-        "migration_progress",
         json!({}),
     )
 }
@@ -358,73 +332,4 @@ pub fn dex_view<ViewResult: near_sdk::borsh::BorshDeserialize>(
     )?;
     near_sdk::borsh::from_slice(&result)
         .wrap_err_with(|| format!("Unexpected result of {method_name} on dex {dex_id}"))
-}
-
-/// The engine's storage records under one collection prefix, as key and
-/// value bytes, read in pages: nodes refuse to return the whole state of a
-/// contract whose storage is larger than their limit, 50 KB by default
-pub fn state_records_with_prefix(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-    prefix: u8,
-) -> color_eyre::eyre::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    const RECORDS_PER_PAGE: NonZeroU32 = NonZeroU32::MIN.saturating_add(999);
-    let mut records = Vec::new();
-    let mut last_key_of_previous_page = None;
-    loop {
-        let response = network_config
-            .json_rpc_client()
-            .blocking_call(RpcQueryRequest {
-                block_reference: block_reference.clone(),
-                request: QueryRequest::ViewState {
-                    account_id: ENGINE_ACCOUNT_ID.to_owned(),
-                    prefix: vec![prefix].into(),
-                    after_key: last_key_of_previous_page,
-                    limit: Some(RECORDS_PER_PAGE),
-                    include_proof: false,
-                },
-            });
-        let page = match response {
-            Ok(response) => match response.kind {
-                QueryResponseKind::ViewState(view_state) => view_state,
-                _ => bail!(
-                    "RPC {} answered a state query with something other than state",
-                    network_config.rpc_url
-                ),
-            },
-            Err(error)
-                if matches!(
-                    error.handler_error(),
-                    Some(RpcQueryError::TooLargeContractState { .. })
-                ) =>
-            {
-                return Err(color_eyre::eyre::eyre!(
-                    "RPC {} won't return the state of {ENGINE_ACCOUNT_ID}, which is larger than its limit",
-                    network_config.rpc_url
-                )
-                .suggestion(
-                    "Choose a connection to an RPC node that returns state in pages, or that has no limit, like https://rpc.intea.rs",
-                ));
-            }
-            Err(error) => {
-                return Err(color_eyre::eyre::Report::new(error)).wrap_err_with(|| {
-                    format!(
-                        "Couldn't read the state of {ENGINE_ACCOUNT_ID} (network {}, RPC {})",
-                        network_config.network_name, network_config.rpc_url
-                    )
-                });
-            }
-        };
-        let page_is_empty = page.values.is_empty();
-        records.extend(
-            page.values
-                .into_iter()
-                .map(|state_item| (state_item.key.into(), state_item.value.into())),
-        );
-        // Nodes name the last key of a page when there may be more after it
-        match page.last_key {
-            Some(last_key) if !page_is_empty => last_key_of_previous_page = Some(last_key),
-            _ => return Ok(records),
-        }
-    }
 }

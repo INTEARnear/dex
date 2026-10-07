@@ -52,21 +52,8 @@ impl<K: Ord + BorshSerialize + BorshDeserialize + Clone> StorageBalances<K> {
         }
     }
 
-    /// Used in migration from the layout that didn't track the sum
-    pub const fn from_parts(storage_balances: LookupMap<K, StorageUsed>, sum: StorageUsed) -> Self {
-        Self {
-            storage_balances,
-            sum,
-        }
-    }
-
     pub const fn sum(&self) -> StorageUsed {
         self.sum
-    }
-
-    /// Used by migration
-    pub const fn set_sum(&mut self, sum: StorageUsed) {
-        self.sum = sum;
     }
 
     fn add_to_sum_total(&mut self, amount: NearToken) {

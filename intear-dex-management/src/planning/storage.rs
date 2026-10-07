@@ -87,24 +87,6 @@ pub fn balance_record_bytes(
     ])
 }
 
-/// A balance in the layout from before the engine's migration: one record
-/// keyed by owner and asset
-pub fn flat_balance_record_bytes(
-    owner: &AccountOrDexId,
-    asset_id: &AssetId,
-    extra_bytes_per_record: u64,
-) -> color_eyre::eyre::Result<u64> {
-    record_bytes(
-        &[
-            COLLECTION_PREFIX_BYTES,
-            owner_bytes(owner)?,
-            near_sdk::borsh::to_vec(asset_id)?.len(),
-            U128_BYTES,
-        ],
-        extra_bytes_per_record,
-    )
-}
-
 /// What registering `asset_id` for `owner` adds to the engine's state; the
 /// engine charges it to the account that pays for the registration
 pub fn asset_registration_bytes(

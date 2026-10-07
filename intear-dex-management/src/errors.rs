@@ -116,10 +116,6 @@ pub enum PreflightError {
         receiver_id: AccountId,
         token_id: AccountId,
     },
-    #[error(
-        "The migration adds about {needed} of storage to {ENGINE_ACCOUNT_ID}, and the NEAR it holds beyond what it owes is {shortfall} short of that"
-    )]
-    NotEnoughNearForMigration { needed: String, shortfall: String },
     #[error("The swap method of dexes is only for swaps, which dex call doesn't make")]
     ReservedDexMethod,
     #[error("{dex_id} is already initialized")]
@@ -237,9 +233,6 @@ impl PreflightError {
                 token_id,
             } => Some(format!(
                 "Rescue to an account that has storage on {token_id}, or pay for {receiver_id}'s storage there with its storage_deposit first"
-            )),
-            Self::NotEnoughNearForMigration { shortfall, .. } => Some(format!(
-                "Send at least {shortfall} to {ENGINE_ACCOUNT_ID} first; nothing was paused or deployed"
             )),
             Self::XykAlreadyInitialized { .. } => Some(
                 "New code that changes its state layout deploys with `xyk deploy … --migrate`"
@@ -383,14 +376,6 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
             format!(
                 "{ENGINE_ACCOUNT_ID} was paused after the checks before signing. Nothing changes until {} unpauses it",
                 CAN_PAUSE.join(" or ")
-            )
-        },
-    },
-    ContractPanicHint {
-        message_fragment: "Balances are still being migrated",
-        hint: |_| {
-            format!(
-                "{ENGINE_ACCOUNT_ID} stays paused until its migration finishes; `engine admin migrate` continues it where it stopped"
             )
         },
     },

@@ -2,7 +2,6 @@ pub mod account;
 pub mod asset_metadata;
 pub mod custody;
 pub mod engine;
-pub mod engine_state;
 pub mod fungible_token;
 pub mod networks;
 pub mod protocol;

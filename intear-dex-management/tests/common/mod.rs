@@ -438,65 +438,6 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
     sandbox
 }
 
-/// A sandbox with dex.intear.near as it is on mainnet, its code and its
-/// state, with a key derived from its id, and with pause.slimedragon.near and
-/// slimedragon.near. The engine's state is too large for one patch, so it
-/// goes in several.
-pub async fn start_sandbox_with_mainnet_engine() -> Worker<Sandbox> {
-    const RECORD_BYTES_PER_PATCH: usize = 50_000;
-    let sandbox = near_workspaces::sandbox().await.unwrap();
-    let mainnet = near_workspaces::mainnet()
-        .rpc_addr(&std::env::var("RPC_URL").unwrap_or_else(|_| "https://rpc.intea.rs".to_string()))
-        .await
-        .unwrap();
-    let engine_id: AccountId = ENGINE_ACCOUNT_ID.parse().unwrap();
-    let block_height = mainnet.view_block().await.unwrap().height();
-    let state = mainnet
-        .view_state(&engine_id)
-        .block_height(block_height)
-        .await
-        .unwrap();
-    sandbox
-        .import_contract(&engine_id, &mainnet)
-        .block_height(block_height)
-        .transact()
-        .await
-        .unwrap();
-    let mut patch = Vec::new();
-    let mut patch_bytes = 0;
-    for (key, value) in &state {
-        patch.push((key.as_slice(), value.as_slice()));
-        patch_bytes += 40 + key.len() + value.len();
-        if patch_bytes >= RECORD_BYTES_PER_PATCH {
-            sandbox
-                .patch(&engine_id)
-                .states(std::mem::take(&mut patch))
-                .transact()
-                .await
-                .unwrap();
-            patch_bytes = 0;
-        }
-    }
-    sandbox
-        .patch(&engine_id)
-        .states(patch)
-        .transact()
-        .await
-        .unwrap();
-    let engine_key = SecretKey::from_seed(KeyType::ED25519, ENGINE_ACCOUNT_ID);
-    sandbox
-        .patch(&engine_id)
-        .access_key(engine_key.public_key(), AccessKey::full_access())
-        .transact()
-        .await
-        .unwrap();
-    create_account_with_key_from_id(&sandbox, "pause.slimedragon.near", NearToken::from_near(10))
-        .await;
-    create_account_with_key_from_id(&sandbox, "slimedragon.near", NearToken::from_near(100)).await;
-    sandbox.fast_forward(3).await.unwrap();
-    sandbox
-}
-
 /// A swap on slimedragon.near/xyk from `trader`'s balance on the engine,
 /// for state that the CLI's commands work on, like collected fees
 pub async fn swap_through_engine(
@@ -809,24 +750,6 @@ impl Cli {
                 .unwrap_or_else(|error| panic!("`{command_line}` printed invalid JSON: {error}"));
         }
         Self::record(&command_line, output)
-    }
-
-    /// Saves the key derived from `account_id` in the legacy keychain of the
-    /// sandbox connection, for commands that sign with keys from the keychain
-    pub fn save_key_to_legacy_keychain(&self, account_id: &str) {
-        let secret_key = SecretKey::from_seed(KeyType::ED25519, account_id);
-        let keychain_directory = self.config_home.path().join("credentials/sandbox");
-        std::fs::create_dir_all(&keychain_directory).unwrap();
-        std::fs::write(
-            keychain_directory.join(format!("{account_id}.json")),
-            json!({
-                "account_id": account_id,
-                "public_key": secret_key.public_key().to_string(),
-                "private_key": secret_key.to_string(),
-            })
-            .to_string(),
-        )
-        .unwrap();
     }
 
     /// Runs a command that stops before the network step, like one missing

@@ -11,9 +11,7 @@ pub mod storage_management;
 
 use std::collections::HashMap;
 
-use crate::{
-    internal_operations::TradeAccount, migration::FlatBalances, storage_management::StorageBalances,
-};
+use crate::{internal_operations::TradeAccount, storage_management::StorageBalances};
 use intear_dex_types::{
     AccountOrDexId, AssetId, CAN_PAUSE, DexId, DirectWithdrawAmount, IntearDexEvent, Operation,
     SwapRequestAmount, expect,
@@ -62,10 +60,6 @@ pub struct DexEngine {
     /// without causing any issues.
     total_in_custody: IterableMap<AssetId, U128>,
     paused: bool,
-    /// Balances in the layout from before `migrate`, until
-    /// `migrate_balances` moved all of them and `finish_migration`
-    /// ended the migration. The engine stays paused until then.
-    balances_to_migrate: Option<FlatBalances>,
     /// The only account that can deploy dex code. Dex code isn't
     /// validated when it's loaded, so it must come from a trusted source.
     trusted_code_deployer: AccountId,
@@ -74,15 +68,13 @@ pub struct DexEngine {
 #[derive(BorshStorageKey)]
 #[near(serializers=[borsh])]
 enum StorageKey {
-    /// Dex balances before `migrate`, keyed by dex and asset
     #[allow(dead_code)]
-    FlatDexBalances,
+    UnusedFlatDexBalances,
     DexStorage,
     DexCodes,
     DexStorageBalances,
-    /// User balances before `migrate`, keyed by account and asset
     #[allow(dead_code)]
-    FlatUserBalances,
+    UnusedFlatUserBalances,
     UserStorageBalances,
     ContractTrackedBalance,
     UserBalances,
@@ -264,7 +256,6 @@ impl DexEngine {
             user_storage_balances: StorageBalances::new(StorageKey::UserStorageBalances),
             total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
             paused: false,
-            balances_to_migrate: None,
             trusted_code_deployer,
         }
     }
@@ -301,7 +292,6 @@ impl DexEngine {
             CAN_PAUSE.contains(&near_sdk::env::predecessor_account_id().as_str()),
             "Only authorized accounts can pause the contract"
         );
-        self.assert_not_migrating();
         self.paused = false;
     }
 
@@ -462,7 +452,6 @@ impl DexEngine {
     }
 
     pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<U128> {
-        self.assert_not_migrating();
         self.asset_balances(&of)?.get(&asset_id).copied()
     }
 
@@ -478,7 +467,6 @@ impl DexEngine {
             (None, Some(dex_id)) => AccountOrDexId::Dex(dex_id),
             _ => panic!("account_id and dex_id are mutually exclusive"),
         };
-        self.assert_not_migrating();
         let Some(asset_balances) = self.asset_balances(&of) else {
             return Vec::new();
         };
@@ -519,7 +507,6 @@ impl DexEngine {
     }
 
     pub fn are_assets_registered(&self, asset_ids: Vec<AssetId>, r#for: AccountOrDexId) -> bool {
-        self.assert_not_migrating();
         let Some(asset_balances) = self.asset_balances(&r#for) else {
             return asset_ids.is_empty();
         };
@@ -532,12 +519,5 @@ impl DexEngine {
 impl DexEngine {
     pub fn assert_not_paused(&self) {
         expect!(!self.paused, "Contract is paused");
-    }
-
-    pub fn assert_not_migrating(&self) {
-        expect!(
-            self.balances_to_migrate.is_none(),
-            "Balances are still being migrated, and the engine stays paused until the migration finishes"
-        );
     }
 }
