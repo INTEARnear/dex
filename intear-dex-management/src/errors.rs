@@ -500,10 +500,6 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
         },
     },
     ContractPanicHint {
-        message_fragment: "Only owner can migrate",
-        hint: |_| format!("Only {CAN_MIGRATE} can migrate xyk dexes"),
-    },
-    ContractPanicHint {
         message_fragment: "Only the deployer can withdraw dex storage",
         hint: |context| match context.dex_id {
             Some(dex_id) => format!(

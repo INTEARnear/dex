@@ -6,36 +6,6 @@ use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_primitives::types::{AccountId, BlockReference};
 use near_primitives::views::{AccountView, QueryRequest};
 
-/// The size of the contract code that an account runs
-pub fn contract_code_bytes(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-    account_id: &AccountId,
-) -> color_eyre::eyre::Result<usize> {
-    let response = network_config
-        .json_rpc_client()
-        .blocking_call(RpcQueryRequest {
-            block_reference: block_reference.clone(),
-            request: QueryRequest::ViewCode {
-                account_id: account_id.clone(),
-            },
-        })
-        .map_err(color_eyre::eyre::Report::new)
-        .wrap_err_with(|| {
-            format!(
-                "Couldn't read the code of {account_id} on network {} (RPC {})",
-                network_config.network_name, network_config.rpc_url
-            )
-        })?;
-    match response.kind {
-        QueryResponseKind::ViewCode(contract_code) => Ok(contract_code.code.len()),
-        _ => Err(eyre!(
-            "RPC {} answered the code lookup of {account_id} with something other than code",
-            network_config.rpc_url
-        )),
-    }
-}
-
 /// `None` when the account doesn't exist
 pub fn view_account(
     network_config: &NetworkConfig,
