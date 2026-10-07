@@ -157,7 +157,12 @@ pub fn registered_assets_of(
             block_reference,
             &ENGINE_ACCOUNT_ID.to_owned(),
             "registered_assets_of",
-            json!({ "of": owner, "from_index": from_index, "limit": PAGE_SIZE }),
+            json!({
+                "account_id": if let AccountOrDexId::Account(account_id) = owner { Some(account_id) } else { None },
+                "dex_id": if let AccountOrDexId::Dex(dex_id) = owner { Some(dex_id) } else { None },
+                "from_index": from_index,
+                "limit": PAGE_SIZE,
+            }),
         )?;
         let is_last_page = page.len() < PAGE_SIZE as usize;
         registered_assets.extend(page);
@@ -179,7 +184,12 @@ pub fn has_registered_assets(
         block_reference,
         &ENGINE_ACCOUNT_ID.to_owned(),
         "registered_assets_of",
-        json!({ "of": owner, "from_index": 0, "limit": 1 }),
+        json!({
+            "account_id": if let AccountOrDexId::Account(account_id) = owner { Some(account_id) } else { None },
+            "dex_id": if let AccountOrDexId::Dex(dex_id) = owner { Some(dex_id) } else { None },
+            "from_index": 0,
+            "limit": 1,
+        }),
     )?;
     Ok(!first_asset.is_empty())
 }
