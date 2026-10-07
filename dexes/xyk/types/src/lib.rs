@@ -181,12 +181,20 @@ pub struct GetReferralSettingsArgs {
 pub enum PoolType {
     PrivateLatest,
     PublicLatest,
-    LaunchLatest { phantom_liquidity_near: U128 },
-    LaunchV1 { phantom_liquidity_near: U128 },
+    LaunchLatest {
+        phantom_liquidity: U128,
+    },
+    LaunchV1 {
+        phantom_liquidity_near: U128,
+    },
     PrivateV1,
     PublicV1,
     PrivateV2,
     PublicV2,
+    /// The first asset is the quote asset, which the phantom liquidity is in
+    LaunchV2 {
+        phantom_liquidity: U128,
+    },
 }
 
 #[near(serializers=[borsh, json])]
@@ -211,6 +219,13 @@ pub enum PoolView {
         fees: CurrentFees,
         fee_configuration: FeeConfiguration,
         phantom_liquidity_near: U128,
+    },
+    LaunchV2 {
+        quote_asset: AssetWithBalance,
+        launched_asset: AssetWithBalance,
+        fees: CurrentFees,
+        fee_configuration: FeeConfiguration,
+        phantom_liquidity: U128,
     },
 }
 
@@ -501,7 +516,7 @@ impl FeeConfiguration {
             .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)));
         let is_launch_pool = matches!(
             pool_type,
-            PoolType::LaunchV1 { .. } | PoolType::LaunchLatest { .. }
+            PoolType::LaunchV1 { .. } | PoolType::LaunchLatest { .. } | PoolType::LaunchV2 { .. }
         );
         if has_community_receiver && !is_launch_pool {
             return Err(FeeConfigurationError::CommunityReceiverOutsideLaunchPool);

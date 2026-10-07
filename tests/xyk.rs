@@ -2810,7 +2810,7 @@ async fn test_xyk_launch_pool_flow() {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity: U128(phantom_liquidity_near),
                             },
                         })
                         .unwrap(),
@@ -2837,13 +2837,14 @@ async fn test_xyk_launch_pool_flow() {
         .await
         .unwrap();
     match &pool {
-        PoolView::Launch {
-            near_amount,
+        PoolView::LaunchV2 {
+            quote_asset,
             launched_asset,
-            phantom_liquidity_near: pool_phantom_liquidity_near,
+            phantom_liquidity: pool_phantom_liquidity_near,
             ..
         } => {
-            assert_eq!(near_amount.0, phantom_liquidity_near);
+            assert_eq!(quote_asset.asset_id, AssetId::Near);
+            assert_eq!(quote_asset.balance.0, phantom_liquidity_near);
             assert_eq!(launched_asset.asset_id, AssetId::Nep141(ft2.id().clone()));
             assert_eq!(launched_asset.balance.0, launch_liquidity_ft2);
             assert_eq!(pool_phantom_liquidity_near.0, phantom_liquidity_near);
@@ -2900,12 +2901,12 @@ async fn test_xyk_launch_pool_flow() {
         .await
         .unwrap();
     match &pool {
-        PoolView::Launch {
-            near_amount,
+        PoolView::LaunchV2 {
+            quote_asset,
             launched_asset,
             ..
         } => {
-            assert_eq!(near_amount.0, phantom_liquidity_near + near_swap_in);
+            assert_eq!(quote_asset.balance.0, phantom_liquidity_near + near_swap_in);
             assert_eq!(
                 launched_asset.balance.0,
                 launch_liquidity_ft2 - expected_ft2_out
@@ -3001,7 +3002,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity: U128(phantom_liquidity_near),
                             },
                         })
                         .unwrap(),
@@ -3050,12 +3051,12 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
         .await
         .unwrap();
     match &pool {
-        PoolView::Launch {
-            near_amount,
+        PoolView::LaunchV2 {
+            quote_asset,
             launched_asset,
             ..
         } => {
-            assert_eq!(near_amount.0, phantom_liquidity_near + near_swap_in);
+            assert_eq!(quote_asset.balance.0, phantom_liquidity_near + near_swap_in);
             assert_eq!(
                 launched_asset.balance.0,
                 launch_liquidity_ft2 - expected_ft2_out
@@ -3146,7 +3147,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                                 )],
                             }),
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity: U128(phantom_liquidity_near),
                             },
                         })
                         .unwrap(),
@@ -3337,6 +3338,280 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
     );
     assert_eq!(
         protocol_fees_after.get(&launched_asset_id).cloned(),
+        Some(U128(0))
+    );
+}
+
+#[tokio::test]
+async fn test_xyk_launch_pool_quoted_in_ft() {
+    let initial_near_deposit = NearToken::from_near(20);
+    let storage_deposit_for_pool = NearToken::from_millinear(50);
+    let launch_liquidity_ft2 = 2_000_000_000u128;
+    let phantom_liquidity_ft1 = 1_000_000_000u128;
+    let ft1_swap_in = 100_000_000u128;
+    let sell_amount_ft2 = 50_000_000u128;
+    let first_pool_id = 0u32;
+    let fee_fraction = 10_000u32; // 1%
+    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let protocol_fee_receiver: AccountId = "plach.intear.near".parse().unwrap();
+
+    let wasms = get_compiled_wasms().await;
+
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        ft2,
+        deployer,
+        user1,
+        user2,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.xyk_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let quote_asset_id = AssetId::Nep141(ft1.id().clone());
+    let launched_asset_id = AssetId::Nep141(ft2.id().clone());
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(initial_near_deposit)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(ft2.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(launch_liquidity_ft2),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let create_launch_pool = |fee_receiver: FeeReceiver| {
+        deployer
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": vec![
+                    Operation::DexCall {
+                        dex_id: dex_id.clone(),
+                        method: "create_pool".to_string(),
+                        args: Base64VecU8(
+                            near_sdk::borsh::to_vec(&CreatePoolArgs {
+                                assets: (quote_asset_id.clone(), launched_asset_id.clone()),
+                                fees: FeeConfiguration::V1(CurrentFees {
+                                    receivers: vec![(fee_receiver, fee_fraction)],
+                                }),
+                                pool_type: PoolType::LaunchLatest {
+                                    phantom_liquidity: U128(phantom_liquidity_ft1),
+                                },
+                            })
+                            .unwrap(),
+                        ),
+                        attached_assets: HashMap::from_iter([
+                            (
+                                AssetId::Near,
+                                U128(storage_deposit_for_pool.as_yoctonear()),
+                            ),
+                            (launched_asset_id.clone(), U128(launch_liquidity_ft2)),
+                        ]),
+                    },
+                ],
+            }))
+            .transact()
+    };
+
+    // Community fees are kept in NEAR, so they can't come from another quote asset
+    let result = create_launch_pool(FeeReceiver::Community(user2.id().clone()))
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}")
+            .contains("Community fee receiver is only supported in Launch pools quoted in NEAR")
+    );
+
+    let result = create_launch_pool(FeeReceiver::Account(user2.id().clone()))
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
+        .await
+        .unwrap()
+    {
+        PoolView::LaunchV2 {
+            quote_asset,
+            launched_asset,
+            phantom_liquidity,
+            ..
+        } => {
+            assert_eq!(quote_asset.asset_id, quote_asset_id);
+            assert_eq!(quote_asset.balance.0, phantom_liquidity_ft1);
+            assert_eq!(launched_asset.asset_id, launched_asset_id);
+            assert_eq!(launched_asset.balance.0, launch_liquidity_ft2);
+            assert_eq!(phantom_liquidity.0, phantom_liquidity_ft1);
+        }
+        _ => panic!("Expected launch pool"),
+    }
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(ft1_swap_in),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(ft1_swap_in),
+            "msg": near_sdk::serde_json::to_string(&vec![
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    asset_in: quote_asset_id.clone(),
+                    asset_out: launched_asset_id.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(ft1_swap_in))),
+                    constraint: None,
+                },
+                Operation::Withdraw {
+                    asset_id: launched_asset_id.clone(),
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: None,
+                    rescue_address: None,
+                },
+            ]).unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let buy_user_fee_ft1 = ft1_swap_in * fee_fraction as u128 / 1_000_000;
+    let buy_protocol_fee_ft1 = ft1_swap_in * protocol_fee_fraction as u128 / 1_000_000;
+    let buy_amount_after_fees = ft1_swap_in
+        .checked_sub(buy_user_fee_ft1)
+        .unwrap()
+        .checked_sub(buy_protocol_fee_ft1)
+        .unwrap();
+    let buy_token_out = buy_amount_after_fees * launch_liquidity_ft2
+        / (phantom_liquidity_ft1 + buy_amount_after_fees);
+    let quote_reserve_after_buy = phantom_liquidity_ft1 + buy_amount_after_fees;
+    let token_reserve_after_buy = launch_liquidity_ft2 - buy_token_out;
+    assert_ft_balance(&user1, ft2.clone(), U128(buy_token_out))
+        .await
+        .unwrap();
+
+    let sell_user_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
+    let sell_protocol_fee_token = sell_amount_ft2 * protocol_fee_fraction as u128 / 1_000_000;
+    let sell_amount_after_fees = sell_amount_ft2
+        .checked_sub(sell_user_fee_token)
+        .unwrap()
+        .checked_sub(sell_protocol_fee_token)
+        .unwrap();
+    let sell_trader_ft1_out = sell_amount_after_fees * quote_reserve_after_buy
+        / (token_reserve_after_buy + sell_amount_after_fees);
+    let token_reserve_post_swap = token_reserve_after_buy + sell_amount_after_fees;
+    let quote_reserve_post_swap = quote_reserve_after_buy - sell_trader_ft1_out;
+    let sell_user_fee_ft1 = sell_user_fee_token * quote_reserve_post_swap
+        / (token_reserve_post_swap + sell_user_fee_token);
+    let token_reserve_after_user_fee = token_reserve_post_swap + sell_user_fee_token;
+    let quote_reserve_after_user_fee = quote_reserve_post_swap - sell_user_fee_ft1;
+    let sell_protocol_fee_ft1 = sell_protocol_fee_token * quote_reserve_after_user_fee
+        / (token_reserve_after_user_fee + sell_protocol_fee_token);
+
+    let result = user1
+        .call(ft2.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(sell_amount_ft2),
+            "msg": near_sdk::serde_json::to_string(&vec![
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
+                        pool_id: first_pool_id,
+                    }).unwrap()),
+                    asset_in: launched_asset_id.clone(),
+                    asset_out: quote_asset_id.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(sell_amount_ft2))),
+                    constraint: None,
+                },
+                Operation::Withdraw {
+                    asset_id: quote_asset_id.clone(),
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: None,
+                    rescue_address: None,
+                },
+            ]).unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_ft_balance(&user1, ft1.clone(), U128(sell_trader_ft1_out))
+        .await
+        .unwrap();
+
+    let tracked_assets = vec![quote_asset_id.clone(), launched_asset_id.clone()];
+    let user2_fees = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        user2.id(),
+        tracked_assets.clone(),
+    )
+    .await;
+    let protocol_fees = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        &protocol_fee_receiver,
+        tracked_assets,
+    )
+    .await;
+    assert_eq!(
+        user2_fees.get(&quote_asset_id).cloned(),
+        Some(U128(buy_user_fee_ft1 + sell_user_fee_ft1))
+    );
+    assert_eq!(user2_fees.get(&launched_asset_id).cloned(), Some(U128(0)));
+    assert_eq!(
+        protocol_fees.get(&quote_asset_id).cloned(),
+        Some(U128(buy_protocol_fee_ft1 + sell_protocol_fee_ft1))
+    );
+    assert_eq!(
+        protocol_fees.get(&launched_asset_id).cloned(),
         Some(U128(0))
     );
 }
@@ -3766,7 +4041,7 @@ async fn test_xyk_launch_pool_restrictions() {
                                 receivers: vec![],
                             }),
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity: U128(phantom_liquidity_near),
                             },
                         })
                         .unwrap(),
@@ -3933,7 +4208,7 @@ async fn test_xyk_launch_pool_community_fees() {
                                 )],
                             }),
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity_near),
+                                phantom_liquidity: U128(phantom_liquidity_near),
                             },
                         })
                         .unwrap(),
@@ -3960,7 +4235,7 @@ async fn test_xyk_launch_pool_community_fees() {
     assert!(!pool_updated_events.is_empty());
     for event in &pool_updated_events {
         assert_eq!(
-            event["pool"]["Launch"]["fee_configuration"]["receivers"][0][0],
+            event["pool"]["LaunchV2"]["fee_configuration"]["receivers"][0][0],
             json!({ "Community": community_account_id })
         );
     }
@@ -3968,7 +4243,7 @@ async fn test_xyk_launch_pool_community_fees() {
         .await
         .unwrap()
     {
-        PoolView::Launch {
+        PoolView::LaunchV2 {
             fee_configuration: FeeConfiguration::V1(CurrentFees { receivers }),
             ..
         } => {

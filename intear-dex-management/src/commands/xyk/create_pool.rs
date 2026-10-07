@@ -392,7 +392,7 @@ impl PoolFeesContext {
                         (
                             (AssetId::Near, token.clone()),
                             PoolType::LaunchLatest {
-                                phantom_liquidity_near: U128(phantom_liquidity.as_yoctonear()),
+                                phantom_liquidity: U128(phantom_liquidity.as_yoctonear()),
                             },
                             "launch",
                             NewPoolKind::Launch,

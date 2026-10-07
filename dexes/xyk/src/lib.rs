@@ -130,8 +130,16 @@ impl Dex for XykDex {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
-        let should_convert_fees_to_near =
-            matches!(pool, Pool::LaunchV1 { .. }) && request.asset_out == AssetId::Near;
+        let launch_quote_asset_id = match pool {
+            Pool::LaunchV1 { .. } => Some(AssetId::Near),
+            Pool::LaunchV2 { quote_asset, .. } => Some(quote_asset.asset_id.clone()),
+            Pool::PrivateV1 { .. }
+            | Pool::PublicV1 { .. }
+            | Pool::PrivateV2 { .. }
+            | Pool::PublicV2 { .. } => None,
+        };
+        let should_convert_fees_to_quote_asset =
+            launch_quote_asset_id.as_ref() == Some(&request.asset_out);
         let (asset0_id, asset0_balance, asset1_id, asset1_balance, fees) = match pool {
             Pool::PrivateV1 {
                 assets,
@@ -158,6 +166,18 @@ impl Dex for XykDex {
             } => (
                 AssetId::Near,
                 &mut near_amount.0,
+                launched_asset.asset_id.clone(),
+                &mut launched_asset.balance.0,
+                fees.clone(),
+            ),
+            Pool::LaunchV2 {
+                quote_asset,
+                launched_asset,
+                fees,
+                phantom_liquidity: _,
+            } => (
+                quote_asset.asset_id.clone(),
+                &mut quote_asset.balance.0,
                 launched_asset.asset_id.clone(),
                 &mut launched_asset.balance.0,
                 fees.clone(),
@@ -206,11 +226,11 @@ impl Dex for XykDex {
                 asset_id: AssetId,
                 amount: U128,
             },
-            DeferredForConvertionToNear {
+            DeferredForConversionToQuoteAsset {
                 receiver: AccountId,
                 amount_token: U128,
             },
-            CommunityFeeDeferredForConvertionToNear {
+            CommunityFeeDeferredForConversionToQuoteAsset {
                 receiver: AccountId,
                 amount_token: U128,
             },
@@ -228,7 +248,7 @@ impl Dex for XykDex {
             fees: &CurrentFees,
             fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
             community_owned_fees: &mut LookupMap<AccountId, NearToken>,
-            convert_to_near: bool,
+            convert_to_quote_asset: bool,
         ) -> CollectFeesReturn {
             let mut fees_breakdown = Vec::new();
             let mut total_fees = 0u128;
@@ -239,11 +259,13 @@ impl Dex for XykDex {
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
                 match receiver {
                     FeeReceiver::Account(account_id) => {
-                        if convert_to_near {
-                            fees_breakdown.push(FeeBreakdownEntry::DeferredForConvertionToNear {
-                                receiver: account_id.clone(),
-                                amount_token: U128(fee_amount),
-                            });
+                        if convert_to_quote_asset {
+                            fees_breakdown.push(
+                                FeeBreakdownEntry::DeferredForConversionToQuoteAsset {
+                                    receiver: account_id.clone(),
+                                    amount_token: U128(fee_amount),
+                                },
+                            );
                         } else {
                             fees_breakdown.push(FeeBreakdownEntry::Normal {
                                 receiver: receiver.clone(),
@@ -269,14 +291,18 @@ impl Dex for XykDex {
                         pool_fee = pool_fee.checked_add(fee_amount).expect("Overflow");
                     }
                     FeeReceiver::Community(account_id) => {
-                        if convert_to_near {
+                        if convert_to_quote_asset {
                             fees_breakdown.push(
-                                FeeBreakdownEntry::CommunityFeeDeferredForConvertionToNear {
+                                FeeBreakdownEntry::CommunityFeeDeferredForConversionToQuoteAsset {
                                     receiver: account_id.clone(),
                                     amount_token: U128(fee_amount),
                                 },
                             );
                         } else {
+                            expect!(
+                                *asset_in == AssetId::Near,
+                                "Community fees can only be collected in NEAR"
+                            );
                             fees_breakdown.push(FeeBreakdownEntry::Normal {
                                 receiver: receiver.clone(),
                                 asset_id: asset_in.clone(),
@@ -303,7 +329,8 @@ impl Dex for XykDex {
             }
         }
 
-        fn convert_fees_to_near(
+        fn convert_fees_to_quote_asset(
+            quote_asset_id: &AssetId,
             in_balance: &mut u128,
             out_balance: &mut u128,
             fees_breakdown: &mut Vec<FeeBreakdownEntry>,
@@ -311,33 +338,42 @@ impl Dex for XykDex {
             community_owned_fees: &mut LookupMap<AccountId, NearToken>,
         ) {
             for entry in fees_breakdown {
-                if let FeeBreakdownEntry::DeferredForConvertionToNear {
+                if let FeeBreakdownEntry::DeferredForConversionToQuoteAsset {
                     receiver,
                     amount_token,
                 } = entry
                 {
                     // in denominator in_balance or amount can't either be zero.
-                    let fee_amount_near =
+                    let fee_amount_quote_asset =
                         mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
                     *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
-                    *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
+                    *out_balance = out_balance
+                        .checked_sub(fee_amount_quote_asset)
+                        .expect("Underflow");
                     fees_collected_by_users
-                        .entry((receiver.clone(), AssetId::Near))
+                        .entry((receiver.clone(), quote_asset_id.clone()))
                         .and_modify(|balance| {
-                            balance.0 = balance.0.checked_add(fee_amount_near).expect("Overflow")
+                            balance.0 = balance
+                                .0
+                                .checked_add(fee_amount_quote_asset)
+                                .expect("Overflow")
                         })
-                        .or_insert_with(|| panic!("NEAR fee asset not registered; this is a bug"));
+                        .or_insert_with(|| panic!("Quote fee asset not registered; this is a bug"));
                     *entry = FeeBreakdownEntry::Normal {
                         receiver: FeeReceiver::Account(receiver.clone()),
-                        asset_id: AssetId::Near,
-                        amount: U128(fee_amount_near),
+                        asset_id: quote_asset_id.clone(),
+                        amount: U128(fee_amount_quote_asset),
                     };
                 }
-                if let FeeBreakdownEntry::CommunityFeeDeferredForConvertionToNear {
+                if let FeeBreakdownEntry::CommunityFeeDeferredForConversionToQuoteAsset {
                     receiver,
                     amount_token,
                 } = entry
                 {
+                    expect!(
+                        *quote_asset_id == AssetId::Near,
+                        "Community fees can only be collected in NEAR"
+                    );
                     // in denominator in_balance or amount can't either be zero.
                     let fee_amount_near =
                         mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
@@ -368,8 +404,8 @@ impl Dex for XykDex {
             request.referrer.clone(),
             &self.referral_settings,
             &self.fees_collected_by_users,
-            if should_convert_fees_to_near {
-                AssetId::Near
+            if should_convert_fees_to_quote_asset {
+                request.asset_out.clone()
             } else {
                 request.asset_in.clone()
             },
@@ -394,7 +430,7 @@ impl Dex for XykDex {
                     &current_fees,
                     &mut self.fees_collected_by_users,
                     &mut self.community_owned_fees,
-                    should_convert_fees_to_near,
+                    should_convert_fees_to_quote_asset,
                 );
                 // in_balance was checked to be positive
                 let amount_out = mul_div_sum(
@@ -409,8 +445,9 @@ impl Dex for XykDex {
                     .checked_add(pool_fee)
                     .expect("Overflow");
                 *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
-                if should_convert_fees_to_near {
-                    convert_fees_to_near(
+                if should_convert_fees_to_quote_asset {
+                    convert_fees_to_quote_asset(
+                        &request.asset_out,
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -475,7 +512,7 @@ impl Dex for XykDex {
                     &current_fees,
                     &mut self.fees_collected_by_users,
                     &mut self.community_owned_fees,
-                    should_convert_fees_to_near,
+                    should_convert_fees_to_quote_asset,
                 );
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
@@ -485,8 +522,9 @@ impl Dex for XykDex {
                 *out_balance = out_balance
                     .checked_sub(exact_amount_out.0)
                     .expect("Underflow");
-                if should_convert_fees_to_near {
-                    convert_fees_to_near(
+                if should_convert_fees_to_quote_asset {
+                    convert_fees_to_quote_asset(
+                        &request.asset_out,
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -506,16 +544,31 @@ impl Dex for XykDex {
         self.fees_collected_by_users.flush();
         self.community_owned_fees.flush();
 
-        if let Pool::LaunchV1 {
-            near_amount,
-            phantom_liquidity_near,
-            ..
-        } = pool
-        {
-            expect!(
-                near_amount.0 >= phantom_liquidity_near.0,
-                "NEAR liquidity can't go lower than the initial phantom liquidity"
-            );
+        match pool {
+            Pool::LaunchV1 {
+                near_amount,
+                phantom_liquidity_near,
+                ..
+            } => {
+                expect!(
+                    near_amount.0 >= phantom_liquidity_near.0,
+                    "NEAR liquidity can't go lower than the initial phantom liquidity"
+                );
+            }
+            Pool::LaunchV2 {
+                quote_asset,
+                phantom_liquidity,
+                ..
+            } => {
+                expect!(
+                    quote_asset.balance.0 >= phantom_liquidity.0,
+                    "Quote asset liquidity can't go lower than the initial phantom liquidity"
+                );
+            }
+            Pool::PrivateV1 { .. }
+            | Pool::PublicV1 { .. }
+            | Pool::PrivateV2 { .. }
+            | Pool::PublicV2 { .. } => {}
         }
 
         XykDexEvent::PoolUpdated {
@@ -679,10 +732,48 @@ impl XykDex {
                     locked: false,
                 }
             }
-            PoolType::LaunchV1 {
-                phantom_liquidity_near,
+
+            PoolType::LaunchLatest { phantom_liquidity }
+            | PoolType::LaunchV2 { phantom_liquidity } => {
+                expect!(
+                    phantom_liquidity.0 > 0,
+                    "Phantom liquidity must be greater than 0"
+                );
+                if fees
+                    .receivers_at(near_sdk::env::block_timestamp())
+                    .iter()
+                    .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)))
+                {
+                    expect!(
+                        assets.0 == AssetId::Near,
+                        "Community fee receiver is only supported in Launch pools quoted in NEAR"
+                    );
+                }
+                let attached_launched_asset = attached_assets
+                    .remove(&assets.1)
+                    .expect("Launched asset not found");
+                expect!(
+                    attached_launched_asset.0 > 0,
+                    "Launched asset amount must be greater than 0"
+                );
+                expect!(
+                    attached_assets.is_empty(),
+                    "No assets other than NEAR and launched asset should be attached"
+                );
+                Pool::LaunchV2 {
+                    quote_asset: AssetWithBalance {
+                        asset_id: assets.0.clone(),
+                        balance: phantom_liquidity,
+                    },
+                    launched_asset: AssetWithBalance {
+                        asset_id: assets.1.clone(),
+                        balance: U128(attached_launched_asset.0),
+                    },
+                    fees: fees.clone(),
+                    phantom_liquidity,
+                }
             }
-            | PoolType::LaunchLatest {
+            PoolType::LaunchV1 {
                 phantom_liquidity_near,
             } => {
                 expect!(
@@ -1147,7 +1238,7 @@ impl XykDex {
                     assets,
                 )
             }
-            Pool::LaunchV1 { .. } => {
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
                 panic!("Launch pools don't support adding liquidity after creation");
             }
         };
@@ -1209,7 +1300,7 @@ impl XykDex {
             Pool::PrivateV1 { .. } => false,
             Pool::PrivateV2 { locked, .. } => *locked,
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => false,
-            Pool::LaunchV1 { .. } => false,
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => false,
         };
         expect!(!is_locked, "Pool is locked and liquidity cannot be removed");
 
@@ -1390,7 +1481,7 @@ impl XykDex {
                     total_shares_after,
                 )
             }
-            Pool::LaunchV1 { .. } => {
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
                 panic!("Launch pools don't support removing liquidity after creation");
             }
         };
@@ -1473,7 +1564,7 @@ impl XykDex {
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
                 panic!("Fees cannot be edited for public pools");
             }
-            Pool::LaunchV1 { .. } => {
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
                 panic!("Fees cannot be edited for launch pools");
             }
             Pool::PrivateV2 {
@@ -1529,7 +1620,7 @@ impl XykDex {
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
                 panic!("Fees cannot be edited for public pools");
             }
-            Pool::LaunchV1 { .. } => {
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
                 panic!("Fees cannot be edited for launch pools");
             }
             Pool::PrivateV2 {
@@ -1667,7 +1758,21 @@ impl XykDex {
                 user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
                 total_shares: *total_shares,
             },
-            Pool::LaunchV1 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => {
+            Pool::LaunchV1 {
+                near_amount,
+                launched_asset,
+                fees,
+                phantom_liquidity_near,
+            } => Pool::LaunchV2 {
+                quote_asset: AssetWithBalance {
+                    asset_id: AssetId::Near,
+                    balance: *near_amount,
+                },
+                launched_asset: launched_asset.clone(),
+                fees: fees.clone(),
+                phantom_liquidity: *phantom_liquidity_near,
+            },
+            Pool::LaunchV2 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => {
                 panic!("This pool is of the latest version");
             }
         };
@@ -1734,7 +1839,7 @@ impl XykDex {
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
                 panic!("Public pools cannot be locked");
             }
-            Pool::LaunchV1 { .. } => {
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
                 panic!("Launch pools are locked by default");
             }
         }
@@ -1920,7 +2025,10 @@ impl XykDex {
                             shares.map(|shares| U128(shares.get())).unwrap_or_default()
                         })
                     }
-                    Pool::PrivateV1 { .. } | Pool::LaunchV1 { .. } | Pool::PrivateV2 { .. } => None,
+                    Pool::PrivateV1 { .. }
+                    | Pool::LaunchV1 { .. }
+                    | Pool::LaunchV2 { .. }
+                    | Pool::PrivateV2 { .. } => None,
                 }
             })
             .collect()
@@ -1958,8 +2066,8 @@ impl XykDex {
             panic!("Pool {pool_id} not found");
         };
         match pool {
-            Pool::PrivateV1 { .. } | Pool::PublicV1 { .. } => true,
-            Pool::LaunchV1 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => false,
+            Pool::PrivateV1 { .. } | Pool::PublicV1 { .. } | Pool::LaunchV1 { .. } => true,
+            Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } | Pool::LaunchV2 { .. } => false,
         }
     }
 
@@ -2016,6 +2124,12 @@ pub enum Pool {
         user_shares: LookupMap<AccountId, Option<SharesBalance>>,
         total_shares: Option<SharesBalance>,
     },
+    LaunchV2 {
+        quote_asset: AssetWithBalance,
+        launched_asset: AssetWithBalance,
+        fees: FeeConfiguration,
+        phantom_liquidity: U128,
+    },
 }
 
 impl From<&Pool> for PoolType {
@@ -2031,6 +2145,11 @@ impl From<&Pool> for PoolType {
             },
             Pool::PrivateV2 { .. } => PoolType::PrivateV2,
             Pool::PublicV2 { .. } => PoolType::PublicV2,
+            Pool::LaunchV2 {
+                phantom_liquidity, ..
+            } => PoolType::LaunchV2 {
+                phantom_liquidity: *phantom_liquidity,
+            },
         }
     }
 }
@@ -2109,6 +2228,21 @@ impl From<&Pool> for PoolView {
                 ),
                 fee_configuration: fees.clone(),
                 total_shares: total_shares.map(|s| U128(s.get())),
+            },
+            Pool::LaunchV2 {
+                quote_asset,
+                launched_asset,
+                fees,
+                phantom_liquidity,
+            } => PoolView::LaunchV2 {
+                quote_asset: quote_asset.clone(),
+                launched_asset: launched_asset.clone(),
+                fees: fees.with_protocol_fee(
+                    &asset_account_ids([&quote_asset.asset_id, &launched_asset.asset_id]),
+                    near_sdk::env::block_timestamp(),
+                ),
+                fee_configuration: fees.clone(),
+                phantom_liquidity: *phantom_liquidity,
             },
         }
     }

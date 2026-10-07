@@ -399,7 +399,7 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
                     receivers: Vec::new(),
                 }),
                 pool_type: PoolType::LaunchLatest {
-                    phantom_liquidity_near: U128(NearToken::from_near(10).as_yoctonear()),
+                    phantom_liquidity: U128(NearToken::from_near(10).as_yoctonear()),
                 },
             })
             .unwrap(),

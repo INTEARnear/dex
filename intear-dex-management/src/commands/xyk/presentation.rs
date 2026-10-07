@@ -24,6 +24,14 @@ pub fn pool_assets(pool: &PoolView) -> [(AssetId, u128); 2] {
             (AssetId::Near, near_amount.0),
             (launched_asset.asset_id.clone(), launched_asset.balance.0),
         ],
+        PoolView::LaunchV2 {
+            quote_asset,
+            launched_asset,
+            ..
+        } => [
+            (quote_asset.asset_id.clone(), quote_asset.balance.0),
+            (launched_asset.asset_id.clone(), launched_asset.balance.0),
+        ],
     }
 }
 
@@ -31,7 +39,7 @@ pub fn pool_kind(pool: &PoolView) -> &'static str {
     match pool {
         PoolView::Private { .. } => "private",
         PoolView::Public { .. } => "public",
-        PoolView::Launch { .. } => "launch",
+        PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => "launch",
     }
 }
 
@@ -50,6 +58,11 @@ pub fn pool_fees(pool: &PoolView) -> (&CurrentFees, &FeeConfiguration) {
             ..
         }
         | PoolView::Launch {
+            fees,
+            fee_configuration,
+            ..
+        }
+        | PoolView::LaunchV2 {
             fees,
             fee_configuration,
             ..
@@ -249,6 +262,16 @@ pub fn pool_json(
         } => {
             pool_json["phantom_liquidity_near"] =
                 display::amount_json(phantom_liquidity_near.0, Some(&AssetMetadata::near()));
+        }
+        PoolView::LaunchV2 {
+            quote_asset,
+            phantom_liquidity,
+            ..
+        } => {
+            pool_json["phantom_liquidity"] = display::amount_json(
+                phantom_liquidity.0,
+                metadata_cache.get(&quote_asset.asset_id)?.as_ref(),
+            );
         }
     }
     Ok(pool_json)

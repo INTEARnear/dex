@@ -165,6 +165,12 @@ impl ShowContext {
                                     Some(&AssetMetadata::near()),
                                 ),
                             )),
+                            PoolView::LaunchV2 {
+                                phantom_liquidity, ..
+                            } => rows.push((
+                                "Phantom liquidity",
+                                display::format_amount(phantom_liquidity.0, metadata_0.as_ref()),
+                            )),
                         }
                         rows.push((
                             "Fees now",
@@ -405,7 +411,7 @@ impl LockContext {
                         }
                         .into_report());
                     }
-                    PoolView::Launch { .. } => {
+                    PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,
@@ -537,7 +543,9 @@ impl EditFeesContext {
                 let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
                 let (_, current_fee_configuration) = pool_fees(&pool.pool);
                 match &pool.pool {
-                    PoolView::Public { .. } | PoolView::Launch { .. } => {
+                    PoolView::Public { .. }
+                    | PoolView::Launch { .. }
+                    | PoolView::LaunchV2 { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,

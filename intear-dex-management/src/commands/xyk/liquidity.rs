@@ -172,7 +172,10 @@ fn positions(
                     });
                 }
             }
-            PoolView::Private { .. } | PoolView::Public { .. } | PoolView::Launch { .. } => {}
+            PoolView::Private { .. }
+            | PoolView::Public { .. }
+            | PoolView::Launch { .. }
+            | PoolView::LaunchV2 { .. } => {}
         }
     }
     Ok(positions)
@@ -429,7 +432,7 @@ impl AddMaxSlippageContext {
                 let mut operations = Vec::new();
                 let mut storage_near = near_sdk::NearToken::from_yoctonear(0);
                 match &pool.pool {
-                    PoolView::Launch { .. } => {
+                    PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,
@@ -707,7 +710,7 @@ impl RemoveMaxSlippageContext {
                 let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
                 let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
                 let (shares, removal_label, removed) = match &pool.pool {
-                    PoolView::Launch { .. } => {
+                    PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,
