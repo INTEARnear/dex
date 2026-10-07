@@ -96,10 +96,10 @@ pub fn new_pool_bytes(
             SHARE_MAP_BYTES,
             ENUM_TAG_BYTES,
         ])?,
-        // NEAR, the launched asset, and the phantom NEAR liquidity
+        // The quote asset, the launched asset, and the phantom liquidity
         NewPoolKind::Launch => sum_bytes(&[
             ENUM_TAG_BYTES,
-            U128_BYTES,
+            asset_with_balance_bytes(assets.0)?,
             asset_with_balance_bytes(assets.1)?,
             fees_bytes,
             U128_BYTES,

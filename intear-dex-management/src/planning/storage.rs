@@ -6,11 +6,10 @@ use near_sdk::NearToken;
 // variant). IterableMaps add one more byte for their key list and their
 // value map, and keep values under a hash of the key. The balances of an
 // account or a dex are an IterableMap under a prefix of their own: a
-// StorageKey variant and a hash of the owner.
+// StorageKey variant and the owner, so the prefix grows with the owner's id.
 const COLLECTION_PREFIX_BYTES: usize = 1;
 const ITERABLE_MAP_PART_PREFIX_BYTES: usize = 1;
 const HASHED_KEY_BYTES: usize = 32;
-const OWNER_BALANCES_PREFIX_BYTES: usize = COLLECTION_PREFIX_BYTES + 32;
 const BORSH_LENGTH_BYTES: usize = 4;
 const U32_BYTES: usize = 4;
 const U128_BYTES: usize = 16;
@@ -48,14 +47,16 @@ pub fn owner_balances_record_bytes(
     owner: &AccountOrDexId,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
+    let owner_bytes = owner_bytes(owner)?;
     let part_prefix_bytes = BORSH_LENGTH_BYTES
-        .checked_add(OWNER_BALANCES_PREFIX_BYTES)
+        .checked_add(COLLECTION_PREFIX_BYTES)
+        .and_then(|bytes| bytes.checked_add(owner_bytes))
         .and_then(|bytes| bytes.checked_add(ITERABLE_MAP_PART_PREFIX_BYTES))
         .ok_or_else(|| eyre!("Storage size overflow"))?;
     record_bytes(
         &[
             COLLECTION_PREFIX_BYTES,
-            owner_bytes(owner)?,
+            owner_bytes,
             U32_BYTES,
             part_prefix_bytes,
             part_prefix_bytes,
@@ -67,13 +68,15 @@ pub fn owner_balances_record_bytes(
 /// The records of one balance among the balances of its owner: the asset in
 /// their key list, and the balance with its index in the list under a hash
 pub fn balance_record_bytes(
+    owner: &AccountOrDexId,
     asset_id: &AssetId,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
     sum(&[
         record_bytes(
             &[
-                OWNER_BALANCES_PREFIX_BYTES,
+                COLLECTION_PREFIX_BYTES,
+                owner_bytes(owner)?,
                 ITERABLE_MAP_PART_PREFIX_BYTES,
                 U32_BYTES,
                 near_sdk::borsh::to_vec(asset_id)?.len(),
@@ -96,7 +99,11 @@ pub fn asset_registration_bytes(
     asset_is_in_custody: bool,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
-    let mut bytes = vec![balance_record_bytes(asset_id, extra_bytes_per_record)?];
+    let mut bytes = vec![balance_record_bytes(
+        owner,
+        asset_id,
+        extra_bytes_per_record,
+    )?];
     if !owner_has_registered_assets {
         bytes.push(owner_balances_record_bytes(owner, extra_bytes_per_record)?);
     }
@@ -206,7 +213,7 @@ mod tests {
     fn registering_an_asset_counts_every_new_record() {
         let account_id: AccountId = "alice.near".parse().unwrap();
         let usdt: AssetId = "nep141:usdt.tether-token.near".parse().unwrap();
-        // key list entry: (33 + 1 + 4) + (1 + 4 + 22) + 40, value: 32 + 16 + 4 + 40
+        // key list entry: (1 + (4 + 10) + 1 + 4) + (1 + 4 + 22) + 40, value: 32 + 16 + 4 + 40
         let bytes_for_owner_with_balances = asset_registration_bytes(
             &AccountOrDexId::Account(account_id.clone()),
             &usdt,
@@ -215,12 +222,25 @@ mod tests {
             40,
         )
         .unwrap();
-        assert_eq!(bytes_for_owner_with_balances, 105 + 92);
-        // where the owner's balances are: 1 + (4 + 10) + 4 + 2 * (4 + 33 + 1) + 40
+        assert_eq!(bytes_for_owner_with_balances, 87 + 92);
+        // where the owner's balances are: 1 + (4 + 10) + 4 + 2 * (4 + 1 + (4 + 10) + 1) + 40
         let bytes_for_new_owner =
             asset_registration_bytes(&AccountOrDexId::Account(account_id), &usdt, false, true, 40)
                 .unwrap();
-        assert_eq!(bytes_for_new_owner, 105 + 92 + 135);
+        assert_eq!(bytes_for_new_owner, 87 + 92 + 99);
+        // the owner is part of every key, so an implicit account takes more:
+        // (1 + (4 + 64) + 1 + 4) + (1 + 4 + 22) + 40, 32 + 16 + 4 + 40,
+        // and 1 + (4 + 64) + 4 + 2 * (4 + 1 + (4 + 64) + 1) + 40
+        let implicit_account_id: AccountId = "a".repeat(64).parse().unwrap();
+        let bytes_for_new_implicit_owner = asset_registration_bytes(
+            &AccountOrDexId::Account(implicit_account_id),
+            &usdt,
+            false,
+            true,
+            40,
+        )
+        .unwrap();
+        assert_eq!(bytes_for_new_implicit_owner, 141 + 92 + 261);
     }
 
     #[test]
