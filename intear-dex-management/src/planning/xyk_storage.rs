@@ -30,9 +30,12 @@ const STATE_KEY_BYTES: usize = 5;
 // also stores its length before that
 const MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES;
 const VECTOR_BYTES: usize = U32_BYTES + MAP_BYTES;
+// The ed25519 public key of the fee discount signer, once it's set
+const FEE_DISCOUNT_SIGNER_BYTES: usize = ENUM_TAG_BYTES + 32;
 
-/// The state that initializing an xyk dex stores: the pool vector and the
-/// maps of collected fees, referral settings and community fees
+/// The state that initializing an xyk dex stores: the pool vector, the maps
+/// of collected fees, referral settings and community fees, and no fee
+/// discount signer
 pub fn initial_state_bytes(
     dex_id: &DexId,
     extra_bytes_per_record: u64,
@@ -40,14 +43,20 @@ pub fn initial_state_bytes(
     dex_storage_record_bytes(
         dex_id,
         STATE_KEY_BYTES,
-        sum_bytes(&[VECTOR_BYTES, MAP_BYTES, MAP_BYTES, MAP_BYTES])?,
+        sum_bytes(&[
+            VECTOR_BYTES,
+            MAP_BYTES,
+            MAP_BYTES,
+            MAP_BYTES,
+            ENUM_TAG_BYTES,
+        ])?,
         extra_bytes_per_record,
     )
 }
 
-/// What migrating the state from before community fees adds: their map
+/// What migrating the state from before fee discounts adds: their signer
 pub fn migration_growth_bytes() -> u64 {
-    MAP_BYTES as u64
+    FEE_DISCOUNT_SIGNER_BYTES as u64
 }
 
 pub enum NewPoolKind<'owner> {

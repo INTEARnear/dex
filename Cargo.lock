@@ -2340,6 +2340,7 @@ dependencies = [
  "interactive-clap",
  "interactive-clap-derive",
  "near-cli-rs",
+ "near-crypto 0.37.4",
  "near-jsonrpc-client 0.22.0",
  "near-jsonrpc-primitives 0.37.4",
  "near-primitives 0.37.4",

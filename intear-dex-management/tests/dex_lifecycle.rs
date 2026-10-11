@@ -1,9 +1,10 @@
 mod common;
 
-use common::{Cli, rewind_xyk_state_to_before_community_fees, start_sandbox_with_xyk_pools};
+use common::{Cli, rewind_xyk_state_to_before_fee_discounts, start_sandbox_with_xyk_pools};
 use intear_dex_test_support::get_compiled_wasms;
 use intear_dex_types::{AssetId, DexId};
 use near_sdk::json_types::Base64VecU8;
+use near_workspaces::types::{KeyType, SecretKey};
 use xyk_dex_types::RegisterFeeAssetsArgs;
 
 /// Base64 of the borsh encoding, the way dexes take arguments
@@ -180,6 +181,9 @@ async fn dex_lifecycle() {
     let xyk_wasm_path = xyk_wasm_path.to_str().unwrap();
     let not_wasm_path = wasm_directory.path().join("readme.txt");
     std::fs::write(&not_wasm_path, "not a wasm module").unwrap();
+    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer")
+        .public_key()
+        .to_string();
 
     insta::assert_snapshot!(
         "xyk_deploy_of_file_that_is_not_wasm",
@@ -264,6 +268,8 @@ async fn dex_lifecycle() {
                 "--name",
                 "xyk-test",
                 "--migrate",
+                "--fee-discount-signer",
+                &fee_discount_signer,
                 "use-file",
                 xyk_wasm_path
             ]
@@ -301,7 +307,7 @@ async fn dex_lifecycle() {
     );
 
     let test_dex_id: DexId = "slimedragon.near/xyk-test".parse().unwrap();
-    rewind_xyk_state_to_before_community_fees(&sandbox, &test_dex_id).await;
+    rewind_xyk_state_to_before_fee_discounts(&sandbox, &test_dex_id).await;
     // Views read the final block, a few blocks after the one with the patch
     sandbox.fast_forward(10).await.unwrap();
     insta::assert_snapshot!(
@@ -317,7 +323,7 @@ async fn dex_lifecycle() {
     let deploy_test_dex_code = |code_path: &str, migrates: bool| {
         let mut args = vec!["xyk", "deploy", "slimedragon.near", "--name", "xyk-test"];
         if migrates {
-            args.push("--migrate");
+            args.extend(["--migrate", "--fee-discount-signer", &fee_discount_signer]);
         }
         args.extend(["use-file", code_path]);
         args.into_iter().map(String::from).collect::<Vec<_>>()

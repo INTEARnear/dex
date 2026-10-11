@@ -3,7 +3,13 @@
 use std::{fmt, num::NonZeroU128};
 
 use intear_dex_types::{AssetId, SwapRequest};
-use near_sdk::{AccountId, AccountIdRef, Timestamp, json_types::U128, near, serde::Deserialize};
+use near_sdk::{
+    AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
+    borsh::{BorshDeserialize, BorshSerialize, io::Read},
+    json_types::U128,
+    near,
+    serde::Deserialize,
+};
 
 pub type PoolId = u32;
 
@@ -39,10 +45,58 @@ const _: () = assert!(
 
 pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
 
-#[near(serializers=[borsh])]
+#[derive(BorshSerialize)]
+#[borsh(crate = "near_sdk::borsh")]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SwapArgs {
     pub pool_id: PoolId,
+    pub fee_discount: Option<SignedFeeDiscount>,
+}
+
+/// Messages from before fee discounts existed end right after `pool_id`
+impl BorshDeserialize for SwapArgs {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
+        let pool_id = PoolId::deserialize_reader(reader)?;
+        let mut fee_discount_bytes = Vec::new();
+        reader.read_to_end(&mut fee_discount_bytes)?;
+        Ok(Self {
+            pool_id,
+            fee_discount: if fee_discount_bytes.is_empty() {
+                None
+            } else {
+                near_sdk::borsh::from_slice(&fee_discount_bytes)?
+            },
+        })
+    }
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SignedFeeDiscount {
+    pub discount: FeeDiscount,
+    /// signature of sha256(borsh(`discount`)) by the dex's fee discount signer
+    pub signature: Vec<u8>,
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeDiscount {
+    pub pool_id: PoolId,
+    pub asset_in: AssetId,
+    pub asset_out: AssetId,
+    /// The only alleged trader who can use the discount, anyone can if `None`
+    pub trader_id: Option<AccountId>,
+    /// Reduces pool and protocol fees, but not referral fees.
+    /// [`FULL_FEE_FRACTION`] waives pool and protocol fees entirely.
+    pub fee_discount: FeeFraction,
+    pub expiration_block_height: BlockHeight,
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct MigrateArgs {
+    pub fee_discount_signer_public_key: PublicKey,
 }
 
 #[near(serializers=[borsh])]
@@ -586,6 +640,25 @@ impl FeeConfiguration {
                 CurrentFees { receivers }
             }
         }
+    }
+}
+
+impl CurrentFees {
+    /// Each fee is rounded down after the discount
+    pub fn discounted(mut self, fee_discount: FeeFraction) -> CurrentFees {
+        let remaining_fee_share = FULL_FEE_FRACTION
+            .checked_sub(fee_discount)
+            .expect("Fee discount can't exceed 100%");
+        for (_, fee_fraction) in self.receivers.iter_mut() {
+            let discounted_fee_fraction = u64::from(*fee_fraction)
+                .checked_mul(u64::from(remaining_fee_share))
+                .unwrap()
+                .checked_div(u64::from(FULL_FEE_FRACTION))
+                .unwrap();
+            *fee_fraction = FeeFraction::try_from(discounted_fee_fraction)
+                .expect("Discounted fee can't be higher than the original fee");
+        }
+        self
     }
 }
 

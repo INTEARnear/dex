@@ -450,7 +450,13 @@ pub async fn swap_through_engine(
 ) {
     let swap = Operation::SwapSimple {
         dex_id: "slimedragon.near/xyk".parse().unwrap(),
-        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+        message: Base64VecU8(
+            near_sdk::borsh::to_vec(&SwapArgs {
+                pool_id,
+                fee_discount: None,
+            })
+            .unwrap(),
+        ),
         asset_in,
         asset_out,
         amount: SwapOperationAmount::Amount(amount),
@@ -489,13 +495,14 @@ pub async fn transfer_on_engine(
     .await;
 }
 
-/// Gives an xyk dex without pools the state layout from before community
-/// fees, which its `migrate` converts. The engine keeps a dex's state in its
-/// dex storage collection, whose prefix is 1, under the dex id and near-sdk's
-/// STATE key. The engine's state is too large to read through RPC, so the
-/// old state is written out: the pool vector (length, then prefix 0), and
-/// the maps of collected fees and referral settings (prefixes 2 and 3).
-pub async fn rewind_xyk_state_to_before_community_fees(sandbox: &Worker<Sandbox>, dex_id: &DexId) {
+/// Gives an xyk dex without pools the state layout from before fee
+/// discounts, which its `migrate` converts. The engine keeps a dex's state in
+/// its dex storage collection, whose prefix is 1, under the dex id and
+/// near-sdk's STATE key. The engine's state is too large to read through RPC,
+/// so the old state is written out: the pool vector (length, then prefix 0),
+/// and the maps of collected fees, referral settings and community fees
+/// (prefixes 2, 3 and 4).
+pub async fn rewind_xyk_state_to_before_fee_discounts(sandbox: &Worker<Sandbox>, dex_id: &DexId) {
     let engine_id: AccountId = ENGINE_ACCOUNT_ID.parse().unwrap();
     let key = [
         vec![1u8],
@@ -503,18 +510,19 @@ pub async fn rewind_xyk_state_to_before_community_fees(sandbox: &Worker<Sandbox>
     ]
     .concat();
     let collection_prefix = |prefix: u8| near_sdk::borsh::to_vec(&vec![prefix]).unwrap();
-    let state_before_community_fees = [
+    let state_before_fee_discounts = [
         0u32.to_le_bytes().to_vec(),
         collection_prefix(0),
         collection_prefix(2),
         collection_prefix(3),
+        collection_prefix(4),
     ]
     .concat();
     sandbox
         .patch_state(
             &engine_id,
             &key,
-            &near_sdk::borsh::to_vec(&state_before_community_fees).unwrap(),
+            &near_sdk::borsh::to_vec(&state_before_fee_discounts).unwrap(),
         )
         .await
         .unwrap();

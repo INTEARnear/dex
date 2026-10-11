@@ -2,13 +2,13 @@
 source: intear-dex-management/tests/dex_lifecycle.rs
 expression: "cli.transaction(\"slimedragon.near\",\n&[\"xyk\", \"deploy\", \"slimedragon.near\", \"--name\", \"xyk-test\", \"--migrate\",\n\"use-file\",\nxyk_wasm_path]).await.replace(xyk_wasm_path, \"[TEMP]/xyk_dex.wasm\")"
 ---
-$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 exit code: 1
 --- stdout ---
 --- stderr ---
 
 Here is your console command if you need to script it or re-run:
-    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 
 Error:
    0: slimedragon.near/xyk-test has no state yet, so there's nothing to migrate

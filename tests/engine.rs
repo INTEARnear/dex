@@ -3746,44 +3746,9 @@ async fn test_is_paused() {
 
 #[tokio::test]
 async fn test_migration_of_mainnet_state() {
-    let dex_engine_id: AccountId = "dex.intear.near".parse().unwrap();
     let wasms = get_compiled_wasms().await;
-    let mainnet = mainnet().await;
     let sandbox = near_workspaces::sandbox().await.unwrap();
-    let block_height = mainnet.view_block().await.unwrap().height();
-    let mainnet_state = mainnet
-        .view_state(&dex_engine_id)
-        .block_height(block_height)
-        .await
-        .unwrap();
-    let dex_engine_contract = sandbox
-        .import_contract(&dex_engine_id, &mainnet)
-        .block_height(block_height)
-        .transact()
-        .await
-        .unwrap();
-    let mut batches = Vec::new();
-    let mut current_batch = Vec::new();
-    let mut current_batch_size: usize = 0;
-    const MAX_BATCH_SIZE: usize = 50000;
-    for (key, value) in mainnet_state.iter() {
-        current_batch.push((key.as_slice(), value.as_slice()));
-        current_batch_size += 40 + key.len() + value.len();
-        if current_batch_size >= MAX_BATCH_SIZE {
-            batches.push(current_batch);
-            current_batch = Vec::new();
-            current_batch_size = 0;
-        }
-    }
-    batches.push(current_batch);
-    for batch in batches {
-        sandbox
-            .patch(&dex_engine_id)
-            .states(batch)
-            .transact()
-            .await
-            .unwrap();
-    }
+    let dex_engine_contract = import_mainnet_engine(&sandbox).await;
 
     let view_json =
         async |method: &str, args: near_sdk::serde_json::Value| -> near_sdk::serde_json::Value {

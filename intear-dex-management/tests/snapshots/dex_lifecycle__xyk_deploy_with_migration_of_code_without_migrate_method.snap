@@ -2,7 +2,7 @@
 source: intear-dex-management/tests/dex_lifecycle.rs
 expression: "cli.transaction(\"slimedragon.near\",\n&deploy_test_dex_code(empty_wasm_path,\ntrue).iter().map(String::as_str).collect::<Vec<_>>()).await.replace(empty_wasm_path,\n\"[TEMP]/empty.wasm\")"
 ---
-$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 exit code: 1
 --- stdout ---
 --- stderr ---
@@ -27,7 +27,7 @@ exit code: 1
 │                       args:         {
 │                                       "dex_id": "slimedragon.near/xyk-test",
 │                                       "method": "migrate",
-│                                       "args": "",
+│                                       "args": "nXC5lm6lfgxdtPcNfjvHchpYBnnUfvyXhrDig0qjAfA=",
 │                                       "attached_assets": {},
 │                                       "referrer": null
 │                                     }
@@ -40,7 +40,7 @@ exit code: 1
 │
 
 Here is your console command if you need to script it or re-run:
-    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/empty.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 
 Error:
    0: The deploy failed on-chain: dex.intear.near refused it: Failed to get function 'migrate'

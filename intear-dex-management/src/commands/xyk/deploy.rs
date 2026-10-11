@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
@@ -10,7 +11,7 @@ use near_primitives::types::AccountId;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
-use xyk_dex_types::CAN_MIGRATE;
+use xyk_dex_types::{CAN_MIGRATE, MigrateArgs};
 
 use super::XykContext;
 use crate::chain::engine;
@@ -38,6 +39,10 @@ pub struct Deploy {
     #[interactive_clap(long)]
     /// Migrate the dex's state to the new code's layout in the same receipt, so that a failed migration reverts the deploy
     migrate: bool,
+    #[interactive_clap(long)]
+    #[interactive_clap(skip_interactive_input)]
+    /// The key that the migration sets for signing fee discounts, e.g. 'ed25519:…'
+    fee_discount_signer: Option<near_cli_rs::types::public_key::PublicKey>,
     #[interactive_clap(subcommand)]
     code: DeployCode,
 }
@@ -58,6 +63,7 @@ pub struct DeployContext {
     global_context: crate::GlobalContext,
     dex_id: DexId,
     migrates: bool,
+    migrate_args: Vec<u8>,
 }
 
 impl DeployContext {
@@ -80,6 +86,24 @@ impl DeployContext {
                 "Invalid dex name '{name}': it's the part of the dex id after <signer>/, so it can't be empty or contain /"
             ));
         }
+        let migrate_args = match (scope.migrate, &scope.fee_discount_signer) {
+            (true, Some(fee_discount_signer)) => near_sdk::borsh::to_vec(&MigrateArgs {
+                fee_discount_signer_public_key: near_sdk::PublicKey::from_str(
+                    &fee_discount_signer.to_string(),
+                )
+                .unwrap(),
+            })?,
+            (true, None) => {
+                return Err(eyre!("The migration needs the fee discount signer's key")
+                    .suggestion("Add --fee-discount-signer ed25519:… after --migrate"));
+            }
+            (false, Some(_)) => {
+                return Err(eyre!(
+                    "--fee-discount-signer is set by the migration, so it only goes with --migrate"
+                ));
+            }
+            (false, None) => Vec::new(),
+        };
         Ok(Self {
             global_context: previous_context.global_context,
             dex_id: DexId {
@@ -87,6 +111,7 @@ impl DeployContext {
                 id: name,
             },
             migrates: scope.migrate,
+            migrate_args,
         })
     }
 }
@@ -264,6 +289,7 @@ fn deploy_action_context(
         global_context,
         dex_id,
         migrates,
+        migrate_args,
     } = deploy_context;
     let code_hash = Base58CryptoHash::from(near_primitives::hash::hash(&code).0);
     let signer_id: AccountId = dex_id.deployer.clone();
@@ -374,7 +400,7 @@ fn deploy_action_context(
                 args: json!({
                     "dex_id": dex_id,
                     "method": "migrate",
-                    "args": Base64VecU8(Vec::new()),
+                    "args": Base64VecU8(migrate_args.clone()),
                     "attached_assets": {},
                     "referrer": null,
                 }),

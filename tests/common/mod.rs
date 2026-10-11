@@ -268,13 +268,6 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
     let wasms = get_compiled_wasms().await;
     let sandbox = near_workspaces::sandbox().await.unwrap();
     let dex_engine_contract = sandbox.dev_deploy(&wasms.contract_wasm).await.unwrap();
-
-    let (user1, user1_key) = create_user(&sandbox, "user1").await;
-    let (user2, user2_key) = create_user(&sandbox, "user2").await;
-    let (user3, user3_key) = create_user(&sandbox, "user3").await;
-    let (user4, user4_key) = create_user(&sandbox, "user4").await;
-    let (user5, user5_key) = create_user(&sandbox, "user5").await;
-
     let deployer = sandbox.dev_create_account().await.unwrap();
 
     let result = dex_engine_contract
@@ -286,6 +279,46 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
         .await
         .unwrap();
     assert_success(&result).unwrap();
+
+    setup_test_environment_around_engine(sandbox, dex_engine_contract, deployer, config).await
+}
+
+/// Set up the test environment around dex.intear.near with its mainnet state.
+pub async fn setup_test_environment_with_mainnet_engine(config: TestSetupConfig) -> TestContext {
+    let sandbox = near_workspaces::sandbox().await.unwrap();
+    let dex_engine_contract = import_mainnet_engine(&sandbox).await;
+
+    let deployer_id: AccountId = xyk_dex_types::CAN_MIGRATE.to_owned();
+    let deployer_key =
+        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    sandbox
+        .patch(&deployer_id)
+        .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000)))
+        .access_key(
+            deployer_key.public_key(),
+            near_workspaces::types::AccessKey::full_access(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    let deployer = Account::from_secret_key(deployer_id, deployer_key, &sandbox);
+
+    setup_test_environment_around_engine(sandbox, dex_engine_contract, deployer, config).await
+}
+
+async fn setup_test_environment_around_engine(
+    sandbox: Worker<Sandbox>,
+    dex_engine_contract: Contract,
+    deployer: Account,
+    config: TestSetupConfig,
+) -> TestContext {
+    let wasms = get_compiled_wasms().await;
+
+    let (user1, user1_key) = create_user(&sandbox, "user1").await;
+    let (user2, user2_key) = create_user(&sandbox, "user2").await;
+    let (user3, user3_key) = create_user(&sandbox, "user3").await;
+    let (user4, user4_key) = create_user(&sandbox, "user4").await;
+    let (user5, user5_key) = create_user(&sandbox, "user5").await;
 
     let ft_total_supply = NearToken::from_near(1_000_000_000_000);
 
@@ -513,6 +546,48 @@ pub async fn mainnet() -> Worker<Mainnet> {
         .rpc_addr(&std::env::var("RPC_URL").unwrap_or_else(|_| "https://rpc.intea.rs".to_string()))
         .await
         .unwrap()
+}
+
+/// Import dex.intear.near into the sandbox with its code and all of its
+/// state on mainnet, as of the latest block
+pub async fn import_mainnet_engine(sandbox: &Worker<Sandbox>) -> Contract {
+    let dex_engine_id: AccountId = "dex.intear.near".parse().unwrap();
+    let mainnet = mainnet().await;
+    let block_height = mainnet.view_block().await.unwrap().height();
+    let mainnet_state = mainnet
+        .view_state(&dex_engine_id)
+        .block_height(block_height)
+        .await
+        .unwrap();
+    let dex_engine_contract = sandbox
+        .import_contract(&dex_engine_id, &mainnet)
+        .block_height(block_height)
+        .transact()
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    let mut current_batch = Vec::new();
+    let mut current_batch_size: usize = 0;
+    const MAX_BATCH_SIZE: usize = 50000;
+    for (key, value) in mainnet_state.iter() {
+        current_batch.push((key.as_slice(), value.as_slice()));
+        current_batch_size += 40 + key.len() + value.len();
+        if current_batch_size >= MAX_BATCH_SIZE {
+            batches.push(current_batch);
+            current_batch = Vec::new();
+            current_batch_size = 0;
+        }
+    }
+    batches.push(current_batch);
+    for batch in batches {
+        sandbox
+            .patch(&dex_engine_id)
+            .states(batch)
+            .transact()
+            .await
+            .unwrap();
+    }
+    dex_engine_contract
 }
 
 /// Create `pause.slimedragon.near`, which is allowed to pause the dex engine.

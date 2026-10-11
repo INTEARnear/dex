@@ -9,20 +9,21 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, expect,
 };
 use near_sdk::{
-    AccountId, AccountIdRef, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto,
+    AccountId, AccountIdRef, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey,
+    assert_one_yocto,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
 };
 use xyk_dex_types::{
-    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CreatePoolArgs, CreatePoolResponse,
-    CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration, FeeReceiver,
-    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
-    GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs,
-    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings,
-    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
-    SetReferrerSettingsArgs, SharesBalance, SwapArgs, UpgradePoolArgs, WithdrawCommunityFeeArgs,
-    WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
+    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration,
+    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
+    LockPoolArgs, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType,
+    PoolView, ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RemoveLiquidityResponse, SetReferrerSettingsArgs, SharesBalance, SignedFeeDiscount, SwapArgs,
+    UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -52,6 +53,7 @@ pub struct XykDex {
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
     referral_settings: LookupMap<AccountId, ReferralSettings>,
     community_owned_fees: LookupMap<AccountId, NearToken>,
+    fee_discount_signer_public_key: Option<PublicKey>,
 }
 
 fn u256_to_u128(value: U256) -> u128 {
@@ -119,7 +121,11 @@ fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: Non
 impl Dex for XykDex {
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        let Ok(SwapArgs { mut pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
+        let Ok(SwapArgs {
+            mut pool_id,
+            fee_discount,
+        }) = near_sdk::borsh::from_slice(&request.message.0)
+        else {
             panic!("Invalid message");
         };
         if pool_id == LAST_CREATED_POOL_ID_MARKER {
@@ -127,6 +133,65 @@ impl Dex for XykDex {
             // without having to wait to know the pool ID
             pool_id = self.pools.len().checked_sub(1).expect("No pools created");
         }
+        let verified_fee_discount = fee_discount.map(|signed_fee_discount| {
+            let SignedFeeDiscount {
+                discount,
+                signature,
+            } = signed_fee_discount;
+            expect!(
+                let Some(fee_discount_signer_public_key) = &self.fee_discount_signer_public_key,
+                "Fee discounts are disabled on this dex"
+            );
+            let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&discount).unwrap());
+            expect!(
+                match fee_discount_signer_public_key.curve_type() {
+                    CurveType::ED25519 => {
+                        near_sdk::env::ed25519_verify(
+                            &signature.try_into().unwrap(),
+                            &hash,
+                            fee_discount_signer_public_key.as_bytes()[1..]
+                                .try_into()
+                                .unwrap(),
+                        )
+                    }
+                    CurveType::SECP256K1 => {
+                        near_sdk::env::ecrecover(
+                            &hash,
+                            &signature[..signature.len().saturating_sub(1)],
+                            *signature.last().expect("Invalid signature"),
+                            true,
+                        ) == Some(
+                            fee_discount_signer_public_key.as_bytes()[1..]
+                                .try_into()
+                                .unwrap(),
+                        )
+                    }
+                    CurveType::MLDSA65 => {
+                        unimplemented!()
+                    }
+                },
+                "Fee discount signature verification failed"
+            );
+            expect!(
+                discount.pool_id == pool_id,
+                "Fee discount is for another pool"
+            );
+            expect!(
+                discount.asset_in == request.asset_in && discount.asset_out == request.asset_out,
+                "Fee discount is for other assets"
+            );
+            if let Some(trader_id) = &discount.trader_id {
+                expect!(
+                    *trader_id == near_sdk::env::predecessor_account_id(),
+                    "Fee discount is for another trader"
+                );
+            }
+            expect!(
+                near_sdk::env::block_height() <= discount.expiration_block_height,
+                "Fee discount expired"
+            );
+            discount.fee_discount
+        });
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
@@ -399,8 +464,13 @@ impl Dex for XykDex {
         }
 
         let fee_asset_account_ids = asset_account_ids([&request.asset_in, &request.asset_out]);
+        let pool_and_protocol_fees =
+            fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
         let current_fees = with_referral_fee(
-            fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp()),
+            match verified_fee_discount {
+                Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
+                None => pool_and_protocol_fees,
+            },
             request.referrer.clone(),
             &self.referral_settings,
             &self.fees_collected_by_users,
@@ -607,6 +677,45 @@ impl XykDex {
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
             referral_settings: LookupMap::new(StorageKey::ReferralSettings),
             community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
+            fee_discount_signer_public_key: None,
+        }
+    }
+
+    #[init(ignore_state)]
+    #[payable]
+    pub fn migrate(
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> Self {
+        assert_one_yocto();
+        expect!(
+            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
+            "Only owner can migrate"
+        );
+        let Ok(MigrateArgs {
+            fee_discount_signer_public_key,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+
+        #[near(serializers=[borsh])]
+        pub struct OldXykDex {
+            pools: Vector<Pool>,
+            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+            referral_settings: LookupMap<AccountId, ReferralSettings>,
+            community_owned_fees: LookupMap<AccountId, NearToken>,
+        }
+
+        let old_state: OldXykDex = near_sdk::env::state_read().expect("State read failed");
+
+        XykDex {
+            pools: old_state.pools,
+            fees_collected_by_users: old_state.fees_collected_by_users,
+            referral_settings: old_state.referral_settings,
+            community_owned_fees: old_state.community_owned_fees,
+            fee_discount_signer_public_key: Some(fee_discount_signer_public_key),
         }
     }
 

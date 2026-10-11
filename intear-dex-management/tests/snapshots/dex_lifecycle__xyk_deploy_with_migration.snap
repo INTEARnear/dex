@@ -2,7 +2,7 @@
 source: intear-dex-management/tests/dex_lifecycle.rs
 expression: "without_code_size(cli.transaction(\"slimedragon.near\",\n&deploy_test_dex_code(xyk_wasm_path,\ntrue).iter().map(String::as_str).collect::<Vec<_>>()).await).replace(xyk_wasm_path,\n\"[TEMP]/xyk_dex.wasm\")"
 ---
-$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 exit code: 0
 --- stdout ---
 ""
@@ -38,7 +38,7 @@ exit code: 0
 │                       args:         {
 │                                       "dex_id": "slimedragon.near/xyk-test",
 │                                       "method": "migrate",
-│                                       "args": "",
+│                                       "args": "nXC5lm6lfgxdtPcNfjvHchpYBnnUfvyXhrDig0qjAfA=",
 │                                       "attached_assets": {},
 │                                       "referrer": null
 │                                     }
@@ -87,4 +87,4 @@ The "dex_call" call to <dex.intear.near> on behalf of <slimedragon.near> succeed
 
 
 Here is your console command if you need to script it or re-run:
-    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

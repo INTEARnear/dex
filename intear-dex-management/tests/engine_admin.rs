@@ -309,7 +309,7 @@ async fn operations() {
                 },
                 Operation::SwapSimple {
                     dex_id: "slimedragon.near/xyk".parse().unwrap(),
-                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0, fee_discount: None }).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(USDT.parse().unwrap()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
