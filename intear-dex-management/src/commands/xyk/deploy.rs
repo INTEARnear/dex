@@ -11,6 +11,7 @@ use near_primitives::types::AccountId;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 use xyk_dex_types::{CAN_MIGRATE, MigrateArgs};
 
 use super::XykContext;
@@ -28,6 +29,7 @@ const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = XykContext)]
 #[interactive_clap(output_context = DeployContext)]
+#[interactive_clap(skip_default_from_cli)]
 pub struct Deploy {
     #[interactive_clap(skip_default_input_arg)]
     /// The trusted code deployer of dex.intear.near, which the dex id starts with
@@ -37,10 +39,11 @@ pub struct Deploy {
     /// The name of the dex after <signer>/ (default: xyk)
     name: Option<String>,
     #[interactive_clap(long)]
+    #[interactive_clap(skip_default_input_arg)]
     /// Migrate the dex's state to the new code's layout in the same receipt, so that a failed migration reverts the deploy
     migrate: bool,
     #[interactive_clap(long)]
-    #[interactive_clap(skip_interactive_input)]
+    #[interactive_clap(skip_default_input_arg)]
     /// The key that the migration sets for signing fee discounts, e.g. 'ed25519:…'
     fee_discount_signer: Option<near_cli_rs::types::public_key::PublicKey>,
     #[interactive_clap(subcommand)]
@@ -56,6 +59,171 @@ impl Deploy {
             "Which account deploys? It has to be the engine's trusted code deployer",
         )
     }
+
+    fn input_migrate(
+        context: &XykContext,
+        dex_id: &DexId,
+    ) -> color_eyre::eyre::Result<Option<bool>> {
+        let networks_with_state = networks_where_dex_has_state(context, dex_id)?;
+        if networks_with_state.is_empty() {
+            return Ok(Some(false));
+        }
+        match inquire::Confirm::new(&format!(
+            "{dex_id} has state on {}. Migrate it to the new code's layout in the same receipt as the deploy?",
+            networks_with_state.join(" and ")
+        ))
+        .with_default(false)
+        .prompt()
+        {
+            Ok(migrates) => Ok(Some(migrates)),
+            Err(
+                inquire::error::InquireError::OperationCanceled
+                | inquire::error::InquireError::OperationInterrupted,
+            ) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn input_fee_discount_signer(
+        _context: &XykContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::public_key::PublicKey>> {
+        match inquire::CustomType::new(
+            "Which key does the migration set for signing fee discounts? e.g. ed25519:…",
+        )
+        .with_error_message("That isn't a public key like ed25519:…")
+        .prompt()
+        {
+            Ok(fee_discount_signer) => Ok(Some(fee_discount_signer)),
+            Err(
+                inquire::error::InquireError::OperationCanceled
+                | inquire::error::InquireError::OperationInterrupted,
+            ) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// What the derive generates, with the migration asked for between the flags
+/// and the code: only when the command doesn't name the code, so that a whole
+/// command never stops for it, and only for a dex that has state to migrate
+impl interactive_clap::FromCli for Deploy {
+    type FromCliContext = XykContext;
+    type FromCliError = color_eyre::eyre::Error;
+
+    fn from_cli(
+        optional_clap_variant: Option<<Self as interactive_clap::ToCli>::CliVariant>,
+        context: Self::FromCliContext,
+    ) -> interactive_clap::ResultFromCli<
+        <Self as interactive_clap::ToCli>::CliVariant,
+        Self::FromCliError,
+    >
+    where
+        Self: Sized + interactive_clap::ToCli,
+    {
+        let mut clap_variant = optional_clap_variant.unwrap_or_default();
+        if clap_variant.signer_account_id.is_none() {
+            clap_variant.signer_account_id = match Self::input_signer_account_id(&context) {
+                Ok(Some(signer_account_id)) => Some(signer_account_id),
+                Ok(None) => return interactive_clap::ResultFromCli::Cancel(Some(clap_variant)),
+                Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
+            };
+        }
+        let Some(signer_account_id) = clap_variant.signer_account_id.clone() else {
+            return interactive_clap::ResultFromCli::Cancel(Some(clap_variant));
+        };
+        let dex_id =
+            match deployed_dex_id(&context, &signer_account_id, clap_variant.name.as_deref()) {
+                Ok(dex_id) => dex_id,
+                Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
+            };
+        if !clap_variant.migrate && clap_variant.code.is_none() {
+            clap_variant.migrate = match Self::input_migrate(&context, &dex_id) {
+                Ok(Some(migrates)) => migrates,
+                Ok(None) => return interactive_clap::ResultFromCli::Cancel(Some(clap_variant)),
+                Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
+            };
+        }
+        if clap_variant.migrate && clap_variant.fee_discount_signer.is_none() {
+            clap_variant.fee_discount_signer = match Self::input_fee_discount_signer(&context) {
+                Ok(Some(fee_discount_signer)) => Some(fee_discount_signer),
+                Ok(None) => return interactive_clap::ResultFromCli::Cancel(Some(clap_variant)),
+                Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
+            };
+        }
+        let new_context_scope = InteractiveClapContextScopeForDeploy {
+            signer_account_id,
+            name: clap_variant.name.clone(),
+            migrate: clap_variant.migrate,
+            fee_discount_signer: clap_variant.fee_discount_signer.clone(),
+        };
+        let context = match DeployContext::from_previous_context(context, &new_context_scope) {
+            Ok(context) => context,
+            Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
+        };
+        match <DeployCode as interactive_clap::FromCli>::from_cli(clap_variant.code.take(), context)
+        {
+            interactive_clap::ResultFromCli::Ok(code) => {
+                clap_variant.code = Some(code);
+            }
+            interactive_clap::ResultFromCli::Cancel(code) => {
+                clap_variant.code = code;
+                return interactive_clap::ResultFromCli::Cancel(Some(clap_variant));
+            }
+            interactive_clap::ResultFromCli::Back => return interactive_clap::ResultFromCli::Back,
+            interactive_clap::ResultFromCli::Err(code, err) => {
+                clap_variant.code = code;
+                return interactive_clap::ResultFromCli::Err(Some(clap_variant), err);
+            }
+        }
+        interactive_clap::ResultFromCli::Ok(clap_variant)
+    }
+}
+
+/// The names of the networks where `dex_id` has code and state
+#[tracing::instrument(name = "Looking for the state of", skip_all)]
+fn networks_where_dex_has_state(
+    context: &XykContext,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Vec<String>> {
+    tracing::Span::current().pb_set_message(&dex_id.to_string());
+    let has_state_by_network = crate::chain::networks::read_on_every_network(
+        &context.global_context.config,
+        |network_config, block_reference| {
+            Ok(engine::dex_exists(network_config, block_reference, dex_id)?
+                && !matches!(
+                    xyk::state(network_config, block_reference, dex_id)?,
+                    XykState::Missing
+                ))
+        },
+    )?;
+    Ok(has_state_by_network
+        .into_iter()
+        .filter_map(|(network_name, has_state)| has_state.then_some(network_name))
+        .collect())
+}
+
+/// The dex that deploy creates or replaces: <signer>/<name>
+fn deployed_dex_id(
+    context: &XykContext,
+    signer_account_id: &near_cli_rs::types::account_id::AccountId,
+    name: Option<&str>,
+) -> color_eyre::eyre::Result<DexId> {
+    if context.is_dex_chosen {
+        return Err(
+            eyre!("xyk deploy creates <signer>/<name>, so it doesn't take --dex")
+                .suggestion("Name the dex with --name after deploy"),
+        );
+    }
+    let name = name.unwrap_or(DEFAULT_XYK_DEX_NAME);
+    if name.is_empty() || name.contains('/') {
+        return Err(eyre!(
+            "Invalid dex name '{name}': it's the part of the dex id after <signer>/, so it can't be empty or contain /"
+        ));
+    }
+    Ok(DexId {
+        deployer: signer_account_id.clone().into(),
+        id: name.to_string(),
+    })
 }
 
 #[derive(Clone)]
@@ -71,21 +239,11 @@ impl DeployContext {
         previous_context: XykContext,
         scope: &<Deploy as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        if previous_context.is_dex_chosen {
-            return Err(
-                eyre!("xyk deploy creates <signer>/<name>, so it doesn't take --dex")
-                    .suggestion("Name the dex with --name after deploy"),
-            );
-        }
-        let name = scope
-            .name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_XYK_DEX_NAME.to_string());
-        if name.is_empty() || name.contains('/') {
-            return Err(eyre!(
-                "Invalid dex name '{name}': it's the part of the dex id after <signer>/, so it can't be empty or contain /"
-            ));
-        }
+        let dex_id = deployed_dex_id(
+            &previous_context,
+            &scope.signer_account_id,
+            scope.name.as_deref(),
+        )?;
         let migrate_args = match (scope.migrate, &scope.fee_discount_signer) {
             (true, Some(fee_discount_signer)) => near_sdk::borsh::to_vec(&MigrateArgs {
                 fee_discount_signer_public_key: near_sdk::PublicKey::from_str(
@@ -108,10 +266,7 @@ impl DeployContext {
         };
         Ok(Self {
             global_context: previous_context.global_context,
-            dex_id: DexId {
-                deployer: scope.signer_account_id.clone().into(),
-                id: name,
-            },
+            dex_id,
             migrates: scope.migrate,
             migrate_args,
         })
