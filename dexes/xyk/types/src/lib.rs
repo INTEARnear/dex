@@ -5,7 +5,10 @@ use std::{fmt, num::NonZeroU128};
 use intear_dex_types::{AssetId, SwapRequest, SwapRequestAmount};
 use near_sdk::{
     AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
-    borsh::{BorshDeserialize, BorshSerialize, io::Read},
+    borsh::{
+        BorshDeserialize, BorshSerialize,
+        io::{Read, Write},
+    },
     json_types::U128,
     near,
     serde::Deserialize,
@@ -22,6 +25,10 @@ pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 10 * 9; // 9
 pub const MAX_FEE_RECEIVERS: usize = 20;
 pub const PROTOCOL_FEE: FeeFraction = FULL_FEE_FRACTION / 1000; // 0.1%
 pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
+
+/// 100% = 1000000
+pub type FeeFractionFraction = u32;
+pub const FULL_FEE_FRACTION_FRACTION: FeeFractionFraction = 1000000;
 
 pub type SharesBalance = NonZeroU128;
 pub const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
@@ -45,29 +52,68 @@ const _: () = assert!(
 
 pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
 
-#[derive(BorshSerialize)]
-#[borsh(crate = "near_sdk::borsh")]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SwapArgs {
-    pub pool_id: PoolId,
+    pub routes: Vec<SwapRoute>,
     pub fee_discount: Option<SignedFeeDiscount>,
 }
 
-/// Messages from before fee discounts existed end right after `pool_id`
+impl SwapArgs {
+    pub fn single_pool(pool_id: PoolId) -> Self {
+        Self {
+            routes: vec![SwapRoute {
+                fraction: FULL_SPLIT_FRACTION,
+                pool_ids: vec![pool_id],
+            }],
+            fee_discount: None,
+        }
+    }
+}
+
+/// A swap through a single pool without a fee discount is serialized as just
+/// its pool ID, which is what dex versions from before routes read
+impl BorshSerialize for SwapArgs {
+    fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
+        if let ([SwapRoute { fraction, pool_ids }], None) =
+            (self.routes.as_slice(), &self.fee_discount)
+            && *fraction == FULL_SPLIT_FRACTION
+            && let [pool_id] = pool_ids.as_slice()
+        {
+            return pool_id.serialize(writer);
+        }
+        self.routes.serialize(writer)?;
+        self.fee_discount.serialize(writer)
+    }
+}
+
 impl BorshDeserialize for SwapArgs {
     fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
-        let pool_id = PoolId::deserialize_reader(reader)?;
-        let mut fee_discount_bytes = Vec::new();
-        reader.read_to_end(&mut fee_discount_bytes)?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        if let Ok(pool_id) = <[u8; 4]>::try_from(bytes.as_slice()) {
+            return Ok(Self::single_pool(PoolId::from_le_bytes(pool_id)));
+        }
+        let (routes, fee_discount) = near_sdk::borsh::from_slice(&bytes)?;
         Ok(Self {
-            pool_id,
-            fee_discount: if fee_discount_bytes.is_empty() {
-                None
-            } else {
-                near_sdk::borsh::from_slice(&fee_discount_bytes)?
-            },
+            routes,
+            fee_discount,
         })
     }
+}
+
+/// 100% of the requested amount = 1000000
+pub type SplitFraction = u32;
+pub const FULL_SPLIT_FRACTION: SplitFraction = 1000000;
+
+#[near(serializers=[borsh])]
+#[derive(Clone, PartialEq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SwapRoute {
+    pub fraction: SplitFraction,
+    /// Pools that the route swaps through, in order. Each pool swaps the
+    /// output of the previous one into its other asset, and the last one
+    /// outputs [`SwapRequest::asset_out`].
+    pub pool_ids: Vec<PoolId>,
 }
 
 #[near(serializers=[borsh])]
@@ -82,7 +128,8 @@ pub struct SignedFeeDiscount {
 #[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct FeeDiscount {
-    pub pool_id: PoolId,
+    /// Routes of the swap, as in [`SwapArgs::routes`]
+    pub routes: Vec<SwapRoute>,
     pub asset_in: AssetId,
     pub asset_out: AssetId,
     /// The only alleged trader who can use the discount, anyone can if `None`
@@ -90,7 +137,7 @@ pub struct FeeDiscount {
     pub amount: SwapRequestAmount,
     /// Reduces pool and protocol fees, but not referral fees.
     /// [`FULL_FEE_FRACTION`] waives pool and protocol fees entirely.
-    pub fee_discount: FeeFraction,
+    pub fee_discount: FeeFractionFraction,
     pub expiration_block_height: BlockHeight,
 }
 
@@ -651,15 +698,15 @@ impl FeeConfiguration {
 
 impl CurrentFees {
     /// Each fee is rounded down after the discount
-    pub fn discounted(mut self, fee_discount: FeeFraction) -> CurrentFees {
-        let remaining_fee_share = FULL_FEE_FRACTION
+    pub fn discounted(mut self, fee_discount: FeeFractionFraction) -> CurrentFees {
+        let remaining_fee_share = FULL_FEE_FRACTION_FRACTION
             .checked_sub(fee_discount)
             .expect("Fee discount can't exceed 100%");
         for (_, fee_fraction) in self.receivers.iter_mut() {
             let discounted_fee_fraction = u64::from(*fee_fraction)
                 .checked_mul(u64::from(remaining_fee_share))
                 .unwrap()
-                .checked_div(u64::from(FULL_FEE_FRACTION))
+                .checked_div(u64::from(FULL_FEE_FRACTION_FRACTION))
                 .unwrap();
             *fee_fraction = FeeFraction::try_from(discounted_fee_fraction)
                 .expect("Discounted fee can't be higher than the original fee");

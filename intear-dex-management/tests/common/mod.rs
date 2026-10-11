@@ -443,13 +443,7 @@ pub async fn swap_through_engine(
 ) {
     let swap = Operation::SwapSimple {
         dex_id: "slimedragon.near/xyk".parse().unwrap(),
-        message: Base64VecU8(
-            near_sdk::borsh::to_vec(&SwapArgs {
-                pool_id,
-                fee_discount: None,
-            })
-            .unwrap(),
-        ),
+        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
         asset_in,
         asset_out,
         amount: SwapOperationAmount::Amount(amount),

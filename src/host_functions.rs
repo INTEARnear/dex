@@ -1,6 +1,7 @@
 use wasmi::Caller;
 
-use crate::{CallType, IntearDexEvent, RunnerData};
+use crate::{CallType, RunnerData};
+use intear_dex_types::DexEventData;
 use near_sdk::NearToken;
 
 #[macro_export]
@@ -784,7 +785,11 @@ pub fn ed25519_verify(
     }
 }
 
-pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
+pub fn log_utf8(
+    mut caller: Caller<'_, RunnerData>,
+    len: u64,
+    ptr: u64,
+) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
@@ -810,7 +815,7 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<()
     if let Some(event) = message.strip_prefix("EVENT_JSON:")
         && let Ok(event) = near_sdk::serde_json::from_str(event)
     {
-        IntearDexEvent::DexEvent {
+        let dex_event = DexEventData {
             dex_id: caller.data().dex_id.clone(),
             event,
             referrer: caller.data().referrer.clone(),
@@ -819,8 +824,8 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<()
                 CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
                 _ => None,
             },
-        }
-        .emit();
+        };
+        caller.data_mut().dex_events.push(dex_event);
         return Ok(());
     }
 

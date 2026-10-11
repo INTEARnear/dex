@@ -7,7 +7,7 @@ use near_contract_standards::{
 };
 use near_sdk::{AccountId, PromiseOrValue, json_types::U128, near};
 
-use crate::{DexEngine, DexEngineExt, IntearDexEvent};
+use crate::{DexEngine, DexEngineExt, IntearDexEvent, call_events::CallEvents};
 
 #[near]
 impl DexEngine {
@@ -15,6 +15,7 @@ impl DexEngine {
     /// Deposit near to the dex engine contract's inner
     /// balance for the user.
     pub fn deposit_near(&mut self, operations: Option<DepositMessage>) {
+        let mut events = CallEvents::default();
         self.assert_not_paused();
         let deposit = U128(near_sdk::env::attached_deposit().as_yoctonear());
         self.total_in_custody
@@ -35,6 +36,7 @@ impl DexEngine {
 
         if let Some(message) = operations {
             self.internal_execute_operations(
+                &mut events,
                 message.operations(),
                 near_sdk::env::predecessor_account_id(),
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
@@ -42,6 +44,7 @@ impl DexEngine {
             );
         } else {
             self.internal_increase_assets(
+                &mut events,
                 AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
                 AssetId::Near,
                 U128(near_sdk::env::attached_deposit().as_yoctonear()),
@@ -53,6 +56,7 @@ impl DexEngine {
             }
             .emit();
         }
+        events.emit();
     }
 }
 
@@ -64,6 +68,7 @@ impl FungibleTokenReceiver for DexEngine {
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        let mut events = CallEvents::default();
         self.assert_not_paused();
         let contract_id = near_sdk::env::predecessor_account_id();
         let operations: Option<DepositMessage> = if msg.is_empty() {
@@ -90,6 +95,7 @@ impl FungibleTokenReceiver for DexEngine {
 
         if let Some(message) = operations {
             self.internal_execute_operations(
+                &mut events,
                 message.operations(),
                 sender_id,
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
@@ -97,6 +103,7 @@ impl FungibleTokenReceiver for DexEngine {
             );
         } else {
             self.internal_increase_assets(
+                &mut events,
                 AccountOrDexId::Account(sender_id.clone()),
                 AssetId::Nep141(contract_id.clone()),
                 amount,
@@ -109,6 +116,7 @@ impl FungibleTokenReceiver for DexEngine {
             .emit();
         }
 
+        events.emit();
         PromiseOrValue::Value(U128(0))
     }
 }
@@ -122,6 +130,7 @@ impl NonFungibleTokenReceiver for DexEngine {
         token_id: non_fungible_token::TokenId,
         msg: String,
     ) -> PromiseOrValue<bool> {
+        let mut events = CallEvents::default();
         self.assert_not_paused();
         let contract_id = near_sdk::env::predecessor_account_id();
         let message: Option<DepositMessage> = if msg.is_empty() {
@@ -152,6 +161,7 @@ impl NonFungibleTokenReceiver for DexEngine {
 
         if let Some(message) = message {
             self.internal_execute_operations(
+                &mut events,
                 message.operations(),
                 previous_owner_id,
                 Some(HashMap::from_iter([(
@@ -162,6 +172,7 @@ impl NonFungibleTokenReceiver for DexEngine {
             );
         } else {
             self.internal_increase_assets(
+                &mut events,
                 AccountOrDexId::Account(previous_owner_id.clone()),
                 AssetId::Nep171(contract_id.clone(), token_id.to_string()),
                 U128(1),
@@ -174,6 +185,7 @@ impl NonFungibleTokenReceiver for DexEngine {
             .emit();
         }
 
+        events.emit();
         PromiseOrValue::Value(false)
     }
 }
@@ -189,6 +201,7 @@ impl DexEngine {
         amounts: Vec<U128>,
         msg: String,
     ) -> PromiseOrValue<Vec<U128>> {
+        let mut events = CallEvents::default();
         self.assert_not_paused();
         expect!(
             previous_owner_ids.len() == token_ids.len()
@@ -247,6 +260,7 @@ impl DexEngine {
 
         if let Some(message) = message {
             self.internal_execute_operations(
+                &mut events,
                 message.operations(),
                 sender_id,
                 Some(attached_assets),
@@ -259,6 +273,7 @@ impl DexEngine {
                 .zip(amounts.iter())
             {
                 self.internal_increase_assets(
+                    &mut events,
                     AccountOrDexId::Account(previous_owner_id.clone()),
                     AssetId::Nep245(contract_id.clone(), token_id.clone()),
                     *amount,
@@ -272,6 +287,7 @@ impl DexEngine {
             }
         }
 
+        events.emit();
         PromiseOrValue::Value(vec![U128(0); token_ids.len()])
     }
 }

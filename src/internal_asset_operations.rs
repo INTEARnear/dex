@@ -1,7 +1,7 @@
 use intear_dex_types::{AccountOrDexId, AssetId, expect};
 use near_sdk::{json_types::U128, store::IterableMap};
 
-use crate::{AssetBalances, DexEngine, IntearDexEvent, StorageKey};
+use crate::{AssetBalances, DexEngine, StorageKey, call_events::CallEvents};
 
 impl DexEngine {
     pub fn asset_balances(&self, account_or_dex_id: &AccountOrDexId) -> Option<&AssetBalances> {
@@ -52,6 +52,7 @@ impl DexEngine {
 
     pub fn internal_transfer_asset(
         &mut self,
+        events: &mut CallEvents,
         from: AccountOrDexId,
         to: AccountOrDexId,
         asset_id: AssetId,
@@ -60,8 +61,8 @@ impl DexEngine {
         if amount.0 == 0 {
             return;
         }
-        self.internal_decrease_assets(from, asset_id.clone(), amount);
-        self.internal_increase_assets(to, asset_id, amount);
+        self.internal_decrease_assets(events, from, asset_id.clone(), amount);
+        self.internal_increase_assets(events, to, asset_id, amount);
     }
 
     pub fn assert_has_enough(
@@ -98,6 +99,7 @@ impl DexEngine {
 
     pub fn internal_increase_assets(
         &mut self,
+        events: &mut CallEvents,
         account_or_dex_id: AccountOrDexId,
         asset_id: AssetId,
         amount: U128,
@@ -118,12 +120,7 @@ impl DexEngine {
                     )
                 });
                 let balance = *balance;
-                IntearDexEvent::UserBalanceUpdate {
-                    account_id: account,
-                    asset_id,
-                    balance,
-                }
-                .emit();
+                events.balance_updated(AccountOrDexId::Account(account), asset_id, balance);
             }
             AccountOrDexId::Dex(dex_id) => {
                 let balance = self.dex_balances
@@ -139,18 +136,14 @@ impl DexEngine {
                     )
                 });
                 let balance = *balance;
-                IntearDexEvent::DexBalanceUpdate {
-                    dex_id,
-                    asset_id,
-                    balance,
-                }
-                .emit();
+                events.balance_updated(AccountOrDexId::Dex(dex_id), asset_id, balance);
             }
         }
     }
 
     pub fn internal_decrease_assets(
         &mut self,
+        events: &mut CallEvents,
         account_or_dex_id: AccountOrDexId,
         asset_id: AssetId,
         amount: U128,
@@ -170,12 +163,7 @@ impl DexEngine {
                     )
                 });
                 let balance = *balance;
-                IntearDexEvent::UserBalanceUpdate {
-                    account_id: account,
-                    asset_id,
-                    balance,
-                }
-                .emit();
+                events.balance_updated(AccountOrDexId::Account(account), asset_id, balance);
             }
             AccountOrDexId::Dex(dex_id) => {
                 let balance = self.dex_balances
@@ -191,12 +179,7 @@ impl DexEngine {
                     )
                 });
                 let balance = *balance;
-                IntearDexEvent::DexBalanceUpdate {
-                    dex_id,
-                    asset_id,
-                    balance,
-                }
-                .emit();
+                events.balance_updated(AccountOrDexId::Dex(dex_id), asset_id, balance);
             }
         }
     }

@@ -17,12 +17,13 @@ use near_sdk::{
 };
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
-    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FeeConfiguration,
-    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
-    LockPoolArgs, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType,
-    PoolView, ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, SetReferrerSettingsArgs, SharesBalance, SignedFeeDiscount, SwapArgs,
+    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FULL_SPLIT_FRACTION,
+    FeeConfiguration, FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs,
+    GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, GetReferralSettingsArgs,
+    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, MigrateArgs,
+    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
+    SetReferrerSettingsArgs, SharesBalance, SignedFeeDiscount, SwapArgs, SwapRoute,
     UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
 };
 
@@ -122,80 +123,249 @@ impl Dex for XykDex {
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
         let Ok(SwapArgs {
-            mut pool_id,
+            routes,
             fee_discount,
         }) = near_sdk::borsh::from_slice(&request.message.0)
         else {
             panic!("Invalid message");
         };
-        if pool_id == LAST_CREATED_POOL_ID_MARKER {
-            // Last created pool. This is used to batch "create launch pool + buy"
-            // without having to wait to know the pool ID
-            pool_id = self.pools.len().checked_sub(1).expect("No pools created");
-        }
-        let verified_fee_discount = fee_discount.map(|signed_fee_discount| {
-            let SignedFeeDiscount {
-                discount,
-                signature,
-            } = signed_fee_discount;
-            expect!(
-                let Some(fee_discount_signer_public_key) = &self.fee_discount_signer_public_key,
-                "Fee discounts are disabled on this dex"
-            );
-            let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&discount).unwrap());
-            expect!(
-                match fee_discount_signer_public_key.curve_type() {
-                    CurveType::ED25519 => {
-                        near_sdk::env::ed25519_verify(
-                            &signature.try_into().unwrap(),
-                            &hash,
-                            fee_discount_signer_public_key.as_bytes()[1..]
-                                .try_into()
-                                .unwrap(),
-                        )
-                    }
-                    CurveType::SECP256K1 => {
-                        near_sdk::env::ecrecover(
-                            &hash,
-                            &signature[..signature.len().saturating_sub(1)],
-                            *signature.last().expect("Invalid signature"),
-                            true,
-                        ) == Some(
-                            fee_discount_signer_public_key.as_bytes()[1..]
-                                .try_into()
-                                .unwrap(),
-                        )
-                    }
-                    CurveType::MLDSA65 => {
-                        unimplemented!()
-                    }
-                },
-                "Fee discount signature verification failed"
-            );
-            expect!(
-                discount.pool_id == pool_id,
-                "Fee discount is for another pool"
-            );
-            expect!(
-                discount.asset_in == request.asset_in && discount.asset_out == request.asset_out,
-                "Fee discount is for other assets"
-            );
-            if let Some(trader_id) = &discount.trader_id {
-                expect!(
-                    *trader_id == near_sdk::env::predecessor_account_id(),
-                    "Fee discount is for another trader"
-                );
-            }
-            expect!(
-                discount.amount == request.amount,
-                "Fee discount is for another amount"
-            );
-            expect!(
-                near_sdk::env::block_height() <= discount.expiration_block_height,
-                "Fee discount expired"
-            );
-            discount
+        expect!(!routes.is_empty(), "No routes");
+        expect!(
+            routes
+                .iter()
+                .map(|route| route.fraction as u64)
+                .sum::<u64>()
+                == FULL_SPLIT_FRACTION as u64,
+            "Route fractions must add up to 100%"
+        );
+        let fee_discount = fee_discount.map(|signed_fee_discount| {
+            self.verify_fee_discount(signed_fee_discount, &routes, &request)
         });
+
+        let (SwapRequestAmount::ExactIn(requested_amount)
+        | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
+        let mut route_amounts = routes
+            .into_iter()
+            .map(|route| {
+                let amount = mul_div(
+                    requested_amount.0,
+                    route.fraction as u128,
+                    FULL_SPLIT_FRACTION as u128,
+                );
+                (route, amount)
+            })
+            .collect::<Vec<_>>();
+        // Fractions round down, so the first route also swaps what's left
+        let unsplit_amount = requested_amount
+            .0
+            .checked_sub(route_amounts.iter().map(|(_route, amount)| amount).sum())
+            .expect("Routes exceed the requested amount");
+        route_amounts[0].1 = route_amounts[0]
+            .1
+            .checked_add(unsplit_amount)
+            .expect("Overflow");
+
+        let mut response = SwapResponse {
+            amount_in: U128(0),
+            amount_out: U128(0),
+        };
+        let mut updated_pool_ids = Vec::new();
+        for (route, amount) in route_amounts {
+            let route_response = self.swap_route(
+                &route.pool_ids,
+                &request,
+                amount,
+                fee_discount,
+                &mut updated_pool_ids,
+            );
+            response.amount_in.0 = response
+                .amount_in
+                .0
+                .checked_add(route_response.amount_in.0)
+                .expect("Overflow");
+            response.amount_out.0 = response
+                .amount_out
+                .0
+                .checked_add(route_response.amount_out.0)
+                .expect("Overflow");
+        }
+        for pool_id in updated_pool_ids {
+            XykDexEvent::PoolUpdated {
+                pool_id,
+                pool: self.pools.get(pool_id).unwrap().into(),
+            }
+            .emit();
+        }
+        response
+    }
+}
+
+impl XykDex {
+    /// Returns the verified fee discount fraction
+    fn verify_fee_discount(
+        &self,
+        signed_fee_discount: SignedFeeDiscount,
+        routes: &[SwapRoute],
+        request: &SwapRequest,
+    ) -> FeeFractionFraction {
+        let SignedFeeDiscount {
+            discount,
+            signature,
+        } = signed_fee_discount;
+        expect!(
+            let Some(fee_discount_signer_public_key) = &self.fee_discount_signer_public_key,
+            "Fee discounts are disabled on this dex"
+        );
+        let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&discount).unwrap());
+        expect!(
+            match fee_discount_signer_public_key.curve_type() {
+                CurveType::ED25519 => {
+                    near_sdk::env::ed25519_verify(
+                        &signature.try_into().unwrap(),
+                        hash,
+                        fee_discount_signer_public_key.as_bytes()[1..]
+                            .try_into()
+                            .unwrap(),
+                    )
+                }
+                CurveType::SECP256K1 => {
+                    near_sdk::env::ecrecover(
+                        &hash,
+                        &signature[..signature.len().saturating_sub(1)],
+                        *signature.last().expect("Invalid signature"),
+                        true,
+                    ) == Some(
+                        fee_discount_signer_public_key.as_bytes()[1..]
+                            .try_into()
+                            .unwrap(),
+                    )
+                }
+                CurveType::MLDSA65 => {
+                    unimplemented!()
+                }
+            },
+            "Fee discount signature verification failed"
+        );
+        expect!(
+            discount.routes == routes,
+            "Fee discount is for another route"
+        );
+        expect!(
+            discount.asset_in == request.asset_in && discount.asset_out == request.asset_out,
+            "Fee discount is for other assets"
+        );
+        if let Some(trader_id) = &discount.trader_id {
+            expect!(
+                *trader_id == near_sdk::env::predecessor_account_id(),
+                "Fee discount is for another trader"
+            );
+        }
+        expect!(
+            discount.amount == request.amount,
+            "Fee discount is for another amount"
+        );
+        expect!(
+            near_sdk::env::block_height() <= discount.expiration_block_height,
+            "Fee discount expired"
+        );
+        discount.fee_discount
+    }
+
+    fn swap_route(
+        &mut self,
+        pool_ids: &[PoolId],
+        request: &SwapRequest,
+        amount: u128,
+        fee_discount: Option<FeeFraction>,
+        updated_pool_ids: &mut Vec<PoolId>,
+    ) -> SwapResponse {
+        expect!(!pool_ids.is_empty(), "Route has no pools");
+        let mut hops = Vec::with_capacity(pool_ids.len());
+        let mut asset_in = request.asset_in.clone();
+        for pool_id in pool_ids {
+            let pool_id = if *pool_id == LAST_CREATED_POOL_ID_MARKER {
+                // Last created pool. This is used to batch "create launch pool + buy"
+                // without having to wait to know the pool ID
+                self.pools.len().checked_sub(1).expect("No pools created")
+            } else {
+                *pool_id
+            };
+            let Some(pool) = self.pools.get(pool_id) else {
+                panic!("Pool not found");
+            };
+            let asset_out = match pool.asset_ids() {
+                (asset_0, asset_1) if *asset_0 == asset_in => asset_1.clone(),
+                (asset_0, asset_1) if *asset_1 == asset_in => asset_0.clone(),
+                _ => panic!("Pool {pool_id} doesn't have {asset_in}"),
+            };
+            hops.push((pool_id, asset_in, asset_out.clone()));
+            asset_in = asset_out;
+        }
+        expect!(
+            asset_in == request.asset_out,
+            "Route doesn't end in asset out"
+        );
+        let hop_request =
+            |asset_in: AssetId, asset_out: AssetId, amount: SwapRequestAmount| SwapRequest {
+                message: request.message.clone(),
+                asset_in,
+                asset_out,
+                amount,
+                referrer: request.referrer.clone(),
+            };
+        match request.amount {
+            SwapRequestAmount::ExactIn(_) => {
+                let mut hop_amount = U128(amount);
+                for (pool_id, asset_in, asset_out) in hops {
+                    hop_amount = self
+                        .swap_in_pool(
+                            pool_id,
+                            fee_discount,
+                            updated_pool_ids,
+                            hop_request(
+                                asset_in,
+                                asset_out,
+                                SwapRequestAmount::ExactIn(hop_amount),
+                            ),
+                        )
+                        .amount_out;
+                }
+                SwapResponse {
+                    amount_in: U128(amount),
+                    amount_out: hop_amount,
+                }
+            }
+            SwapRequestAmount::ExactOut(_) => {
+                let mut hop_amount = U128(amount);
+                for (pool_id, asset_in, asset_out) in hops.into_iter().rev() {
+                    hop_amount = self
+                        .swap_in_pool(
+                            pool_id,
+                            fee_discount,
+                            updated_pool_ids,
+                            hop_request(
+                                asset_in,
+                                asset_out,
+                                SwapRequestAmount::ExactOut(hop_amount),
+                            ),
+                        )
+                        .amount_in;
+                }
+                SwapResponse {
+                    amount_in: hop_amount,
+                    amount_out: U128(amount),
+                }
+            }
+        }
+    }
+
+    fn swap_in_pool(
+        &mut self,
+        pool_id: PoolId,
+        fee_discount: Option<FeeFraction>,
+        updated_pool_ids: &mut Vec<PoolId>,
+        request: SwapRequest,
+    ) -> SwapResponse {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
@@ -471,8 +641,8 @@ impl Dex for XykDex {
         let pool_and_protocol_fees =
             fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
         let current_fees = with_referral_fee(
-            match &verified_fee_discount {
-                Some(discount) => pool_and_protocol_fees.discounted(discount.fee_discount),
+            match fee_discount {
+                Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
                 None => pool_and_protocol_fees,
             },
             request.referrer.clone(),
@@ -645,11 +815,9 @@ impl Dex for XykDex {
             | Pool::PublicV2 { .. } => {}
         }
 
-        XykDexEvent::PoolUpdated {
-            pool_id,
-            pool: (&*pool).into(),
+        if !updated_pool_ids.contains(&pool_id) {
+            updated_pool_ids.push(pool_id);
         }
-        .emit();
         XykDexEvent::Swap {
             pool_id,
             request,
@@ -2332,6 +2500,23 @@ pub enum Pool {
         fees: FeeConfiguration,
         phantom_liquidity: U128,
     },
+}
+
+impl Pool {
+    fn asset_ids(&self) -> (&AssetId, &AssetId) {
+        match self {
+            Pool::PrivateV1 { assets, .. }
+            | Pool::PublicV1 { assets, .. }
+            | Pool::PrivateV2 { assets, .. }
+            | Pool::PublicV2 { assets, .. } => (&assets.0.asset_id, &assets.1.asset_id),
+            Pool::LaunchV1 { launched_asset, .. } => (&AssetId::Near, &launched_asset.asset_id),
+            Pool::LaunchV2 {
+                quote_asset,
+                launched_asset,
+                ..
+            } => (&quote_asset.asset_id, &launched_asset.asset_id),
+        }
+    }
 }
 
 impl From<&Pool> for PoolType {

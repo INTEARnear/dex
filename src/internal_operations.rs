@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use intear_dex_types::{
     AccountOrDexId, AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest,
-    DexCallResponse, DexId, DirectWithdrawAmount, Operation, SwapOperationAmount, SwapRequest,
-    SwapRequestAmount, SwapResponse, WithdrawAmount, expect,
+    DexCallResponse, DexEventData, DexId, DirectWithdrawAmount, Operation, SwapOperationAmount,
+    SwapRequest, SwapRequestAmount, SwapResponse, WithdrawAmount, expect,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -15,7 +15,9 @@ use near_sdk::{
 };
 use wasmi::{Engine, Func, Linker, Module, Store};
 
-use crate::{CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData};
+use crate::{
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData, call_events::CallEvents,
+};
 
 pub enum TradeAccount<'a> {
     User(AccountId),
@@ -61,7 +63,8 @@ impl DexEngine {
     }
 
     /// Core WASM execution logic shared between swap, dex_call, and dex_view methods.
-    /// Returns the raw response bytes after running the WASM function.
+    /// Returns the raw response bytes and the events the dex logged after running
+    /// the WASM function.
     fn run_wasm_function<'a>(
         code: &[u8],
         dex_id: &DexId,
@@ -70,7 +73,10 @@ impl DexEngine {
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
         referrer: Option<AccountId>,
-    ) -> Option<Vec<u8>> {
+    ) -> (
+        Option<Vec<u8>>,
+        Vec<DexEventData<near_sdk::serde_json::Value>>,
+    ) {
         let engine = Engine::default();
         // SAFETY: already validated in internal_deploy_dex_code
         let module = match unsafe { Module::new_unchecked(&engine, code) } {
@@ -90,6 +96,7 @@ impl DexEngine {
                 dex_storage_balances,
                 dex_storage_usage_before_transaction: storage_usage_before,
                 referrer,
+                dex_events: Vec::new(),
             },
         );
         let mut linker = Linker::new(&engine);
@@ -112,11 +119,13 @@ impl DexEngine {
             Ok(()) => (),
             Err(err) => panic!("Failed to call function '{method}': {err}"),
         };
-        store.data_mut().response.take()
+        let runner_data = store.into_data();
+        (runner_data.response, runner_data.dex_events)
     }
 
     pub(crate) fn internal_swap_simple(
         &mut self,
+        events: &mut CallEvents,
         dex_id: DexId,
         message: Base64VecU8,
         asset_in: AssetId,
@@ -140,7 +149,7 @@ impl DexEngine {
             TradeAccount::User(account) => account.clone(),
             TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader.clone(),
         };
-        let response = Self::run_wasm_function(
+        let (response, dex_events) = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::Trade {
@@ -152,6 +161,7 @@ impl DexEngine {
             &self.dex_storage_balances,
             referrer.clone(),
         );
+        events.dex_events_emitted(dex_events);
 
         self.dex_storage.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -192,6 +202,7 @@ impl DexEngine {
             TradeAccount::User(user_trader) => {
                 // asset in
                 self.internal_transfer_asset(
+                    events,
                     AccountOrDexId::Account(user_trader.clone()),
                     AccountOrDexId::Dex(dex_id.clone()),
                     swap_request.asset_in.clone(),
@@ -199,6 +210,7 @@ impl DexEngine {
                 );
                 // asset out
                 self.internal_transfer_asset(
+                    events,
                     AccountOrDexId::Dex(dex_id.clone()),
                     AccountOrDexId::Account(user_trader.clone()),
                     swap_request.asset_out.clone(),
@@ -215,12 +227,14 @@ impl DexEngine {
                     .checked_sub(response.amount_in.0)
                     .expect("Not enough input balance in anonymous assets");
                 self.internal_increase_assets(
+                    events,
                     AccountOrDexId::Dex(dex_id.clone()),
                     swap_request.asset_in.clone(),
                     response.amount_in,
                 );
                 // asset out
                 self.internal_decrease_assets(
+                    events,
                     AccountOrDexId::Dex(dex_id.clone()),
                     swap_request.asset_out.clone(),
                     response.amount_out,
@@ -248,6 +262,7 @@ impl DexEngine {
 
     pub(crate) fn internal_dex_call(
         &mut self,
+        events: &mut CallEvents,
         dex_id: DexId,
         method: String,
         args: Base64VecU8,
@@ -277,7 +292,7 @@ impl DexEngine {
             args: args.0,
             attached_assets,
         };
-        let response = Self::run_wasm_function(
+        let (response, dex_events) = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::Call {
@@ -290,6 +305,7 @@ impl DexEngine {
             &self.dex_storage_balances,
             referrer,
         );
+        events.dex_events_emitted(dex_events);
 
         let response: DexCallResponse = match response {
             Some(response) => near_sdk::borsh::from_slice(&response)
@@ -309,6 +325,7 @@ impl DexEngine {
                         panic!("Asset {asset_id} was not attached, while specified that it was attached")
                     });
                 self.internal_increase_assets(
+                    events,
                     AccountOrDexId::Dex(dex_id.clone()),
                     asset_id,
                     amount,
@@ -317,6 +334,7 @@ impl DexEngine {
         } else {
             for (asset_id, amount) in request.attached_assets {
                 self.internal_transfer_asset(
+                    events,
                     AccountOrDexId::Account(predecessor.clone()),
                     AccountOrDexId::Dex(dex_id.clone()),
                     asset_id.clone(),
@@ -334,6 +352,7 @@ impl DexEngine {
             match withdrawal_type {
                 AssetWithdrawalType::ToInternalUserBalance(account) => {
                     self.internal_transfer_asset(
+                        events,
                         AccountOrDexId::Dex(dex_id.clone()),
                         AccountOrDexId::Account(account.clone()),
                         asset_id.clone(),
@@ -342,6 +361,7 @@ impl DexEngine {
                 }
                 AssetWithdrawalType::ToInternalDexBalance(other_dex_id) => {
                     self.internal_transfer_asset(
+                        events,
                         AccountOrDexId::Dex(dex_id.clone()),
                         AccountOrDexId::Dex(other_dex_id.clone()),
                         asset_id.clone(),
@@ -350,6 +370,7 @@ impl DexEngine {
                 }
                 AssetWithdrawalType::WithdrawUnderlyingAsset(to_account_id) => {
                     self.internal_withdraw(
+                        events,
                         asset_id.clone(),
                         DirectWithdrawAmount::Exact(amount),
                         Some(to_account_id.clone()),
@@ -362,6 +383,7 @@ impl DexEngine {
 
         if !response.add_storage_deposit.is_zero() {
             self.internal_decrease_assets(
+                events,
                 AccountOrDexId::Dex(dex_id.clone()),
                 AssetId::Near,
                 U128(response.add_storage_deposit.as_yoctonear()),
@@ -415,7 +437,7 @@ impl DexEngine {
         };
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let response = Self::run_wasm_function(
+        let (response, _dex_events) = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::TradeView {
@@ -461,7 +483,7 @@ impl DexEngine {
         );
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let response = Self::run_wasm_function(
+        let (response, _dex_events) = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::View {
@@ -509,6 +531,7 @@ impl DexEngine {
 
     pub(crate) fn internal_withdraw(
         &mut self,
+        events: &mut CallEvents,
         asset_id: AssetId,
         amount: DirectWithdrawAmount,
         withdraw_to: Option<AccountId>,
@@ -533,7 +556,7 @@ impl DexEngine {
         if amount.0 == 0 {
             return PromiseOrValue::Value(true);
         }
-        self.internal_decrease_assets(withdraw_from.clone(), asset_id.clone(), amount);
+        self.internal_decrease_assets(events, withdraw_from.clone(), asset_id.clone(), amount);
         self.total_in_custody
             .entry(asset_id.clone())
             .and_modify(|b| {
@@ -620,6 +643,7 @@ impl DexEngine {
 
     pub(crate) fn internal_execute_operations(
         &mut self,
+        events: &mut CallEvents,
         operations: Vec<Operation>,
         by: AccountId,
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
@@ -735,6 +759,7 @@ impl DexEngine {
                         }
                     } else {
                         self.internal_withdraw(
+                            events,
                             asset_id.clone(),
                             match amount {
                                 WithdrawAmount::Full { at_least } => DirectWithdrawAmount::Full { at_least },
@@ -795,6 +820,7 @@ impl DexEngine {
                         }
                     };
                     let (_amount_in, amount_out) = self.internal_swap_simple(
+                        events,
                         dex_id,
                         message,
                         asset_in,
@@ -819,6 +845,7 @@ impl DexEngine {
                     attached_assets,
                 } => {
                     self.internal_dex_call(
+                        events,
                         dex_id,
                         method,
                         args,
@@ -841,10 +868,11 @@ impl DexEngine {
                             .0
                             .checked_sub(amount.0)
                             .expect("Not enough balance in anonymous assets");
-                        self.internal_increase_assets(to, asset_id, amount);
+                        self.internal_increase_assets(events, to, asset_id, amount);
                     }
                     None => {
                         self.internal_transfer_asset(
+                            events,
                             AccountOrDexId::Account(by.clone()),
                             to,
                             asset_id,
@@ -863,6 +891,7 @@ impl DexEngine {
                             .expect("Not enough near balance in anonymous assets");
                     } else {
                         self.internal_decrease_assets(
+                            events,
                             AccountOrDexId::Account(by.clone()),
                             AssetId::Near,
                             amount,
@@ -928,8 +957,9 @@ impl DexEngine {
         withdraw_from: AccountOrDexId,
         #[callback_result] result: Result<(), PromiseError>,
     ) -> bool {
+        let mut events = CallEvents::default();
         near_sdk::env::log_str(&format!("After withdraw: {result:?}"));
-        match result {
+        let withdrawn = match result {
             Ok(()) => {
                 IntearDexEvent::Withdraw {
                     from: withdraw_from,
@@ -949,6 +979,7 @@ impl DexEngine {
                         "Refunding to {withdraw_to} (recipient) because withdrawal to {withdraw_to} failed: {error:?}"
                     ));
                     self.internal_increase_assets(
+                        &mut events,
                         AccountOrDexId::Account(withdraw_to.clone()),
                         asset_id.clone(),
                         amount,
@@ -957,7 +988,12 @@ impl DexEngine {
                     near_sdk::env::log_str(&format!(
                         "Refunding to {withdraw_from} (rescue) because withdrawal to {withdraw_to} failed: {error:?}"
                     ));
-                    self.internal_increase_assets(withdraw_from, asset_id.clone(), amount);
+                    self.internal_increase_assets(
+                        &mut events,
+                        withdraw_from,
+                        asset_id.clone(),
+                        amount,
+                    );
                 } else {
                     panic!(
                         "No registered balance found for withdrawal from {withdraw_to} (recipient) or {withdraw_from} (rescue). Assets are lost."
@@ -980,6 +1016,8 @@ impl DexEngine {
                     });
                 false
             }
-        }
+        };
+        events.emit();
+        withdrawn
     }
 }

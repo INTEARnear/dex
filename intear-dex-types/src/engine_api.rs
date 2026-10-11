@@ -4,7 +4,7 @@ use near_sdk::{
     AccountId,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
-    serde::Deserialize,
+    serde::{Deserialize, Serialize},
 };
 
 use crate::{AssetId, DexId, SwapRequest, SwapRequestAmount};
@@ -137,6 +137,28 @@ impl DepositMessage {
     }
 }
 
+/// An event that a dex logged, compressed with the other dex events of a call
+/// in [`IntearDexEvent::DexEvents`]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct DexEventData<T> {
+    pub dex_id: DexId,
+    pub event: T,
+    pub referrer: Option<AccountId>,
+    pub user: Option<AccountId>,
+}
+
+/// Balance of an asset that an account or dex has at the end of a call
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct BalanceUpdate {
+    pub owner: AccountOrDexId,
+    pub asset_id: AssetId,
+    pub balance: U128,
+}
+
 #[near(event_json(standard = "inteardex"))]
 #[derive(Deserialize)]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -146,13 +168,11 @@ pub enum IntearDexEvent {
         dex_id: DexId,
         code_hash: Base58CryptoHash,
     },
-    #[event_version("1.0.0")]
-    DexEvent {
-        dex_id: DexId,
-        event: near_sdk::serde_json::Value,
-        referrer: Option<AccountId>,
-        user: Option<AccountId>,
-    },
+    /// The events of dexes in a call: base64 of an lz4 block prefixed with its
+    /// uncompressed length as a little-endian u32, which is what
+    /// `lz4_flex::decompress_size_prepended` reads, of a JSON array of [`DexEventData`]
+    #[event_version("2.0.0")]
+    DexEvents(String),
     #[event_version("1.0.0")]
     UserDeposit {
         account_id: AccountId,
@@ -166,18 +186,10 @@ pub enum IntearDexEvent {
         asset_id: AssetId,
         amount: U128,
     },
-    #[event_version("1.0.0")]
-    UserBalanceUpdate {
-        account_id: AccountId,
-        asset_id: AssetId,
-        balance: U128,
-    },
-    #[event_version("1.0.0")]
-    DexBalanceUpdate {
-        dex_id: DexId,
-        asset_id: AssetId,
-        balance: U128,
-    },
+    /// The final balance of each owner and asset whose balance changed in
+    /// a call, in the order they first changed
+    #[event_version("2.0.0")]
+    BalanceUpdates(Vec<BalanceUpdate>),
     #[event_version("1.0.0")]
     Swap {
         dex_id: DexId,

@@ -7,8 +7,8 @@ use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
 
 #[cfg(feature = "json")]
 pub use engine_api::{
-    AccountOrDexId, DepositMessage, DirectWithdrawAmount, IntearDexEvent, Operation,
-    SwapOperationAmount, WithdrawAmount,
+    AccountOrDexId, BalanceUpdate, DepositMessage, DexEventData, DirectWithdrawAmount,
+    IntearDexEvent, Operation, SwapOperationAmount, WithdrawAmount,
 };
 #[cfg(feature = "json")]
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};

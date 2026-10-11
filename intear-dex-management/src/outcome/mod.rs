@@ -3,13 +3,16 @@ use std::sync::Mutex;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, Report, eyre};
-use intear_dex_types::{AccountOrDexId, AssetId, DexId, IntearDexEvent};
+use intear_dex_types::{
+    AccountOrDexId, AssetId, BalanceUpdate, DexEventData, DexId, IntearDexEvent,
+};
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::errors::{ActionErrorKind, FunctionCallError, TxExecutionError};
 use near_primitives::types::{AccountId, BlockReference, Finality};
 use near_primitives::views::{
     ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
 };
+use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::{Base58CryptoHash, U128};
 use serde_json::json;
 use xyk_dex_types::XykDexEvent;
@@ -232,24 +235,45 @@ pub fn report_outcome(
     let mut deployed_code_hashes = Vec::new();
     for event in events {
         match event {
-            IntearDexEvent::UserBalanceUpdate {
-                account_id,
-                asset_id,
-                balance: U128(balance),
-            } => {
-                latest_balances.insert(
-                    (account_id.to_string(), asset_id.to_string()),
-                    (account_id, asset_id, balance),
-                );
+            IntearDexEvent::BalanceUpdates(balance_updates) => {
+                for BalanceUpdate {
+                    owner,
+                    asset_id,
+                    balance: U128(balance),
+                } in balance_updates
+                {
+                    if let AccountOrDexId::Account(account_id) = owner {
+                        latest_balances.insert(
+                            (account_id.to_string(), asset_id.to_string()),
+                            (account_id, asset_id, balance),
+                        );
+                    }
+                }
             }
-            IntearDexEvent::DexEvent { dex_id, event, .. } if event["standard"] == "xyk" => {
-                let xyk_event: XykDexEvent =
-                    serde_json::from_value(event.clone()).wrap_err_with(|| {
-                        format!(
-                            "This version of intear-dex-management can't read the event {event} of {dex_id}"
-                        )
+            IntearDexEvent::DexEvents(encoded_dex_events) => {
+                let dex_events_json = BASE64_STANDARD
+                    .decode(&encoded_dex_events)
+                    .ok()
+                    .and_then(|compressed| lz4_flex::decompress_size_prepended(&compressed).ok())
+                    .ok_or_else(|| {
+                        eyre!("{ENGINE_ACCOUNT_ID} logged invalid compressed dex events: {encoded_dex_events}")
                     })?;
-                activity_lines.push(xyk_event_line(&dex_id, xyk_event, &metadata_cache)?);
+                let dex_events: Vec<DexEventData<serde_json::Value>> =
+                    serde_json::from_slice(&dex_events_json).wrap_err_with(|| {
+                        format!("{ENGINE_ACCOUNT_ID} logged invalid dex events")
+                    })?;
+                for DexEventData { dex_id, event, .. } in dex_events {
+                    if event["standard"] != "xyk" {
+                        continue;
+                    }
+                    let xyk_event: XykDexEvent =
+                        serde_json::from_value(event.clone()).wrap_err_with(|| {
+                            format!(
+                                "This version of intear-dex-management can't read the event {event} of {dex_id}"
+                            )
+                        })?;
+                    activity_lines.push(xyk_event_line(&dex_id, xyk_event, &metadata_cache)?);
+                }
             }
             // Dexes send storage NEAR they didn't use, refunds and removed
             // liquidity to wallets
@@ -268,10 +292,8 @@ pub fn report_outcome(
             IntearDexEvent::DexDeployed { dex_id, code_hash } => {
                 deployed_code_hashes.push((dex_id, code_hash));
             }
-            IntearDexEvent::DexEvent { .. }
-            | IntearDexEvent::UserDeposit { .. }
+            IntearDexEvent::UserDeposit { .. }
             | IntearDexEvent::Withdraw { .. }
-            | IntearDexEvent::DexBalanceUpdate { .. }
             | IntearDexEvent::Swap { .. } => {}
         }
     }

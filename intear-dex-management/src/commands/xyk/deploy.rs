@@ -91,7 +91,9 @@ impl DeployContext {
                 fee_discount_signer_public_key: near_sdk::PublicKey::from_str(
                     &fee_discount_signer.to_string(),
                 )
-                .unwrap(),
+                .map_err(|e| {
+                    eyre!("Failed to convert near_cli_rs PublicKey to near_sdk PublicKey: {e}")
+                })?,
             })?,
             (true, None) => {
                 return Err(eyre!("The migration needs the fee discount signer's key")

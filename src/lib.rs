@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod asset_deposit;
+pub mod call_events;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
@@ -11,10 +12,12 @@ pub mod storage_management;
 
 use std::collections::HashMap;
 
-use crate::{internal_operations::TradeAccount, storage_management::StorageBalances};
+use crate::{
+    call_events::CallEvents, internal_operations::TradeAccount, storage_management::StorageBalances,
+};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, CAN_PAUSE, DexId, DirectWithdrawAmount, IntearDexEvent, Operation,
-    SwapRequestAmount, expect,
+    AccountOrDexId, AssetId, CAN_PAUSE, DexEventData, DexId, DirectWithdrawAmount, IntearDexEvent,
+    Operation, SwapRequestAmount, expect,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
@@ -241,6 +244,7 @@ pub struct RunnerData<'a> {
     dex_storage_balances: &'a StorageBalances<DexId>,
     dex_storage_usage_before_transaction: u64,
     referrer: Option<AccountId>,
+    dex_events: Vec<DexEventData<near_sdk::serde_json::Value>>,
 }
 
 #[near]
@@ -324,9 +328,11 @@ impl DexEngine {
         referrer: Option<AccountId>,
         constraint: Option<U128>,
     ) -> (U128, U128) {
+        let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
-        self.internal_swap_simple(
+        let amounts = self.internal_swap_simple(
+            &mut events,
             dex_id,
             message,
             asset_in,
@@ -335,7 +341,9 @@ impl DexEngine {
             TradeAccount::User(near_sdk::env::predecessor_account_id()),
             referrer,
             constraint,
-        )
+        );
+        events.emit();
+        amounts
     }
 
     /// An arbitrary call to a dex method. Can be used for
@@ -351,9 +359,11 @@ impl DexEngine {
         attached_assets: HashMap<AssetId, U128>,
         referrer: Option<AccountId>,
     ) -> Base64VecU8 {
+        let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
-        self.internal_dex_call(
+        let response = self.internal_dex_call(
+            &mut events,
             dex_id,
             method,
             args,
@@ -361,19 +371,24 @@ impl DexEngine {
             near_sdk::env::predecessor_account_id(),
             None,
             referrer,
-        )
+        );
+        events.emit();
+        response
     }
 
     #[payable]
     pub fn transfer_asset(&mut self, to: AccountOrDexId, asset_id: AssetId, amount: U128) {
+        let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
         self.internal_transfer_asset(
+            &mut events,
             AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
             to,
             asset_id,
             amount,
         );
+        events.emit();
     }
 
     /// Register assets for an account or dex, reserving storage
@@ -400,18 +415,23 @@ impl DexEngine {
         amount: DirectWithdrawAmount,
         withdraw_to: Option<AccountId>,
     ) -> PromiseOrValue<bool> {
+        let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
-        self.internal_withdraw(
+        let withdrawal = self.internal_withdraw(
+            &mut events,
             asset_id,
             amount,
             withdraw_to,
             AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
-        )
+        );
+        events.emit();
+        withdrawal
     }
 
     #[payable]
     pub fn execute_operations(&mut self, operations: Vec<Operation>, referrer: Option<AccountId>) {
+        let mut events = CallEvents::default();
         expect!(
             !near_sdk::env::attached_deposit().is_zero(),
             "Deposit of at least one yoctoNEAR is required."
@@ -419,6 +439,7 @@ impl DexEngine {
         self.assert_not_paused();
         if near_sdk::env::attached_deposit() > NearToken::from_yoctonear(1) {
             self.internal_increase_assets(
+                &mut events,
                 AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
                 AssetId::Near,
                 U128(near_sdk::env::attached_deposit().as_yoctonear()),
@@ -444,11 +465,13 @@ impl DexEngine {
                 });
         }
         self.internal_execute_operations(
+            &mut events,
             operations,
             near_sdk::env::predecessor_account_id(),
             None,
             referrer,
         );
+        events.emit();
     }
 
     pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<U128> {
