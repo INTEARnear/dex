@@ -29,7 +29,7 @@ use xyk_dex_types::{
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
-    const MEMORY_SIZE: usize = 0x8000; // 32KB
+    const MEMORY_SIZE: usize = 0x10000; // 64KB
     static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
     let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
@@ -187,10 +187,14 @@ impl Dex for XykDex {
                 );
             }
             expect!(
+                discount.amount == request.amount,
+                "Fee discount is for another amount"
+            );
+            expect!(
                 near_sdk::env::block_height() <= discount.expiration_block_height,
                 "Fee discount expired"
             );
-            discount.fee_discount
+            discount
         });
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
@@ -467,8 +471,8 @@ impl Dex for XykDex {
         let pool_and_protocol_fees =
             fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
         let current_fees = with_referral_fee(
-            match verified_fee_discount {
-                Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
+            match &verified_fee_discount {
+                Some(discount) => pool_and_protocol_fees.discounted(discount.fee_discount),
                 None => pool_and_protocol_fees,
             },
             request.referrer.clone(),
@@ -733,6 +737,7 @@ impl XykDex {
             assets,
             fees,
             pool_type,
+            initial_liquidity,
         }) = near_sdk::borsh::from_slice(&args)
         else {
             near_sdk::env::panic_str("Invalid args");
@@ -790,50 +795,113 @@ impl XykDex {
         self.fees_collected_by_users.flush();
         self.community_owned_fees.flush();
 
-        let attached_near = NearToken::from_yoctonear(
+        let mut attached_near = NearToken::from_yoctonear(
             attached_assets
                 .remove(&AssetId::Near)
                 .expect("Near should be attached for storage")
                 .0,
         );
 
+        let is_public_pool = match pool_type {
+            PoolType::PublicLatest | PoolType::PublicV2 | PoolType::PublicV1 => true,
+            PoolType::PrivateLatest
+            | PoolType::PrivateV1
+            | PoolType::PrivateV2
+            | PoolType::LaunchLatest { .. }
+            | PoolType::LaunchV1 { .. }
+            | PoolType::LaunchV2 { .. } => false,
+        };
+        let initial_balances = match initial_liquidity {
+            Some((initial_amount_0, initial_amount_1)) => {
+                expect!(
+                    match pool_type {
+                        PoolType::PrivateLatest
+                        | PoolType::PrivateV1
+                        | PoolType::PrivateV2
+                        | PoolType::PublicLatest
+                        | PoolType::PublicV1
+                        | PoolType::PublicV2 => true,
+                        PoolType::LaunchLatest { .. }
+                        | PoolType::LaunchV1 { .. }
+                        | PoolType::LaunchV2 { .. } => false,
+                    },
+                    "Launch pools take the launched asset from attached assets, not initial liquidity"
+                );
+                expect!(
+                    initial_amount_0.0 > 0 && initial_amount_1.0 > 0,
+                    "Initial liquidity amounts must be greater than 0"
+                );
+                for (asset_id, amount) in
+                    [(&assets.0, initial_amount_0), (&assets.1, initial_amount_1)]
+                {
+                    if *asset_id == AssetId::Near {
+                        attached_near = attached_near
+                            .checked_sub(NearToken::from_yoctonear(amount.0))
+                            .expect("Not enough NEAR attached for initial liquidity and storage");
+                    } else {
+                        expect!(
+                            attached_assets.remove(asset_id) == Some(amount),
+                            "Attached {asset_id} must be equal to its initial liquidity"
+                        );
+                    }
+                }
+                (initial_amount_0, initial_amount_1)
+            }
+            None => {
+                expect!(
+                    !is_public_pool,
+                    "Public pools must be created with initial liquidity"
+                );
+                (U128(0), U128(0))
+            }
+        };
+
         let pool_id = self.pools.len();
+        let new_public_pool_user_shares = || {
+            let mut user_shares = LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
+            user_shares.insert(
+                near_sdk::env::predecessor_account_id(),
+                Some(INITIAL_SHARES),
+            );
+            user_shares.flush();
+            user_shares
+        };
         self.pools.push(match pool_type {
             PoolType::PublicLatest | PoolType::PublicV2 => {
                 expect!(
                     attached_assets.is_empty(),
-                    "No assets other than NEAR should be attached"
+                    "No assets other than NEAR and initial liquidity should be attached"
                 );
                 Pool::PublicV2 {
                     assets: (
                         AssetWithBalance {
                             asset_id: assets.0.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.0,
                         },
                         AssetWithBalance {
                             asset_id: assets.1.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.1,
                         },
                     ),
                     fees: fees.clone(),
-                    user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                    total_shares: None,
+                    user_shares: new_public_pool_user_shares(),
+                    total_shares: Some(INITIAL_SHARES),
                 }
             }
             PoolType::PrivateLatest | PoolType::PrivateV2 => {
                 expect!(
                     attached_assets.is_empty(),
-                    "No assets other than NEAR should be attached"
+                    "No assets other than NEAR and initial liquidity should be attached"
                 );
                 Pool::PrivateV2 {
                     assets: (
                         AssetWithBalance {
                             asset_id: assets.0.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.0,
                         },
                         AssetWithBalance {
                             asset_id: assets.1.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.1,
                         },
                     ),
                     fees: fees.clone(),
@@ -917,7 +985,7 @@ impl XykDex {
             PoolType::PrivateV1 => {
                 expect!(
                     attached_assets.is_empty(),
-                    "No assets other than NEAR should be attached"
+                    "No assets other than NEAR and initial liquidity should be attached"
                 );
                 expect!(
                     let FeeConfiguration::V1(fees) = fees,
@@ -927,11 +995,11 @@ impl XykDex {
                     assets: (
                         AssetWithBalance {
                             asset_id: assets.0.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.0,
                         },
                         AssetWithBalance {
                             asset_id: assets.1.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.1,
                         },
                     ),
                     fees: fees.clone(),
@@ -941,7 +1009,7 @@ impl XykDex {
             PoolType::PublicV1 => {
                 expect!(
                     attached_assets.is_empty(),
-                    "No assets other than NEAR should be attached"
+                    "No assets other than NEAR and initial liquidity should be attached"
                 );
                 expect!(
                     let FeeConfiguration::V1(fees) = fees,
@@ -951,16 +1019,16 @@ impl XykDex {
                     assets: (
                         AssetWithBalance {
                             asset_id: assets.0.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.0,
                         },
                         AssetWithBalance {
                             asset_id: assets.1.clone(),
-                            balance: U128(0),
+                            balance: initial_balances.1,
                         },
                     ),
                     fees: fees.clone(),
-                    user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                    total_shares: None,
+                    user_shares: new_public_pool_user_shares(),
+                    total_shares: Some(INITIAL_SHARES),
                 }
             }
         });
@@ -983,6 +1051,31 @@ impl XykDex {
             pool: self.pools.get(pool_id).unwrap().into(),
         }
         .emit();
+        if initial_liquidity.is_some() {
+            let minted_shares = if is_public_pool {
+                INITIAL_SHARES.get()
+            } else {
+                0
+            };
+            XykDexEvent::LiquidityAdded {
+                pool_id,
+                asset_0: assets.0.clone(),
+                asset_1: assets.1.clone(),
+
+                added_amount_0: initial_balances.0,
+                added_amount_1: initial_balances.1,
+                minted_shares: U128(minted_shares),
+
+                new_owned_asset_0: initial_balances.0,
+                new_owned_asset_1: initial_balances.1,
+                new_owned_shares: U128(minted_shares),
+
+                new_total_asset_0: initial_balances.0,
+                new_total_asset_1: initial_balances.1,
+                new_total_shares: U128(minted_shares),
+            }
+            .emit();
+        }
 
         let response = CreatePoolResponse { pool_id };
         DexCallResponse {

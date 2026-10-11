@@ -96,7 +96,7 @@ pub fn new_pool_bytes(
             fees_bytes,
             BOOL_BYTES,
         ])?,
-        // No shares yet: an empty share total
+        // The creator's first liquidity mints the share total
         NewPoolKind::Public => sum_bytes(&[
             ENUM_TAG_BYTES,
             asset_with_balance_bytes(assets.0)?,
@@ -104,6 +104,7 @@ pub fn new_pool_bytes(
             fees_bytes,
             SHARE_MAP_BYTES,
             ENUM_TAG_BYTES,
+            U128_BYTES,
         ])?,
         // The quote asset, the launched asset, and the phantom liquidity
         NewPoolKind::Launch => sum_bytes(&[
@@ -185,6 +186,25 @@ pub fn liquidity_registration_bytes(
             borsh_bytes(account_id)?,
         ])?,
         ENUM_TAG_BYTES,
+        extra_bytes_per_record,
+    )
+}
+
+/// The creator's entry in a new public pool's share map, with the shares
+/// its first liquidity minted
+pub fn first_liquidity_shares_bytes(
+    dex_id: &DexId,
+    creator_id: &AccountId,
+    extra_bytes_per_record: u64,
+) -> color_eyre::eyre::Result<u64> {
+    dex_storage_record_bytes(
+        dex_id,
+        sum_bytes(&[
+            COLLECTION_PREFIX_BYTES,
+            POOL_ID_BYTES,
+            borsh_bytes(creator_id)?,
+        ])?,
+        sum_bytes(&[ENUM_TAG_BYTES, U128_BYTES])?,
         extra_bytes_per_record,
     )
 }

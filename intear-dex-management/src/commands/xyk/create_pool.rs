@@ -40,12 +40,12 @@ pub enum CreatePoolKind {
         message = "private  - Only its owner adds and removes liquidity and changes its fees"
     ))]
     /// Only its owner adds and removes liquidity and changes its fees
-    Private(TwoAssetPool),
+    Private(PrivatePool),
     #[strum_discriminants(strum(
         message = "public   - Anyone adds liquidity for shares, and its fees never change"
     ))]
     /// Anyone adds liquidity for shares, and its fees never change
-    Public(TwoAssetPool),
+    Public(PublicPool),
     #[strum_discriminants(strum(
         message = "launch   - A token against NEAR, priced from phantom NEAR liquidity; its liquidity stays"
     ))]
@@ -56,17 +56,15 @@ pub enum CreatePoolKind {
 #[derive(Clone)]
 pub struct CreatePoolKindContext {
     xyk_context: XykContext,
-    kind: CreatePoolKindDiscriminants,
 }
 
 impl CreatePoolKindContext {
     pub fn from_previous_context(
         previous_context: XykContext,
-        scope: &<CreatePoolKind as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        _scope: &<CreatePoolKind as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         Ok(Self {
             xyk_context: previous_context,
-            kind: *scope,
         })
     }
 }
@@ -84,10 +82,18 @@ fn input_creator(
     )
 }
 
+fn input_asset_0() -> color_eyre::eyre::Result<Option<AssetIdArg>> {
+    crate::inputs::prompt("The first asset? e.g. near or nep141:usdt.tether-token.near")
+}
+
+fn input_asset_1() -> color_eyre::eyre::Result<Option<AssetIdArg>> {
+    crate::inputs::prompt("The second asset?")
+}
+
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = CreatePoolKindContext)]
-#[interactive_clap(output_context = TwoAssetPoolContext)]
-pub struct TwoAssetPool {
+#[interactive_clap(output_context = PrivatePoolContext)]
+pub struct PrivatePool {
     #[interactive_clap(skip_default_input_arg)]
     /// Which account creates the pool and pays for its storage?
     signer_account_id: near_cli_rs::types::account_id::AccountId,
@@ -102,7 +108,7 @@ pub struct TwoAssetPool {
     fees: PoolFees,
 }
 
-impl TwoAssetPool {
+impl PrivatePool {
     fn input_signer_account_id(
         context: &CreatePoolKindContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
@@ -112,23 +118,23 @@ impl TwoAssetPool {
     fn input_asset_0(
         _context: &CreatePoolKindContext,
     ) -> color_eyre::eyre::Result<Option<AssetIdArg>> {
-        crate::inputs::prompt("The first asset? e.g. near or nep141:usdt.tether-token.near")
+        input_asset_0()
     }
 
     fn input_asset_1(
         _context: &CreatePoolKindContext,
     ) -> color_eyre::eyre::Result<Option<AssetIdArg>> {
-        crate::inputs::prompt("The second asset?")
+        input_asset_1()
     }
 }
 
 #[derive(Clone)]
-pub struct TwoAssetPoolContext(NewPoolContext);
+pub struct PrivatePoolContext(NewPoolContext);
 
-impl TwoAssetPoolContext {
+impl PrivatePoolContext {
     pub fn from_previous_context(
         previous_context: CreatePoolKindContext,
-        scope: &<TwoAssetPool as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        scope: &<PrivatePool as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let AssetIdArg(asset_0) = scope.asset_0.clone();
         let AssetIdArg(asset_1) = scope.asset_1.clone();
@@ -136,16 +142,101 @@ impl TwoAssetPoolContext {
             global_context: previous_context.xyk_context.global_context,
             dex_id: previous_context.xyk_context.dex_id,
             signer_id: scope.signer_account_id.clone().into(),
-            new_pool: NewPool::TwoAssets {
-                is_private: matches!(previous_context.kind, CreatePoolKindDiscriminants::Private),
+            new_pool: NewPool::Private {
                 assets: (asset_0, asset_1),
             },
         }))
     }
 }
 
-impl From<TwoAssetPoolContext> for NewPoolContext {
-    fn from(item: TwoAssetPoolContext) -> Self {
+impl From<PrivatePoolContext> for NewPoolContext {
+    fn from(item: PrivatePoolContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = CreatePoolKindContext)]
+#[interactive_clap(output_context = PublicPoolContext)]
+pub struct PublicPool {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account creates the pool, puts in its first liquidity and pays for its storage?
+    signer_account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The first asset: near, nep141:<token contract> or nep245:<contract>:<token>
+    asset_0: AssetIdArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The second asset
+    asset_1: AssetIdArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// How much of one asset goes in as the first liquidity, from the signer's balance on dex.intear.near, e.g. '10 NEAR'
+    amount_0: AmountArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// How much of the other asset, which sets the pool's price, e.g. '30 USDT'
+    amount_1: AmountArg,
+    #[interactive_clap(named_arg)]
+    /// The fees of the pool
+    fees: PoolFees,
+}
+
+impl PublicPool {
+    fn input_signer_account_id(
+        context: &CreatePoolKindContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        input_creator(context)
+    }
+
+    fn input_asset_0(
+        _context: &CreatePoolKindContext,
+    ) -> color_eyre::eyre::Result<Option<AssetIdArg>> {
+        input_asset_0()
+    }
+
+    fn input_asset_1(
+        _context: &CreatePoolKindContext,
+    ) -> color_eyre::eyre::Result<Option<AssetIdArg>> {
+        input_asset_1()
+    }
+
+    fn input_amount_0(
+        _context: &CreatePoolKindContext,
+    ) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt(
+            "How much of one asset goes in as the first liquidity? e.g. '10 NEAR'",
+        )
+    }
+
+    fn input_amount_1(
+        _context: &CreatePoolKindContext,
+    ) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt("How much of the other asset? This sets the price, e.g. '30 USDT'")
+    }
+}
+
+#[derive(Clone)]
+pub struct PublicPoolContext(NewPoolContext);
+
+impl PublicPoolContext {
+    pub fn from_previous_context(
+        previous_context: CreatePoolKindContext,
+        scope: &<PublicPool as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let AssetIdArg(asset_0) = scope.asset_0.clone();
+        let AssetIdArg(asset_1) = scope.asset_1.clone();
+        Ok(Self(NewPoolContext {
+            global_context: previous_context.xyk_context.global_context,
+            dex_id: previous_context.xyk_context.dex_id,
+            signer_id: scope.signer_account_id.clone().into(),
+            new_pool: NewPool::Public {
+                assets: (asset_0, asset_1),
+                amounts: (scope.amount_0.clone(), scope.amount_1.clone()),
+            },
+        }))
+    }
+}
+
+impl From<PublicPoolContext> for NewPoolContext {
+    fn from(item: PublicPoolContext) -> Self {
         item.0
     }
 }
@@ -254,9 +345,12 @@ impl From<PhantomLiquidityContext> for NewPoolContext {
 
 #[derive(Clone)]
 enum NewPool {
-    TwoAssets {
-        is_private: bool,
+    Private {
         assets: (AssetId, AssetId),
+    },
+    Public {
+        assets: (AssetId, AssetId),
+        amounts: (AmountArg, AmountArg),
     },
     Launch {
         token: AssetId,
@@ -331,17 +425,20 @@ impl PoolFeesContext {
                 );
                 let mut attached_assets = Vec::new();
                 let mut extra_steps = Vec::new();
-                let (assets, pool_type, kind_label, new_pool_kind) = match &new_pool {
-                    NewPool::TwoAssets { is_private, assets } => {
-                        if assets.0 == assets.1 {
-                            return Err(PreflightError::SameAssets {
-                                asset_id: assets.0.clone(),
-                            }
-                            .into_report());
+                let ensure_two_poolable_assets = |assets: &(AssetId, AssetId)| {
+                    if assets.0 == assets.1 {
+                        return Err(PreflightError::SameAssets {
+                            asset_id: assets.0.clone(),
                         }
-                        ensure_poolable(&assets.0)?;
-                        ensure_poolable(&assets.1)?;
-                        if *is_private {
+                        .into_report());
+                    }
+                    ensure_poolable(&assets.0)?;
+                    ensure_poolable(&assets.1)
+                };
+                let (assets, pool_type, kind_label, new_pool_kind, initial_liquidity) =
+                    match &new_pool {
+                        NewPool::Private { assets } => {
+                            ensure_two_poolable_assets(assets)?;
                             (
                                 assets.clone(),
                                 PoolType::PrivateLatest,
@@ -349,56 +446,89 @@ impl PoolFeesContext {
                                 NewPoolKind::Private {
                                     owner_id: &signer_id,
                                 },
+                                None,
                             )
-                        } else {
+                        }
+                        NewPool::Public { assets, amounts } => {
+                            ensure_two_poolable_assets(assets)?;
+                            let asset_metadata = [
+                                (assets.0.clone(), metadata_cache.get(&assets.0)?),
+                                (assets.1.clone(), metadata_cache.get(&assets.1)?),
+                            ];
+                            let (amount_0, amount_1) = super::amounts_in_pool_order(
+                                &asset_metadata,
+                                &format!("{} / {}", assets.0, assets.1),
+                                amounts,
+                            )?;
+                            let mut amount_labels = Vec::new();
+                            for ((asset_id, metadata), amount) in
+                                asset_metadata.iter().zip([amount_0, amount_1])
+                            {
+                                preflight.ensure_engine_balance(
+                                    asset_id,
+                                    metadata.as_ref(),
+                                    amount,
+                                )?;
+                                amount_labels
+                                    .push(display::format_amount(amount, metadata.as_ref()));
+                                // NEAR goes in together with the storage deposit
+                                if *asset_id != AssetId::Near {
+                                    attached_assets.push((asset_id.clone(), amount));
+                                }
+                            }
+                            extra_steps.push(format!(
+                            "Put {} and {} from {signer_id}'s balance on {ENGINE_ACCOUNT_ID} into the pool as its first liquidity, which sets its price, for all of its shares",
+                            amount_labels[0], amount_labels[1]
+                        ));
                             (
                                 assets.clone(),
                                 PoolType::PublicLatest,
                                 "public",
                                 NewPoolKind::Public,
+                                Some((U128(amount_0), U128(amount_1))),
                             )
                         }
-                    }
-                    NewPool::Launch {
-                        token,
-                        token_amount,
-                        phantom_liquidity,
-                    } => {
-                        if *token == AssetId::Near {
-                            return Err(PreflightError::LaunchOfNear.into_report());
-                        }
-                        ensure_poolable(token)?;
-                        if phantom_liquidity.is_zero() {
-                            return Err(PreflightError::ZeroAmount.into_report());
-                        }
-                        let token_metadata = metadata_cache.get(token)?;
-                        let (_, raw_token_amount) =
-                            token_amount.resolve(&[(token.clone(), token_metadata.clone())])?;
-                        if raw_token_amount == 0 {
-                            return Err(PreflightError::ZeroAmount.into_report());
-                        }
-                        let token_amount_label =
-                            display::format_amount(raw_token_amount, token_metadata.as_ref());
-                        preflight.ensure_engine_balance(
+                        NewPool::Launch {
                             token,
-                            token_metadata.as_ref(),
-                            raw_token_amount,
-                        )?;
-                        extra_steps.push(format!(
+                            token_amount,
+                            phantom_liquidity,
+                        } => {
+                            if *token == AssetId::Near {
+                                return Err(PreflightError::LaunchOfNear.into_report());
+                            }
+                            ensure_poolable(token)?;
+                            if phantom_liquidity.is_zero() {
+                                return Err(PreflightError::ZeroAmount.into_report());
+                            }
+                            let token_metadata = metadata_cache.get(token)?;
+                            let (_, raw_token_amount) =
+                                token_amount.resolve(&[(token.clone(), token_metadata.clone())])?;
+                            if raw_token_amount == 0 {
+                                return Err(PreflightError::ZeroAmount.into_report());
+                            }
+                            let token_amount_label =
+                                display::format_amount(raw_token_amount, token_metadata.as_ref());
+                            preflight.ensure_engine_balance(
+                                token,
+                                token_metadata.as_ref(),
+                                raw_token_amount,
+                            )?;
+                            extra_steps.push(format!(
                             "Put {token_amount_label} from {signer_id}'s balance on {ENGINE_ACCOUNT_ID} into the pool, priced against {} of phantom liquidity",
                             format_near(*phantom_liquidity)
                         ));
-                        attached_assets.push((token.clone(), raw_token_amount));
-                        (
-                            (AssetId::Near, token.clone()),
-                            PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity.as_yoctonear()),
-                            },
-                            "launch",
-                            NewPoolKind::Launch,
-                        )
-                    }
-                };
+                            attached_assets.push((token.clone(), raw_token_amount));
+                            (
+                                (AssetId::Near, token.clone()),
+                                PoolType::LaunchLatest {
+                                    phantom_liquidity: U128(phantom_liquidity.as_yoctonear()),
+                                },
+                                "launch",
+                                NewPoolKind::Launch,
+                                None,
+                            )
+                        }
+                    };
                 let pair = format!(
                     "{} / {}",
                     display::asset_label(&assets.0, metadata_cache.get(&assets.0)?.as_ref()),
@@ -446,6 +576,13 @@ impl PoolFeesContext {
                         FeeReceiver::Pool => {}
                     }
                 }
+                if initial_liquidity.is_some() && matches!(pool_type, PoolType::PublicLatest) {
+                    storage_bytes.push(xyk_storage::first_liquidity_shares_bytes(
+                        &dex_id,
+                        &signer_id,
+                        extra_bytes_per_record,
+                    )?);
+                }
                 storage_bytes.push(super::new_fee_balances_bytes(
                     preflight,
                     &dex_id,
@@ -467,7 +604,21 @@ impl PoolFeesContext {
                     total_storage_bytes,
                     preflight.protocol_limits.storage_byte_cost,
                 )?;
-                attached_assets.insert(0, (AssetId::Near, storage_near.as_yoctonear()));
+                let initial_liquidity_near = match initial_liquidity {
+                    Some((U128(amount_0), _)) if assets.0 == AssetId::Near => amount_0,
+                    Some((_, U128(amount_1))) if assets.1 == AssetId::Near => amount_1,
+                    _ => 0,
+                };
+                attached_assets.insert(
+                    0,
+                    (
+                        AssetId::Near,
+                        storage_near
+                            .as_yoctonear()
+                            .checked_add(initial_liquidity_near)
+                            .ok_or_else(|| color_eyre::eyre::eyre!("NEAR amount overflow"))?,
+                    ),
+                );
 
                 let mut registrations =
                     super::storage_near_registrations(&signer_id, &dex_id).to_vec();
@@ -496,6 +647,7 @@ impl PoolFeesContext {
                                 assets: assets.clone(),
                                 fees: fee_configuration,
                                 pool_type,
+                                initial_liquidity,
                             },
                             &attached_assets,
                         )?],

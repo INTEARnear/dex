@@ -365,30 +365,6 @@ impl AddMaxSlippage {
     }
 }
 
-/// The signer's amounts of the two assets of a pool, in pool order
-fn amounts_in_pool_order(
-    pool: &PoolToWrite,
-    amounts: &(AmountArg, AmountArg),
-) -> color_eyre::eyre::Result<(u128, u128)> {
-    let (first_asset_id, first_amount) = amounts.0.resolve(&pool.assets)?;
-    let (second_asset_id, second_amount) = amounts.1.resolve(&pool.assets)?;
-    if first_asset_id == second_asset_id {
-        return Err(PreflightError::AmountsOfOneAsset {
-            pair: pool.pair_label(),
-        }
-        .into_report());
-    }
-    let amounts = if first_asset_id == pool.assets[0].0 {
-        (first_amount, second_amount)
-    } else {
-        (second_amount, first_amount)
-    };
-    if amounts.0 == 0 || amounts.1 == 0 {
-        return Err(PreflightError::ZeroAmount.into_report());
-    }
-    Ok(amounts)
-}
-
 #[derive(Clone)]
 pub struct AddMaxSlippageContext(ActionContext);
 
@@ -412,7 +388,8 @@ impl AddMaxSlippageContext {
                 preflight.ensure_engine_not_paused()?;
                 let signer_id = preflight.signer_id.clone();
                 let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
-                let (amount_0, amount_1) = amounts_in_pool_order(&pool, &amounts)?;
+                let (amount_0, amount_1) =
+                    super::amounts_in_pool_order(&pool.assets, &pool.pair_label(), &amounts)?;
                 for (side, amount) in [(0, amount_0), (1, amount_1)] {
                     let (asset_id, metadata) = &pool.assets[side];
                     preflight.ensure_engine_balance(asset_id, metadata.as_ref(), amount)?;

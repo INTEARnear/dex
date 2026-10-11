@@ -9,6 +9,8 @@ use xyk_dex_types::{PoolId, PoolView};
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::deployment::{DEFAULT_XYK_DEX_DEPLOYER, DEFAULT_XYK_DEX_NAME};
+use crate::errors::PreflightError;
+use crate::inputs::amount::AmountArg;
 use crate::inputs::dex_id::DexIdArg;
 use crate::inputs::pool_id::PoolIdArg;
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near, xyk_storage};
@@ -200,6 +202,31 @@ impl PoolToWrite {
         let (_, metadata) = &self.assets[side];
         crate::display::format_amount(raw_amount, metadata.as_ref())
     }
+}
+
+/// The signer's amounts of the two assets of a pool, in pool order
+pub fn amounts_in_pool_order(
+    assets: &[(AssetId, Option<AssetMetadata>); 2],
+    pair_label: &str,
+    amounts: &(AmountArg, AmountArg),
+) -> color_eyre::eyre::Result<(u128, u128)> {
+    let (first_asset_id, first_amount) = amounts.0.resolve(assets)?;
+    let (second_asset_id, second_amount) = amounts.1.resolve(assets)?;
+    if first_asset_id == second_asset_id {
+        return Err(PreflightError::AmountsOfOneAsset {
+            pair: pair_label.to_string(),
+        }
+        .into_report());
+    }
+    let amounts = if first_asset_id == assets[0].0 {
+        (first_amount, second_amount)
+    } else {
+        (second_amount, first_amount)
+    };
+    if amounts.0 == 0 || amounts.1 == 0 {
+        return Err(PreflightError::ZeroAmount.into_report());
+    }
+    Ok(amounts)
 }
 
 /// The NEAR that an xyk call takes for the storage it adds goes with the

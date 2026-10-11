@@ -2,7 +2,7 @@
 
 use std::{fmt, num::NonZeroU128};
 
-use intear_dex_types::{AssetId, SwapRequest};
+use intear_dex_types::{AssetId, SwapRequest, SwapRequestAmount};
 use near_sdk::{
     AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
     borsh::{BorshDeserialize, BorshSerialize, io::Read},
@@ -19,7 +19,7 @@ pub const LAST_CREATED_POOL_ID_MARKER: PoolId = PoolId::MAX;
 pub type FeeFraction = u32;
 pub const FULL_FEE_FRACTION: FeeFraction = 1000000;
 pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 10 * 9; // 90%
-pub const MAX_FEE_RECEIVERS: usize = 42;
+pub const MAX_FEE_RECEIVERS: usize = 20;
 pub const PROTOCOL_FEE: FeeFraction = FULL_FEE_FRACTION / 1000; // 0.1%
 pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
 
@@ -87,6 +87,7 @@ pub struct FeeDiscount {
     pub asset_out: AssetId,
     /// The only alleged trader who can use the discount, anyone can if `None`
     pub trader_id: Option<AccountId>,
+    pub amount: SwapRequestAmount,
     /// Reduces pool and protocol fees, but not referral fees.
     /// [`FULL_FEE_FRACTION`] waives pool and protocol fees entirely.
     pub fee_discount: FeeFraction,
@@ -105,6 +106,11 @@ pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
     pub fees: FeeConfiguration,
     pub pool_type: PoolType,
+    /// Amounts of `assets` to deposit as the first liquidity, taken from the
+    /// attached assets. Required for public pools, so nobody else can set their
+    /// ratio before the creator does. Optional for private pools, not accepted
+    /// for launch pools.
+    pub initial_liquidity: Option<(U128, U128)>,
 }
 
 #[near(serializers=[borsh])]

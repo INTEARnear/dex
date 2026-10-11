@@ -16,8 +16,7 @@ use near_workspaces::{Account, AccountDetailsPatch, AccountId, Worker};
 use serde_json::json;
 use xyk_dex_types::{
     AddLiquidityArgs, CreatePoolArgs, CurrentFees, FeeAmount, FeeConfiguration, FeeReceiver,
-    LockPoolArgs, PoolId, PoolType, RegisterLiquidityArgs, ScheduledFeeCurve, SwapArgs,
-    V2FeeConfiguration,
+    LockPoolArgs, PoolId, PoolType, ScheduledFeeCurve, SwapArgs, V2FeeConfiguration,
 };
 
 const ENGINE_ACCOUNT_ID: &str = "dex.intear.near";
@@ -307,6 +306,7 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
                         ],
                     }),
                     pool_type: PoolType::PrivateV1,
+                    initial_liquidity: None,
                 })
                 .unwrap(),
                 vec![storage_for_pool.clone()],
@@ -343,6 +343,7 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
                         ],
                     }),
                     pool_type: PoolType::PrivateLatest,
+                    initial_liquidity: None,
                 })
                 .unwrap(),
                 vec![storage_for_pool.clone()],
@@ -360,37 +361,28 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
                 ],
             ),
         ],
-        vec![
-            xyk_dex_call(
-                "create_pool",
-                near_sdk::borsh::to_vec(&CreatePoolArgs {
-                    assets: (AssetId::Near, intel_asset_id.clone()),
-                    fees: FeeConfiguration::V2(V2FeeConfiguration {
-                        receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(3_000))],
-                    }),
-                    pool_type: PoolType::PublicLatest,
-                })
-                .unwrap(),
-                vec![storage_for_pool.clone()],
-            ),
-            xyk_dex_call(
-                "register_liquidity",
-                near_sdk::borsh::to_vec(&RegisterLiquidityArgs { pool_id: 2 }).unwrap(),
-                vec![(AssetId::Near, NearToken::from_millinear(10).as_yoctonear())],
-            ),
-            xyk_dex_call(
-                "add_liquidity",
-                near_sdk::borsh::to_vec(&AddLiquidityArgs {
-                    pool_id: 2,
-                    min_shares_received: None,
-                })
-                .unwrap(),
-                vec![
-                    (AssetId::Near, NearToken::from_near(50).as_yoctonear()),
-                    (intel_asset_id.clone(), 1_000_000 * ONE_INTEL),
-                ],
-            ),
-        ],
+        vec![xyk_dex_call(
+            "create_pool",
+            near_sdk::borsh::to_vec(&CreatePoolArgs {
+                assets: (AssetId::Near, intel_asset_id.clone()),
+                fees: FeeConfiguration::V2(V2FeeConfiguration {
+                    receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(3_000))],
+                }),
+                pool_type: PoolType::PublicLatest,
+                initial_liquidity: Some((
+                    U128(NearToken::from_near(50).as_yoctonear()),
+                    U128(1_000_000 * ONE_INTEL),
+                )),
+            })
+            .unwrap(),
+            vec![
+                (
+                    AssetId::Near,
+                    storage_for_pool.1 + NearToken::from_near(50).as_yoctonear(),
+                ),
+                (intel_asset_id.clone(), 1_000_000 * ONE_INTEL),
+            ],
+        )],
         vec![xyk_dex_call(
             "create_pool",
             near_sdk::borsh::to_vec(&CreatePoolArgs {
@@ -401,6 +393,7 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
                 pool_type: PoolType::LaunchLatest {
                     phantom_liquidity: U128(NearToken::from_near(10).as_yoctonear()),
                 },
+                initial_liquidity: None,
             })
             .unwrap(),
             vec![

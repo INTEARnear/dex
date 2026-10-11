@@ -16,7 +16,7 @@ const ONE_INTEL: u128 = 10u128.pow(18);
 /// doesn't make, and the failures each one refuses before signing. The
 /// swaps that produce fees go through the engine directly. Pools #0 to #3
 /// are the fixture's; this creates #4 (private, alice.near), #5 (public,
-/// bob.near) and #6 (launch, alice.near). Fee schedules use absolute times,
+/// slimedragon.near) and #6 (launch, alice.near). Fee schedules use absolute times,
 /// since `now` is the time of the block.
 #[tokio::test]
 async fn xyk_writes() {
@@ -176,15 +176,17 @@ async fn xyk_writes() {
         xyk_transaction_paying_storage(
             &sandbox,
             &cli,
-            "bob.near",
+            "slimedragon.near",
             XYK_DEX_ID,
             &[
                 "xyk",
                 "create-pool",
                 "public",
-                "bob.near",
+                "slimedragon.near",
                 "nep141:usdt.tether-token.near",
                 "nep141:intel.tkn.near",
+                "100 USDT",
+                "200000 INTEL",
                 "fees",
                 "bob.near=0.2%..0.1%@2100-01-01T00:00:00Z..2100-07-01T00:00:00Z,pool=0.1%"
             ]
@@ -251,6 +253,8 @@ async fn xyk_writes() {
                 "alice.near",
                 "near",
                 "nep141:usdt.tether-token.near",
+                "1 NEAR",
+                "1 USDT",
                 "fees",
                 "community:carol.near=1%"
             ]
