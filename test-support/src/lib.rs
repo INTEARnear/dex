@@ -34,18 +34,22 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             let target_directory =
                 PathBuf::from(cargo_metadata["target_directory"].as_str().unwrap());
 
-            println!("Compiling intear-dex");
-            assert!(
-                Command::new("cargo")
-                    .current_dir(workspace_root)
-                    .args(["near", "build", "non-reproducible-wasm",])
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-            let contract_wasm =
-                std::fs::read(target_directory.join("near/intear_dex.wasm")).unwrap();
+            let contract_wasm = match prebuilt_wasm("INTEAR_DEX_ENGINE_WASM") {
+                Some(wasm) => wasm,
+                None => {
+                    println!("Compiling intear-dex");
+                    assert!(
+                        Command::new("cargo")
+                            .current_dir(workspace_root)
+                            .args(["near", "build", "non-reproducible-wasm",])
+                            .status()
+                            .await
+                            .unwrap()
+                            .success()
+                    );
+                    std::fs::read(target_directory.join("near/intear_dex.wasm")).unwrap()
+                }
+            };
 
             let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
 
@@ -55,8 +59,10 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 compile_dex(workspace_root, &release_wasm_directory, "minimal-dex").await;
             let otc_dex_wasm =
                 compile_dex(workspace_root, &release_wasm_directory, "otc-dex").await;
-            let xyk_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "xyk-dex").await;
+            let xyk_dex_wasm = match prebuilt_wasm("INTEAR_DEX_XYK_WASM") {
+                Some(wasm) => wasm,
+                None => compile_dex(workspace_root, &release_wasm_directory, "xyk-dex").await,
+            };
 
             println!("Compilation complete");
 
@@ -70,6 +76,16 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             }
         })
         .await
+}
+
+/// A wasm to test instead of compiling it, from the file that `env_var` names. Lets one test
+/// binary measure several builds, such as gas before and after a change.
+fn prebuilt_wasm(env_var: &str) -> Option<Vec<u8>> {
+    let path = std::env::var_os(env_var)?;
+    println!("Using {} from {}", env_var, path.to_string_lossy());
+    Some(std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("Failed to read {}: {e}", path.to_string_lossy());
+    }))
 }
 
 async fn compile_dex(

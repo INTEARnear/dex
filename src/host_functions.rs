@@ -1,8 +1,8 @@
 use wasmi::Caller;
 
 use crate::{CallType, RunnerData};
-use intear_dex_types::DexEventData;
-use near_sdk::NearToken;
+use intear_dex_types::{DexEventData, IntearDexEvent};
+use near_sdk::{AccountId, NearToken};
 
 #[macro_export]
 macro_rules! declare_unimplemented_host_functions {
@@ -263,6 +263,7 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, ed25519_verify);
         $crate::impl_host_function!($var, log_utf8);
         $crate::impl_host_function!($var, log_utf16);
+        $crate::impl_host_function!($var, dex_event);
     };
 }
 
@@ -785,11 +786,7 @@ pub fn ed25519_verify(
     }
 }
 
-pub fn log_utf8(
-    mut caller: Caller<'_, RunnerData>,
-    len: u64,
-    ptr: u64,
-) -> Result<(), wasmi::Error> {
+pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
@@ -815,22 +812,53 @@ pub fn log_utf8(
     if let Some(event) = message.strip_prefix("EVENT_JSON:")
         && let Ok(event) = near_sdk::serde_json::from_str(event)
     {
-        let dex_event = DexEventData {
+        IntearDexEvent::DexEvent {
             dex_id: caller.data().dex_id.clone(),
             event,
             referrer: caller.data().referrer.clone(),
-            user: match &caller.data().call_type {
-                CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
-                CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
-                _ => None,
-            },
-        };
-        caller.data_mut().dex_events.push(dex_event);
+            user: alleged_event_user(caller.data()),
+        }
+        .emit();
         return Ok(());
     }
 
     near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
     Ok(())
+}
+
+pub fn dex_event(
+    mut caller: Caller<'_, RunnerData>,
+    len: u64,
+    ptr: u64,
+) -> Result<(), wasmi::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut event = vec![0; len as usize];
+    memory
+        .read(&caller, ptr as usize, &mut event)
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read dex_event buffer from guest memory: {err}"
+            ))
+        })?;
+    let dex_event = DexEventData {
+        dex_id: caller.data().dex_id.clone(),
+        event,
+        referrer: caller.data().referrer.clone(),
+        user: alleged_event_user(caller.data()),
+    };
+    caller.data_mut().dex_events.push(dex_event);
+    Ok(())
+}
+
+fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {
+    match &data.call_type {
+        CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
+        CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
+        _ => None,
+    }
 }
 
 pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {

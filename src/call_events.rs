@@ -7,7 +7,7 @@ use near_sdk::{
 #[derive(Default)]
 pub struct CallEvents {
     balance_updates: Vec<BalanceUpdate>,
-    dex_events: Vec<DexEventData<near_sdk::serde_json::Value>>,
+    dex_events: Vec<DexEventData>,
 }
 
 impl CallEvents {
@@ -26,20 +26,17 @@ impl CallEvents {
         }
     }
 
-    pub fn dex_events_emitted(
-        &mut self,
-        dex_events: Vec<DexEventData<near_sdk::serde_json::Value>>,
-    ) {
+    pub fn dex_events_emitted(&mut self, dex_events: Vec<DexEventData>) {
         self.dex_events.extend(dex_events);
     }
 
-    /// Logs the dex events as one compressed `dex_events` event, and the
-    /// final balances as one `balance_updates` event
+    /// Logs the dex events as one compressed `dex_events_borsh` event, and
+    /// the final balances as one `balance_updates` event
     pub fn emit(self) {
         if !self.dex_events.is_empty() {
-            let dex_events = near_sdk::serde_json::to_vec(&self.dex_events)
-                .expect("Failed to serialize dex events");
-            IntearDexEvent::DexEvents(
+            let dex_events =
+                near_sdk::borsh::to_vec(&self.dex_events).expect("Failed to serialize dex events");
+            IntearDexEvent::DexEventsBorsh(
                 BASE64_STANDARD.encode(lz4_flex::compress_prepend_size(&dex_events)),
             )
             .emit();

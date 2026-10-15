@@ -287,6 +287,22 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
 pub async fn setup_test_environment_with_mainnet_engine(config: TestSetupConfig) -> TestContext {
     let sandbox = near_workspaces::sandbox().await.unwrap();
     let dex_engine_contract = import_mainnet_engine(&sandbox).await;
+    // The dexes of this repo need its engine, so upgrade the mainnet engine first, as a
+    // deployment does: its new code, then its migration of the mainnet state
+    let dex_engine_contract = dex_engine_contract
+        .as_account()
+        .deploy(&get_compiled_wasms().await.contract_wasm)
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    let result = dex_engine_contract
+        .call("migrate")
+        .max_gas()
+        .transact()
+        .await
+        .unwrap();
+    assert!(result.is_success(), "Engine migration failed: {result:#?}");
 
     let deployer_id: AccountId = xyk_dex_types::CAN_MIGRATE.to_owned();
     let deployer_key =

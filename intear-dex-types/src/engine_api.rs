@@ -4,7 +4,7 @@ use near_sdk::{
     AccountId,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
-    serde::{Deserialize, Serialize},
+    serde::Deserialize,
 };
 
 use crate::{AssetId, DexId, SwapRequest, SwapRequestAmount};
@@ -137,14 +137,16 @@ impl DepositMessage {
     }
 }
 
-/// An event that a dex logged, compressed with the other dex events of a call
-/// in [`IntearDexEvent::DexEvents`]
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(crate = "near_sdk::serde")]
+/// An event that a dex logged through the engine's `dex_event` host function,
+/// compressed with the other dex events of a call in
+/// [`IntearDexEvent::DexEventsBorsh`]. `event` is the borsh of the dex's own
+/// event type.
+#[near(serializers=[borsh])]
+#[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct DexEventData<T> {
+pub struct DexEventData {
     pub dex_id: DexId,
-    pub event: T,
+    pub event: Vec<u8>,
     pub referrer: Option<AccountId>,
     pub user: Option<AccountId>,
 }
@@ -168,11 +170,19 @@ pub enum IntearDexEvent {
         dex_id: DexId,
         code_hash: Base58CryptoHash,
     },
+    #[event_version("1.0.0")]
+    DexEvent {
+        dex_id: DexId,
+        event: near_sdk::serde_json::Value,
+        referrer: Option<AccountId>,
+        user: Option<AccountId>,
+    },
     /// The events of dexes in a call: base64 of an lz4 block prefixed with its
     /// uncompressed length as a little-endian u32, which is what
-    /// `lz4_flex::decompress_size_prepended` reads, of a JSON array of [`DexEventData`]
-    #[event_version("2.0.0")]
-    DexEvents(String),
+    /// `lz4_flex::decompress_size_prepended` reads, of the borsh of a
+    /// `Vec<DexEventData>`
+    #[event_version("1.0.0")]
+    DexEventsBorsh(String),
     #[event_version("1.0.0")]
     UserDeposit {
         account_id: AccountId,

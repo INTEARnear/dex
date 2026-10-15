@@ -61,20 +61,22 @@ debug = false
 panic = "abort"
 overflow-checks = true # deny(clippy::arithmetic_side_effects) makes this unnecessary, but could be a bug in a dependency. increases gas usage by 3.3%
 
+# The dex interpreter at full speed: it runs every dex instruction many times over, and this
+# takes 2.8 TGas off a swap for 13 KB more code
 [profile.release.package.wasmi]
-opt-level = 2
+opt-level = 3
 
 [profile.release.package.wasmparser]
-opt-level = 2
+opt-level = 3
 
 [profile.release.package.wasmi_ir]
-opt-level = 2
+opt-level = 3
 
 [profile.release.package.wasmi_core]
-opt-level = 2
+opt-level = 3
 
 [profile.release.package.wasmi_collections]
-opt-level = 2
+opt-level = 3
 
 [profile.release.package.xyk-dex]
 opt-level = 'z'

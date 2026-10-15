@@ -73,10 +73,7 @@ impl DexEngine {
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
         referrer: Option<AccountId>,
-    ) -> (
-        Option<Vec<u8>>,
-        Vec<DexEventData<near_sdk::serde_json::Value>>,
-    ) {
+    ) -> (Option<Vec<u8>>, Vec<DexEventData>) {
         let engine = Engine::default();
         // SAFETY: already validated in internal_deploy_dex_code
         let module = match unsafe { Module::new_unchecked(&engine, code) } {

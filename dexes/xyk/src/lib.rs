@@ -3,7 +3,6 @@
 use core::panic;
 use std::{collections::HashMap, num::NonZeroU128};
 
-use crypto_bigint::U256;
 use intear_dex_types::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Dex, DexCallResponse, SwapRequest,
     SwapRequestAmount, SwapResponse, expect,
@@ -17,17 +16,20 @@ use near_sdk::{
 };
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
-    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_FEE_FRACTION, FULL_SPLIT_FRACTION,
-    FeeConfiguration, FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs,
-    GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, GetReferralSettingsArgs,
-    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, MigrateArgs,
-    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings,
-    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
-    SetReferrerSettingsArgs, SharesBalance, SignedFeeDiscount, SwapArgs, SwapRoute,
-    UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfiguration,
+    FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs,
+    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES,
+    LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId,
+    PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings, RegisterFeeAssetsArgs,
+    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, SetReferrerSettingsArgs,
+    SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs, WithdrawCommunityFeeArgs,
+    WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    math::{
+        exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
+        shares_to_tokens, tokens_to_shares,
+    },
 };
 
-#[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
     const MEMORY_SIZE: usize = 0x10000; // 64KB
@@ -35,6 +37,23 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn dex_event(len: u64, ptr: u64);
+}
+
+trait Emit {
+    fn emit(&self);
+}
+
+impl Emit for XykDexEvent {
+    /// Logs the event as borsh through the engine, which costs less gas than JSON
+    fn emit(&self) {
+        let event = near_sdk::borsh::to_vec(self).expect("Failed to serialize event");
+        unsafe { dex_event(event.len() as u64, event.as_ptr() as u64) };
+    }
+}
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -55,67 +74,6 @@ pub struct XykDex {
     referral_settings: LookupMap<AccountId, ReferralSettings>,
     community_owned_fees: LookupMap<AccountId, NearToken>,
     fee_discount_signer_public_key: Option<PublicKey>,
-}
-
-fn u256_to_u128(value: U256) -> u128 {
-    expect!(value.bits() <= 128, "Value must be less than 128 bits");
-    let bytes = value.to_le_bytes();
-    let first_chunk = bytes.first_chunk().unwrap();
-    u128::from_le_bytes(*first_chunk)
-}
-
-/// Returns `a * b / c`, rounded down. Panics if the result doesn't fit into u128.
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
-    mul_add_div(a, b, 0, c)
-}
-
-/// Returns `a * b / (c + d)`, rounded down. Panics if the result doesn't fit into u128.
-fn mul_div_sum(a: u128, b: u128, c: u128, d: u128) -> u128 {
-    match c.checked_add(d) {
-        Some(sum) => mul_div(a, b, sum),
-        // u128 + u128 can't overflow u256
-        #[allow(clippy::arithmetic_side_effects)]
-        None => mul_add_div_u256(a, b, 0, U256::from(c) + U256::from(d)),
-    }
-}
-
-/// Returns `(a * b + add) / c`, rounded down. Panics if the result doesn't fit into u128.
-fn mul_add_div(a: u128, b: u128, add: u128, c: u128) -> u128 {
-    match a
-        .checked_mul(b)
-        .and_then(|product| product.checked_add(add))
-    {
-        // Callers make sure that c is not 0
-        #[allow(clippy::arithmetic_side_effects)]
-        Some(dividend) => dividend / c,
-        None => mul_add_div_u256(a, b, add, U256::from(c)),
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn mul_add_div_u256(a: u128, b: u128, add: u128, c: U256) -> u128 {
-    use crypto_bigint::CheckedAdd;
-    // u128 * u128 + u128 hopefully can't overflow u256; callers make sure that c is not 0
-    #[allow(clippy::arithmetic_side_effects)]
-    u256_to_u128(
-        ((U256::from(a) * U256::from(b))
-            .checked_add(&U256::from(add))
-            .unwrap())
-            / c,
-    )
-}
-
-fn shares_to_tokens(
-    shares: SharesBalance,
-    total_shares: SharesBalance,
-    total_tokens: NonZeroU128,
-) -> u128 {
-    mul_div(total_tokens.get(), shares.get(), total_shares.get())
-}
-
-fn tokens_to_shares(tokens: u128, total_shares: SharesBalance, total_tokens: NonZeroU128) -> u128 {
-    mul_div(tokens, total_shares.get(), total_tokens.get())
 }
 
 #[near]
@@ -141,6 +99,11 @@ impl Dex for XykDex {
         let fee_discount = fee_discount.map(|signed_fee_discount| {
             self.verify_fee_discount(signed_fee_discount, &routes, &request)
         });
+        let referral_settings = request.referrer.as_ref().and_then(|referrer_id| {
+            self.referral_settings
+                .get(referrer_id)
+                .map(|settings| (referrer_id.clone(), settings.clone()))
+        });
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
@@ -150,7 +113,7 @@ impl Dex for XykDex {
                 let amount = mul_div(
                     requested_amount.0,
                     route.fraction as u128,
-                    FULL_SPLIT_FRACTION as u128,
+                    NonZeroU128::new(FULL_SPLIT_FRACTION as u128).unwrap(),
                 );
                 (route, amount)
             })
@@ -176,6 +139,7 @@ impl Dex for XykDex {
                 &request,
                 amount,
                 fee_discount,
+                referral_settings.as_ref(),
                 &mut updated_pool_ids,
             );
             response.amount_in.0 = response
@@ -189,10 +153,16 @@ impl Dex for XykDex {
                 .checked_add(route_response.amount_out.0)
                 .expect("Overflow");
         }
+        self.fees_collected_by_users.flush();
+        self.community_owned_fees.flush();
         for pool_id in updated_pool_ids {
             XykDexEvent::PoolUpdated {
                 pool_id,
-                pool: self.pools.get(pool_id).unwrap().into(),
+                pool: self
+                    .pools
+                    .get(pool_id)
+                    .unwrap()
+                    .view(near_sdk::env::block_timestamp()),
             }
             .emit();
         }
@@ -277,6 +247,7 @@ impl XykDex {
         request: &SwapRequest,
         amount: u128,
         fee_discount: Option<FeeFraction>,
+        referral_settings: Option<&(AccountId, ReferralSettings)>,
         updated_pool_ids: &mut Vec<PoolId>,
     ) -> SwapResponse {
         expect!(!pool_ids.is_empty(), "Route has no pools");
@@ -305,14 +276,6 @@ impl XykDex {
             asset_in == request.asset_out,
             "Route doesn't end in asset out"
         );
-        let hop_request =
-            |asset_in: AssetId, asset_out: AssetId, amount: SwapRequestAmount| SwapRequest {
-                message: request.message.clone(),
-                asset_in,
-                asset_out,
-                amount,
-                referrer: request.referrer.clone(),
-            };
         match request.amount {
             SwapRequestAmount::ExactIn(_) => {
                 let mut hop_amount = U128(amount);
@@ -321,12 +284,11 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
+                            referral_settings,
                             updated_pool_ids,
-                            hop_request(
-                                asset_in,
-                                asset_out,
-                                SwapRequestAmount::ExactIn(hop_amount),
-                            ),
+                            asset_in,
+                            asset_out,
+                            SwapRequestAmount::ExactIn(hop_amount),
                         )
                         .amount_out;
                 }
@@ -342,12 +304,11 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
+                            referral_settings,
                             updated_pool_ids,
-                            hop_request(
-                                asset_in,
-                                asset_out,
-                                SwapRequestAmount::ExactOut(hop_amount),
-                            ),
+                            asset_in,
+                            asset_out,
+                            SwapRequestAmount::ExactOut(hop_amount),
                         )
                         .amount_in;
                 }
@@ -359,99 +320,47 @@ impl XykDex {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn swap_in_pool(
         &mut self,
         pool_id: PoolId,
         fee_discount: Option<FeeFraction>,
+        referral_settings: Option<&(AccountId, ReferralSettings)>,
         updated_pool_ids: &mut Vec<PoolId>,
-        request: SwapRequest,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapRequestAmount,
     ) -> SwapResponse {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
         let launch_quote_asset_id = match pool {
-            Pool::LaunchV1 { .. } => Some(AssetId::Near),
-            Pool::LaunchV2 { quote_asset, .. } => Some(quote_asset.asset_id.clone()),
+            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => Some(pool.asset_ids().0),
             Pool::PrivateV1 { .. }
             | Pool::PublicV1 { .. }
             | Pool::PrivateV2 { .. }
             | Pool::PublicV2 { .. } => None,
         };
         let should_convert_fees_to_quote_asset =
-            launch_quote_asset_id.as_ref() == Some(&request.asset_out);
-        let (asset0_id, asset0_balance, asset1_id, asset1_balance, fees) = match pool {
-            Pool::PrivateV1 {
-                assets,
-                owner_id: _,
-                fees,
-            }
-            | Pool::PublicV1 {
-                assets,
-                fees,
-                user_shares: _,
-                total_shares: _,
-            } => (
-                assets.0.asset_id.clone(),
-                &mut assets.0.balance.0,
-                assets.1.asset_id.clone(),
-                &mut assets.1.balance.0,
-                FeeConfiguration::V1(fees.clone()),
-            ),
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                fees,
-                phantom_liquidity_near: _,
-            } => (
-                AssetId::Near,
-                &mut near_amount.0,
-                launched_asset.asset_id.clone(),
-                &mut launched_asset.balance.0,
-                fees.clone(),
-            ),
-            Pool::LaunchV2 {
-                quote_asset,
-                launched_asset,
-                fees,
-                phantom_liquidity: _,
-            } => (
-                quote_asset.asset_id.clone(),
-                &mut quote_asset.balance.0,
-                launched_asset.asset_id.clone(),
-                &mut launched_asset.balance.0,
-                fees.clone(),
-            ),
-            Pool::PrivateV2 {
-                assets,
-                owner_id: _,
-                fees,
-                locked: _,
-            }
-            | Pool::PublicV2 {
-                assets,
-                fees,
-                user_shares: _,
-                total_shares: _,
-            } => (
-                assets.0.asset_id.clone(),
-                &mut assets.0.balance.0,
-                assets.1.asset_id.clone(),
-                &mut assets.1.balance.0,
-                fees.clone(),
-            ),
+            launch_quote_asset_id.as_ref() == Some(&&asset_out);
+        let (asset0_id, asset1_id) = {
+            let (asset0_id, asset1_id) = pool.asset_ids();
+            (asset0_id.clone(), asset1_id.clone())
         };
+        let fees = pool.fee_configuration();
+        let [asset0_balance, asset1_balance] = pool.balances_mut();
         expect!(
-            asset0_id == request.asset_in || asset1_id == request.asset_in,
+            asset0_id == asset_in || asset1_id == asset_in,
             "Invalid asset in"
         );
         expect!(
-            asset0_id == request.asset_out || asset1_id == request.asset_out,
+            asset0_id == asset_out || asset1_id == asset_out,
             "Invalid asset out"
         );
         expect!(*asset0_balance > 0 && *asset1_balance > 0, "Pool is empty");
         let first_in = match (
-            asset0_id == request.asset_in && asset1_id == request.asset_out,
-            asset1_id == request.asset_in && asset0_id == request.asset_out,
+            asset0_id == asset_in && asset1_id == asset_out,
+            asset1_id == asset_in && asset0_id == asset_out,
         ) {
             (true, false) => true,
             (false, true) => false,
@@ -492,9 +401,7 @@ impl XykDex {
             let mut fees_breakdown = Vec::new();
             let mut total_fees = 0u128;
             let mut pool_fee = 0u128;
-            for (receiver, fee_fraction) in fees.receivers.iter() {
-                let fee_amount =
-                    mul_div(amount_in, *fee_fraction as u128, FULL_FEE_FRACTION as u128);
+            for (receiver, fee_amount) in fees.amounts(amount_in) {
                 total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
                 match receiver {
                     FeeReceiver::Account(account_id) => {
@@ -584,7 +491,7 @@ impl XykDex {
                 {
                     // in denominator in_balance or amount can't either be zero.
                     let fee_amount_quote_asset =
-                        mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
+                        fee_converted_to_quote_asset(amount_token.0, *in_balance, *out_balance);
                     *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
                     *out_balance = out_balance
                         .checked_sub(fee_amount_quote_asset)
@@ -615,7 +522,7 @@ impl XykDex {
                     );
                     // in denominator in_balance or amount can't either be zero.
                     let fee_amount_near =
-                        mul_div_sum(amount_token.0, *out_balance, *in_balance, amount_token.0);
+                        fee_converted_to_quote_asset(amount_token.0, *in_balance, *out_balance);
                     *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
                     *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
                     community_owned_fees
@@ -637,7 +544,7 @@ impl XykDex {
             }
         }
 
-        let fee_asset_account_ids = asset_account_ids([&request.asset_in, &request.asset_out]);
+        let fee_asset_account_ids = asset_account_ids([&asset_in, &asset_out]);
         let pool_and_protocol_fees =
             fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
         let current_fees = with_referral_fee(
@@ -645,18 +552,17 @@ impl XykDex {
                 Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
                 None => pool_and_protocol_fees,
             },
-            request.referrer.clone(),
-            &self.referral_settings,
+            referral_settings,
             &self.fees_collected_by_users,
             if should_convert_fees_to_quote_asset {
-                request.asset_out.clone()
+                asset_out.clone()
             } else {
-                request.asset_in.clone()
+                asset_in.clone()
             },
             &fee_asset_account_ids,
         );
 
-        let (fees_breakdown, response) = match request.amount {
+        let (fees_breakdown, response) = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
                 expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
                 let (in_balance, out_balance) = if first_in {
@@ -670,19 +576,15 @@ impl XykDex {
                     mut fees_breakdown,
                 } = collect_fees(
                     exact_amount_in.0,
-                    &request.asset_in,
+                    &asset_in,
                     &current_fees,
                     &mut self.fees_collected_by_users,
                     &mut self.community_owned_fees,
                     should_convert_fees_to_quote_asset,
                 );
                 // in_balance was checked to be positive
-                let amount_out = mul_div_sum(
-                    amount_in_after_fees,
-                    *out_balance,
-                    *in_balance,
-                    amount_in_after_fees,
-                );
+                let amount_out =
+                    exact_in_amount_out(amount_in_after_fees, *in_balance, *out_balance);
                 *in_balance = in_balance
                     .checked_add(amount_in_after_fees)
                     .expect("Overflow")
@@ -691,7 +593,7 @@ impl XykDex {
                 *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
                 if should_convert_fees_to_quote_asset {
                     convert_fees_to_quote_asset(
-                        &request.asset_out,
+                        &asset_out,
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -718,33 +620,11 @@ impl XykDex {
                     exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
-                // out_balance was checked to be greater than exact_amount_out so
-                // no underflow or zero division can happen
-                #[allow(clippy::arithmetic_side_effects)]
-                let amount_in_without_fees = mul_div(
-                    *in_balance,
+                let amount_in = exact_out_amount_in(
                     exact_amount_out.0,
-                    *out_balance - exact_amount_out.0,
-                )
-                .checked_add(1)
-                .expect("Value must be less than 128 bits");
-                let total_fee_fraction = current_fees
-                    .receivers
-                    .iter()
-                    .map(|(_, fee)| *fee as u128)
-                    .sum::<u128>();
-                let fee_denominator = (FULL_FEE_FRACTION as u128)
-                    .checked_sub(total_fee_fraction)
-                    .expect("Fee fraction somehow above 100%");
-                let fee_denominator_minus_one = fee_denominator
-                    .checked_sub(1)
-                    .expect("Fee fraction somehow equals 100%");
-                // checked_sub would fail if denominator was 0
-                let amount_in = mul_add_div(
-                    amount_in_without_fees,
-                    FULL_FEE_FRACTION as u128,
-                    fee_denominator_minus_one,
-                    fee_denominator,
+                    *in_balance,
+                    *out_balance,
+                    &current_fees,
                 );
                 let CollectFeesReturn {
                     amount_in_after_fees,
@@ -752,7 +632,7 @@ impl XykDex {
                     mut fees_breakdown,
                 } = collect_fees(
                     amount_in,
-                    &request.asset_in,
+                    &asset_in,
                     &current_fees,
                     &mut self.fees_collected_by_users,
                     &mut self.community_owned_fees,
@@ -768,7 +648,7 @@ impl XykDex {
                     .expect("Underflow");
                 if should_convert_fees_to_quote_asset {
                     convert_fees_to_quote_asset(
-                        &request.asset_out,
+                        &asset_out,
                         in_balance,
                         out_balance,
                         &mut fees_breakdown,
@@ -785,9 +665,6 @@ impl XykDex {
                 )
             }
         };
-        self.fees_collected_by_users.flush();
-        self.community_owned_fees.flush();
-
         match pool {
             Pool::LaunchV1 {
                 near_amount,
@@ -820,7 +697,8 @@ impl XykDex {
         }
         XykDexEvent::Swap {
             pool_id,
-            request,
+            asset_in,
+            asset_out,
             amount_in: response.amount_in,
             amount_out: response.amount_out,
             fees_breakdown: fees_breakdown
@@ -1216,7 +1094,11 @@ impl XykDex {
 
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: self.pools.get(pool_id).unwrap().into(),
+            pool: self
+                .pools
+                .get(pool_id)
+                .unwrap()
+                .view(near_sdk::env::block_timestamp()),
         }
         .emit();
         if initial_liquidity.is_some() {
@@ -1633,7 +1515,7 @@ impl XykDex {
         .emit();
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: (&*pool).into(),
+            pool: pool.view(near_sdk::env::block_timestamp()),
         }
         .emit();
 
@@ -1707,17 +1589,11 @@ impl XykDex {
                     "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
                 // INITIAL_SHARES is not 0
-                let withdrawn_amount_0 = mul_div(
-                    assets.0.balance.0,
-                    shares_to_remove.get(),
-                    INITIAL_SHARES.get(),
-                );
+                let withdrawn_amount_0 =
+                    mul_div(assets.0.balance.0, shares_to_remove.get(), INITIAL_SHARES);
                 // INITIAL_SHARES is not 0
-                let withdrawn_amount_1 = mul_div(
-                    assets.1.balance.0,
-                    shares_to_remove.get(),
-                    INITIAL_SHARES.get(),
-                );
+                let withdrawn_amount_1 =
+                    mul_div(assets.1.balance.0, shares_to_remove.get(), INITIAL_SHARES);
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
                     expect!(
                         withdrawn_amount_0 >= min_asset_0_received.0
@@ -1876,7 +1752,7 @@ impl XykDex {
         .emit();
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: (&*pool).into(),
+            pool: pool.view(near_sdk::env::block_timestamp()),
         }
         .emit();
 
@@ -2002,7 +1878,7 @@ impl XykDex {
 
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: (&*pool).into(),
+            pool: pool.view(near_sdk::env::block_timestamp()),
         }
         .emit();
         self.pools.flush();
@@ -2149,7 +2025,7 @@ impl XykDex {
         *pool = new_pool;
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: (&*pool).into(),
+            pool: pool.view(near_sdk::env::block_timestamp()),
         }
         .emit();
         self.pools.flush();
@@ -2215,7 +2091,7 @@ impl XykDex {
         }
         XykDexEvent::PoolUpdated {
             pool_id,
-            pool: (&*pool).into(),
+            pool: pool.view(near_sdk::env::block_timestamp()),
         }
         .emit();
         DexCallResponse::default()
@@ -2359,7 +2235,9 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pool(&self, #[serializer(borsh)] args: GetPoolArgs) -> Option<PoolView> {
         let GetPoolArgs { pool_id } = args;
-        self.pools.get(pool_id).map(|pool| pool.into())
+        self.pools
+            .get(pool_id)
+            .map(|pool| pool.view(near_sdk::env::block_timestamp()))
     }
 
     #[result_serializer(borsh)]
@@ -2369,7 +2247,7 @@ impl XykDex {
             .iter()
             .skip(start_index as usize)
             .take(limit as usize)
-            .map(|pool| pool.into())
+            .map(|pool| pool.view(near_sdk::env::block_timestamp()))
             .collect()
     }
 
@@ -2463,203 +2341,23 @@ impl XykDex {
     }
 }
 
-#[near(serializers=[borsh])]
-pub enum Pool {
-    PrivateV1 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
-        fees: CurrentFees,
-    },
-    PublicV1 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-        total_shares: Option<SharesBalance>,
-    },
-    LaunchV1 {
-        near_amount: U128,
-        launched_asset: AssetWithBalance,
-        fees: FeeConfiguration,
-        phantom_liquidity_near: U128,
-    },
-    PrivateV2 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
-        fees: FeeConfiguration,
-        locked: bool,
-    },
-    PublicV2 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: FeeConfiguration,
-        user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-        total_shares: Option<SharesBalance>,
-    },
-    LaunchV2 {
-        quote_asset: AssetWithBalance,
-        launched_asset: AssetWithBalance,
-        fees: FeeConfiguration,
-        phantom_liquidity: U128,
-    },
-}
-
-impl Pool {
-    fn asset_ids(&self) -> (&AssetId, &AssetId) {
-        match self {
-            Pool::PrivateV1 { assets, .. }
-            | Pool::PublicV1 { assets, .. }
-            | Pool::PrivateV2 { assets, .. }
-            | Pool::PublicV2 { assets, .. } => (&assets.0.asset_id, &assets.1.asset_id),
-            Pool::LaunchV1 { launched_asset, .. } => (&AssetId::Near, &launched_asset.asset_id),
-            Pool::LaunchV2 {
-                quote_asset,
-                launched_asset,
-                ..
-            } => (&quote_asset.asset_id, &launched_asset.asset_id),
-        }
-    }
-}
-
-impl From<&Pool> for PoolType {
-    fn from(pool: &Pool) -> Self {
-        match pool {
-            Pool::PrivateV1 { .. } => PoolType::PrivateV1,
-            Pool::PublicV1 { .. } => PoolType::PublicV1,
-            Pool::LaunchV1 {
-                phantom_liquidity_near,
-                ..
-            } => PoolType::LaunchV1 {
-                phantom_liquidity_near: *phantom_liquidity_near,
-            },
-            Pool::PrivateV2 { .. } => PoolType::PrivateV2,
-            Pool::PublicV2 { .. } => PoolType::PublicV2,
-            Pool::LaunchV2 {
-                phantom_liquidity, ..
-            } => PoolType::LaunchV2 {
-                phantom_liquidity: *phantom_liquidity,
-            },
-        }
-    }
-}
-
-impl From<&Pool> for PoolView {
-    fn from(pool: &Pool) -> Self {
-        match pool {
-            Pool::PrivateV1 {
-                assets,
-                owner_id,
-                fees,
-            } => PoolView::Private {
-                assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
-                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: FeeConfiguration::V1(fees.clone()),
-                owner_id: owner_id.clone(),
-                locked: false,
-            },
-            Pool::PublicV1 {
-                assets,
-                fees,
-                total_shares,
-                user_shares: _,
-            } => PoolView::Public {
-                assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()).with_protocol_fee(
-                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: FeeConfiguration::V1(fees.clone()),
-                total_shares: total_shares.map(|s| U128(s.get())),
-            },
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                fees,
-                phantom_liquidity_near,
-            } => PoolView::Launch {
-                near_amount: *near_amount,
-                launched_asset: launched_asset.clone(),
-                fees: fees.with_protocol_fee(
-                    &asset_account_ids([&AssetId::Near, &launched_asset.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: fees.clone(),
-                phantom_liquidity_near: *phantom_liquidity_near,
-            },
-            Pool::PrivateV2 {
-                assets,
-                owner_id,
-                fees,
-                locked,
-            } => PoolView::Private {
-                assets: assets.clone(),
-                fees: fees.with_protocol_fee(
-                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: fees.clone(),
-                owner_id: owner_id.clone(),
-                locked: *locked,
-            },
-            Pool::PublicV2 {
-                assets,
-                fees,
-                total_shares,
-                user_shares: _,
-            } => PoolView::Public {
-                assets: assets.clone(),
-                fees: fees.with_protocol_fee(
-                    &asset_account_ids([&assets.0.asset_id, &assets.1.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: fees.clone(),
-                total_shares: total_shares.map(|s| U128(s.get())),
-            },
-            Pool::LaunchV2 {
-                quote_asset,
-                launched_asset,
-                fees,
-                phantom_liquidity,
-            } => PoolView::LaunchV2 {
-                quote_asset: quote_asset.clone(),
-                launched_asset: launched_asset.clone(),
-                fees: fees.with_protocol_fee(
-                    &asset_account_ids([&quote_asset.asset_id, &launched_asset.asset_id]),
-                    near_sdk::env::block_timestamp(),
-                ),
-                fee_configuration: fees.clone(),
-                phantom_liquidity: *phantom_liquidity,
-            },
-        }
-    }
-}
-
 fn with_referral_fee(
-    mut fees: CurrentFees,
-    referrer_account_id: Option<AccountId>,
-    referral_settings: &LookupMap<AccountId, ReferralSettings>,
+    fees: CurrentFees,
+    referral_settings: Option<&(AccountId, ReferralSettings)>,
     fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
     fee_asset_id: AssetId,
     asset_account_ids: &[&AccountIdRef],
 ) -> CurrentFees {
-    let Some(referrer_account_id) = referrer_account_id else {
+    let Some((referrer_id, settings)) = referral_settings else {
         return fees;
     };
-    let Some(referral_settings) = referral_settings.get(&referrer_account_id) else {
-        return fees;
-    };
-    let referral_fee_fraction = referral_settings.fee_fraction(asset_account_ids);
+    let referral_fee_fraction = settings.fee_fraction(asset_account_ids);
     if referral_fee_fraction == 0
         || fees_collected_by_users
-            .get(&(referrer_account_id.clone(), fee_asset_id))
+            .get(&(referrer_id.clone(), fee_asset_id))
             .is_none()
     {
         return fees;
     }
-    fees.receivers.push((
-        FeeReceiver::Account(referrer_account_id),
-        referral_fee_fraction,
-    ));
-    fees
+    fees.with_referral_fee(referrer_id.clone(), referral_fee_fraction)
 }

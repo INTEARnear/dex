@@ -15,7 +15,7 @@ use near_primitives::views::{
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::{Base58CryptoHash, U128};
 use serde_json::json;
-use xyk_dex_types::XykDexEvent;
+use xyk_dex_types::{XykDexEvent, XykDexEventV1};
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::chain::xyk::{self, XykState};
@@ -250,28 +250,30 @@ pub fn report_outcome(
                     }
                 }
             }
-            IntearDexEvent::DexEvents(encoded_dex_events) => {
-                let dex_events_json = BASE64_STANDARD
-                    .decode(&encoded_dex_events)
-                    .ok()
-                    .and_then(|compressed| lz4_flex::decompress_size_prepended(&compressed).ok())
-                    .ok_or_else(|| {
-                        eyre!("{ENGINE_ACCOUNT_ID} logged invalid compressed dex events: {encoded_dex_events}")
+            // Logged one per event by engines from before dexes logged borsh, and by
+            // this one for dexes that still log JSON
+            IntearDexEvent::DexEvent { dex_id, event, .. } if event["standard"] == "xyk" => {
+                let xyk_event: XykDexEventV1 =
+                    serde_json::from_value(event.clone()).wrap_err_with(|| {
+                        format!(
+                            "This version of intear-dex-management can't read the event {event} of {dex_id}"
+                        )
                     })?;
-                let dex_events: Vec<DexEventData<serde_json::Value>> =
-                    serde_json::from_slice(&dex_events_json).wrap_err_with(|| {
-                        format!("{ENGINE_ACCOUNT_ID} logged invalid dex events")
-                    })?;
-                for DexEventData { dex_id, event, .. } in dex_events {
-                    if event["standard"] != "xyk" {
-                        continue;
-                    }
-                    let xyk_event: XykDexEvent =
-                        serde_json::from_value(event.clone()).wrap_err_with(|| {
-                            format!(
-                                "This version of intear-dex-management can't read the event {event} of {dex_id}"
-                            )
+                activity_lines.push(xyk_event_line(&dex_id, xyk_event.into(), &metadata_cache)?);
+            }
+            IntearDexEvent::DexEventsBorsh(encoded_dex_events) => {
+                let dex_events: Vec<DexEventData> =
+                    near_sdk::borsh::from_slice(&decompress_dex_events(&encoded_dex_events)?)
+                        .wrap_err_with(|| {
+                            format!("{ENGINE_ACCOUNT_ID} logged invalid dex events")
                         })?;
+                for DexEventData { dex_id, event, .. } in dex_events {
+                    // Only the xyk dex logs through the engine's `dex_event`
+                    let xyk_event: XykDexEvent = near_sdk::borsh::from_slice(&event).wrap_err_with(|| {
+                        format!(
+                            "This version of intear-dex-management can't read an event of {dex_id}"
+                        )
+                    })?;
                     activity_lines.push(xyk_event_line(&dex_id, xyk_event, &metadata_cache)?);
                 }
             }
@@ -292,7 +294,8 @@ pub fn report_outcome(
             IntearDexEvent::DexDeployed { dex_id, code_hash } => {
                 deployed_code_hashes.push((dex_id, code_hash));
             }
-            IntearDexEvent::UserDeposit { .. }
+            IntearDexEvent::DexEvent { .. }
+            | IntearDexEvent::UserDeposit { .. }
             | IntearDexEvent::Withdraw { .. }
             | IntearDexEvent::Swap { .. } => {}
         }
@@ -441,6 +444,17 @@ pub fn report_outcome(
     Ok(())
 }
 
+/// The uncompressed bytes of a `dex_events` or `dex_events_borsh` log
+fn decompress_dex_events(encoded_dex_events: &str) -> color_eyre::eyre::Result<Vec<u8>> {
+    BASE64_STANDARD
+        .decode(encoded_dex_events)
+        .ok()
+        .and_then(|compressed| lz4_flex::decompress_size_prepended(&compressed).ok())
+        .ok_or_else(|| {
+            eyre!("{ENGINE_ACCOUNT_ID} logged invalid compressed dex events: {encoded_dex_events}")
+        })
+}
+
 /// What an xyk event says happened, in one line
 fn xyk_event_line(
     dex_id: &DexId,
@@ -464,14 +478,15 @@ fn xyk_event_line(
         }
         XykDexEvent::Swap {
             pool_id,
-            request,
+            asset_in,
+            asset_out,
             amount_in: U128(amount_in),
             amount_out: U128(amount_out),
             ..
         } => format!(
             "Pool #{pool_id} of {dex_id} swapped {} for {}",
-            format_amount(amount_in, &request.asset_in)?,
-            format_amount(amount_out, &request.asset_out)?
+            format_amount(amount_in, &asset_in)?,
+            format_amount(amount_out, &asset_out)?
         ),
         XykDexEvent::LiquidityAdded {
             pool_id,

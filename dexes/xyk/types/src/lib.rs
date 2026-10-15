@@ -14,6 +14,11 @@ use near_sdk::{
     serde::Deserialize,
 };
 
+pub mod math;
+mod pool;
+
+pub use pool::Pool;
+
 pub type PoolId = u32;
 
 pub const LAST_CREATED_POOL_ID_MARKER: PoolId = PoolId::MAX;
@@ -305,6 +310,7 @@ pub enum PoolType {
 }
 
 #[near(serializers=[borsh, json])]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum PoolView {
     Private {
@@ -337,7 +343,7 @@ pub enum PoolView {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct AssetWithBalance {
     pub asset_id: AssetId,
@@ -345,7 +351,7 @@ pub struct AssetWithBalance {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 #[serde(untagged)]
 pub enum FeeConfiguration {
@@ -354,21 +360,21 @@ pub enum FeeConfiguration {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CurrentFees {
     pub receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct V2FeeConfiguration {
     pub receivers: Vec<(FeeReceiver, FeeAmount)>,
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum FeeAmount {
     Fixed(FeeFraction),
@@ -384,14 +390,14 @@ pub enum FeeAmount {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum ScheduledFeeCurve {
     Linear,
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum FeeReceiver {
     Account(AccountId),
@@ -400,7 +406,7 @@ pub enum FeeReceiver {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum ReferralSettings {
     V1 {
@@ -409,10 +415,143 @@ pub enum ReferralSettings {
     },
 }
 
+/// The events of the dex, logged as borsh with the engine's `dex_event` host function and
+/// carried in its `dex_events_borsh` log. They have no JSON form: the dex logged
+/// [`XykDexEventV1`] as JSON before.
+#[near(serializers=[borsh])]
+#[derive(Clone, PartialEq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum XykDexEvent {
+    PoolUpdated {
+        pool_id: PoolId,
+        pool: PoolView,
+    },
+    Swap {
+        pool_id: PoolId,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount_in: U128,
+        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
+        amount_out: U128,
+    },
+    LiquidityAdded {
+        pool_id: PoolId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+
+        added_amount_0: U128,
+        added_amount_1: U128,
+        minted_shares: U128,
+
+        new_owned_asset_0: U128,
+        new_owned_asset_1: U128,
+        new_owned_shares: U128,
+
+        new_total_asset_0: U128,
+        new_total_asset_1: U128,
+        new_total_shares: U128,
+    },
+    LiquidityRemoved {
+        pool_id: PoolId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+
+        removed_amount_0: U128,
+        removed_amount_1: U128,
+        burned_shares: U128,
+
+        new_owned_asset_0: U128,
+        new_owned_asset_1: U128,
+        new_owned_shares: U128,
+
+        new_total_asset_0: U128,
+        new_total_asset_1: U128,
+        new_total_shares: U128,
+    },
+}
+
+impl From<XykDexEventV1> for XykDexEvent {
+    fn from(event: XykDexEventV1) -> Self {
+        match event {
+            XykDexEventV1::PoolUpdated { pool_id, pool } => Self::PoolUpdated { pool_id, pool },
+            XykDexEventV1::Swap {
+                pool_id,
+                request,
+                amount_in,
+                fees_breakdown,
+                amount_out,
+            } => Self::Swap {
+                pool_id,
+                asset_in: request.asset_in,
+                asset_out: request.asset_out,
+                amount_in,
+                fees_breakdown,
+                amount_out,
+            },
+            XykDexEventV1::LiquidityAdded {
+                pool_id,
+                asset_0,
+                asset_1,
+                added_amount_0,
+                added_amount_1,
+                minted_shares,
+                new_owned_asset_0,
+                new_owned_asset_1,
+                new_owned_shares,
+                new_total_asset_0,
+                new_total_asset_1,
+                new_total_shares,
+            } => Self::LiquidityAdded {
+                pool_id,
+                asset_0,
+                asset_1,
+                added_amount_0,
+                added_amount_1,
+                minted_shares,
+                new_owned_asset_0,
+                new_owned_asset_1,
+                new_owned_shares,
+                new_total_asset_0,
+                new_total_asset_1,
+                new_total_shares,
+            },
+            XykDexEventV1::LiquidityRemoved {
+                pool_id,
+                asset_0,
+                asset_1,
+                removed_amount_0,
+                removed_amount_1,
+                burned_shares,
+                new_owned_asset_0,
+                new_owned_asset_1,
+                new_owned_shares,
+                new_total_asset_0,
+                new_total_asset_1,
+                new_total_shares,
+            } => Self::LiquidityRemoved {
+                pool_id,
+                asset_0,
+                asset_1,
+                removed_amount_0,
+                removed_amount_1,
+                burned_shares,
+                new_owned_asset_0,
+                new_owned_asset_1,
+                new_owned_shares,
+                new_total_asset_0,
+                new_total_asset_1,
+                new_total_shares,
+            },
+        }
+    }
+}
+
+/// The events as the dex logged them in JSON up to its switch to borsh, each in an engine
+/// `dex_event` log. `Swap` carried the whole request of the hop.
 #[near(event_json(standard = "xyk"))]
 #[derive(Deserialize)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub enum XykDexEvent {
+pub enum XykDexEventV1 {
     #[event_version("1.0.0")]
     PoolUpdated { pool_id: PoolId, pool: PoolView },
     #[event_version("1.0.0")]
@@ -697,6 +836,30 @@ impl FeeConfiguration {
 }
 
 impl CurrentFees {
+    pub fn total_fee_fraction(&self) -> FeeFraction {
+        self.receivers
+            .iter()
+            .map(|(_, fee_fraction)| *fee_fraction)
+            .sum()
+    }
+
+    /// The fee of each receiver on `amount_in`, each rounded down
+    pub fn amounts(&self, amount_in: u128) -> impl Iterator<Item = (&FeeReceiver, u128)> {
+        self.receivers.iter().map(move |(receiver, fee_fraction)| {
+            (receiver, math::fee_amount(amount_in, *fee_fraction))
+        })
+    }
+
+    /// With the referral fee of `referrer_id` last, as the dex adds it to the pool and protocol
+    /// fees of a swap, which a fee discount doesn't reduce. The same fees for a fee of 0.
+    pub fn with_referral_fee(mut self, referrer_id: AccountId, fee_fraction: FeeFraction) -> Self {
+        if fee_fraction > 0 {
+            self.receivers
+                .push((FeeReceiver::Account(referrer_id), fee_fraction));
+        }
+        self
+    }
+
     /// Each fee is rounded down after the discount
     pub fn discounted(mut self, fee_discount: FeeFractionFraction) -> CurrentFees {
         let remaining_fee_share = FULL_FEE_FRACTION_FRACTION

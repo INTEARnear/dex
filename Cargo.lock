@@ -1437,6 +1437,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethnum"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
+
+[[package]]
 name = "eyre"
 version = "0.6.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6696,7 +6702,6 @@ dependencies = [
 name = "xyk-dex"
 version = "0.1.0"
 dependencies = [
- "crypto-bigint 0.6.1",
  "intear-dex-types",
  "near-sdk",
  "talc",
@@ -6707,6 +6712,7 @@ dependencies = [
 name = "xyk-dex-types"
 version = "0.1.0"
 dependencies = [
+ "ethnum",
  "intear-dex-types",
  "near-sdk",
 ]

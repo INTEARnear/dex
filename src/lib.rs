@@ -244,7 +244,7 @@ pub struct RunnerData<'a> {
     dex_storage_balances: &'a StorageBalances<DexId>,
     dex_storage_usage_before_transaction: u64,
     referrer: Option<AccountId>,
-    dex_events: Vec<DexEventData<near_sdk::serde_json::Value>>,
+    dex_events: Vec<DexEventData>,
 }
 
 #[near]
