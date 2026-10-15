@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use intear_dex_types::AssetId;
 use near_primitives::types::AccountId;
-use near_sdk::NearToken;
 use near_sdk::json_types::U128;
+use near_sdk::{NearToken, PublicKey};
 use xyk_dex_types::{
     GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
     GetReferralSettingsArgs, PoolId, PoolNeedsUpgradeArgs, PoolView, ReferralSettings,
@@ -208,5 +208,20 @@ pub fn referral_settings(
         &GetReferralSettingsArgs {
             account_id: account_id.clone(),
         },
+    )
+}
+
+/// The key that signs fee discounts on the dex, if any
+pub fn fee_discount_signer(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<PublicKey>> {
+    dex_view(
+        network_config,
+        block_reference,
+        dex_id,
+        "get_fee_discount_signer",
+        &(),
     )
 }

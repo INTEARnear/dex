@@ -21,9 +21,9 @@ use xyk_dex_types::{
     GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES,
     LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId,
     PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings, RegisterFeeAssetsArgs,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, SetReferrerSettingsArgs,
-    SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs, WithdrawCommunityFeeArgs,
-    WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, SetFeeDiscountSignerArgs,
+    SetReferrerSettingsArgs, SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs,
+    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
     math::{
         exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
         shares_to_tokens, tokens_to_shares,
@@ -767,6 +767,29 @@ impl XykDex {
             community_owned_fees: old_state.community_owned_fees,
             fee_discount_signer_public_key: Some(fee_discount_signer_public_key),
         }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn set_fee_discount_signer(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        expect!(
+            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
+            "Only owner can set the fee discount signer"
+        );
+        let Ok(SetFeeDiscountSignerArgs {
+            fee_discount_signer_public_key,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        self.fee_discount_signer_public_key = fee_discount_signer_public_key;
+        DexCallResponse::default()
     }
 
     #[payable]
@@ -2300,6 +2323,11 @@ impl XykDex {
                     .map(|balance| (asset_id, balance))
             })
             .collect()
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_fee_discount_signer(&self) -> Option<PublicKey> {
+        self.fee_discount_signer_public_key.clone()
     }
 
     #[result_serializer(borsh)]

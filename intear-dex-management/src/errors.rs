@@ -124,6 +124,13 @@ pub enum PreflightError {
     NoStateToMigrate { dex_id: DexId, init_command: String },
     #[error("{signer_id} can't migrate xyk dexes; only {CAN_MIGRATE} can")]
     NotAllowedToMigrate { signer_id: AccountId },
+    #[error("{signer_id} can't change who signs fee discounts; only {CAN_MIGRATE} can")]
+    NotAllowedToSetFeeDiscountSigner { signer_id: AccountId },
+    #[error("{dex_id} already has {fee_discounts}")]
+    FeeDiscountSignerUnchanged {
+        dex_id: DexId,
+        fee_discounts: String,
+    },
     #[error("These fees aren't allowed: {problem}")]
     FeesNotAllowed { problem: String },
     #[error("A pool needs two different assets, not {asset_id} twice")]
@@ -241,7 +248,9 @@ impl PreflightError {
             Self::NoStateToMigrate { init_command, .. } => Some(format!(
                 "Deploy without --migrate, then initialize it:\n    {init_command}"
             )),
-            Self::NotAllowedToMigrate { .. } => Some(format!("Sign with {CAN_MIGRATE}")),
+            Self::NotAllowedToMigrate { .. } | Self::NotAllowedToSetFeeDiscountSigner { .. } => {
+                Some(format!("Sign with {CAN_MIGRATE}"))
+            }
             Self::NotPoolOwner { owner_id, .. } => Some(format!("Sign with {owner_id}")),
             Self::PoolNeedsUpgrade {
                 upgrade_command, ..
@@ -298,7 +307,8 @@ impl PreflightError {
             | Self::NoPendingFees { .. }
             | Self::NoCommunityFees { .. }
             | Self::ReferralFeeTooHigh
-            | Self::FeeAssetsAlreadyRegistered { .. } => None,
+            | Self::FeeAssetsAlreadyRegistered { .. }
+            | Self::FeeDiscountSignerUnchanged { .. } => None,
         };
         let report = Report::new(self);
         match suggestion {

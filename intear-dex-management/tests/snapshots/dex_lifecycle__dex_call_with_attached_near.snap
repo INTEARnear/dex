@@ -42,10 +42,7 @@ exit code: 0
 │
 ├  Function execution logs:
 │    Logs [dex.intear.near]:
-│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"user_balance_update","data":{"account_id":"alice.near","asset_id":"near","balance":"4990000000000000000000000"}}
-│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150010000000000000000000000"}}
-│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150001210000000000000000000"}}
-│      EVENT_JSON:{"standard":"inteardex","version":"1.0.0","event":"dex_balance_update","data":{"dex_id":"slimedragon.near/xyk","asset_id":"near","balance":"150000000000000000000000000"}}
+│      EVENT_JSON:{"standard":"inteardex","version":"2.0.0","event":"balance_updates","data":[{"owner":{"Account":"alice.near"},"asset_id":"near","balance":"4990000000000000000000000"},{"owner":{"Dex":"slimedragon.near/xyk"},"asset_id":"near","balance":"150000000000000000000000000"}]}
 │    Logs [alice.near]:   No logs
 │    Logs [alice.near]:   No logs
 │    Logs [dex.intear.near]:

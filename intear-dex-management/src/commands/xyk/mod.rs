@@ -18,6 +18,7 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near
 pub mod community_fees;
 pub mod create_pool;
 pub mod deploy;
+pub mod fee_discounts;
 pub mod fees;
 pub mod init;
 pub mod liquidity;
@@ -97,6 +98,11 @@ pub enum XykAction {
     ))]
     /// Referral fees: show, set-fees, register-fee-assets
     Referrer(self::referrer::ReferrerCommands),
+    #[strum_discriminants(strum(
+        message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"
+    ))]
+    /// Who signs fee discounts: show, set-signer, disable
+    FeeDiscounts(self::fee_discounts::FeeDiscountsCommands),
     #[strum_discriminants(strum(
         message = "create-pool     - Create a private, public or launch pool"
     ))]

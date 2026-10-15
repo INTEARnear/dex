@@ -5,7 +5,7 @@ use intear_dex_types::{
     AccountOrDexId, AssetId, DexEventData, DexId, Operation, SwapOperationAmount,
     SwapRequestAmount, WithdrawAmount,
 };
-use near_crypto::{SecretKey, Signature};
+use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::AccountId;
 use near_sdk::serde_json::json;
 use near_sdk::{
@@ -13,16 +13,19 @@ use near_sdk::{
     base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base64VecU8, U128},
 };
-use near_workspaces::Contract;
+use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 use xyk_dex_types::{
-    AddLiquidityArgs, CreatePoolArgs, CurrentFees, FeeAmount, FeeConfiguration, FeeDiscount,
-    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    GetReferralSettingsArgs, LockPoolArgs, MAX_FEE_RECEIVERS, PoolId, PoolType, PoolView,
-    ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    ScheduledFeeCurve, SetReferrerSettingsArgs, SignedFeeDiscount, SwapArgs, UpgradePoolArgs,
-    V2FeeConfiguration, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    AddLiquidityArgs, CAN_MIGRATE, CreatePoolArgs, CurrentFees, FULL_FEE_FRACTION,
+    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    GetReferralSettingsArgs, LockPoolArgs, MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId,
+    PoolType, PoolView, ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs, SetReferrerSettingsArgs,
+    SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute, UpgradePoolArgs, V2FeeConfiguration,
+    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -4854,4 +4857,939 @@ async fn test_xyk_community_fee_restrictions() {
         get_community_owned_fees(&dex_engine_contract, &dex_id, user2.id()).await,
         NearToken::from_yoctonear(0)
     );
+}
+
+async fn create_migrator(sandbox: &Worker<Sandbox>, dex_engine_contract: &Contract) -> Account {
+    let account_id: AccountId = CAN_MIGRATE.to_owned();
+    let key =
+        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    sandbox
+        .patch(&account_id)
+        .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000)))
+        .access_key(
+            key.public_key(),
+            near_workspaces::types::AccessKey::full_access(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    let migrator = Account::from_secret_key(account_id, key, sandbox);
+    let result = migrator
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(engine_user_storage_deposit())
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    migrator
+}
+
+fn set_fee_discount_signer_dex_call_args(
+    dex_id: &DexId,
+    fee_discount_signer: Option<&SecretKey>,
+) -> near_sdk::serde_json::Value {
+    json!({
+        "dex_id": dex_id,
+        "method": "set_fee_discount_signer",
+        "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetFeeDiscountSignerArgs {
+            fee_discount_signer_public_key: fee_discount_signer.map(|signer| {
+                signer.public_key().to_string().parse().unwrap()
+            }),
+        }).unwrap()),
+        "attached_assets": {},
+    })
+}
+
+async fn get_fee_discount_signer(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+) -> Option<near_sdk::PublicKey> {
+    let result = dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_fee_discount_signer",
+            "args": "",
+        }))
+        .await
+        .unwrap();
+    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+}
+
+/// The engine with a new xyk dex whose fee discounts `fee_discount_signer` signs, set by
+/// `slimedragon.near`. Its assets are registered for the dex and the engine accounts, and the
+/// FTs are registered for all.
+async fn setup_xyk_with_fee_discount_signer(
+    fee_discount_signer: &SecretKey,
+) -> (TestContext, DexId) {
+    let wasms = get_compiled_wasms().await;
+    let context = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.xyk_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: context.deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let migrator = create_migrator(&context.sandbox, &context.dex_engine_contract).await;
+    let result = migrator
+        .call(context.dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(set_fee_discount_signer_dex_call_args(
+            &dex_id,
+            Some(fee_discount_signer),
+        ))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    (context, dex_id)
+}
+
+#[tokio::test]
+async fn test_xyk_set_fee_discount_signer() {
+    let wasms = get_compiled_wasms().await;
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        deployer,
+        user1,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.xyk_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: false,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let migrator = create_migrator(&sandbox, &dex_engine_contract).await;
+    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
+    let other_fee_discount_signer =
+        SecretKey::from_seed(KeyType::SECP256K1, "other-fee-discount-signer");
+    let public_key = |signer: &SecretKey| -> near_sdk::PublicKey {
+        signer.public_key().to_string().parse().unwrap()
+    };
+    let set_fee_discount_signer = |by: &Account, args: &near_sdk::serde_json::Value| {
+        by.call(dex_engine_contract.id(), "dex_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(args)
+            .transact()
+    };
+
+    // A new dex has no signer, so fee discounts are disabled
+    assert_eq!(
+        get_fee_discount_signer(&dex_engine_contract, &dex_id).await,
+        None
+    );
+
+    let result = set_fee_discount_signer(
+        &user1,
+        &set_fee_discount_signer_dex_call_args(&dex_id, Some(&fee_discount_signer)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        format!("{result:?}").contains("Only owner can set the fee discount signer"),
+        "Expected \"Only owner can set the fee discount signer\", got {result:#?}"
+    );
+    // The dex's deployer isn't its owner either
+    let result = set_fee_discount_signer(
+        &deployer,
+        &set_fee_discount_signer_dex_call_args(&dex_id, Some(&fee_discount_signer)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        format!("{result:?}").contains("Only owner can set the fee discount signer"),
+        "Expected \"Only owner can set the fee discount signer\", got {result:#?}"
+    );
+    assert_eq!(
+        get_fee_discount_signer(&dex_engine_contract, &dex_id).await,
+        None
+    );
+
+    let result = set_fee_discount_signer(
+        &migrator,
+        &json!({
+            "dex_id": dex_id,
+            "method": "set_fee_discount_signer",
+            "args": "",
+            "attached_assets": {},
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        format!("{result:?}").contains("Invalid args"),
+        "Expected \"Invalid args\", got {result:#?}"
+    );
+
+    for signer in [&fee_discount_signer, &other_fee_discount_signer] {
+        let result = set_fee_discount_signer(
+            &migrator,
+            &set_fee_discount_signer_dex_call_args(&dex_id, Some(signer)),
+        )
+        .await
+        .unwrap();
+        assert_success(&result).unwrap();
+        assert_eq!(
+            get_fee_discount_signer(&dex_engine_contract, &dex_id).await,
+            Some(public_key(signer))
+        );
+    }
+
+    // `None` disables fee discounts again
+    let result = set_fee_discount_signer(
+        &migrator,
+        &set_fee_discount_signer_dex_call_args(&dex_id, None),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        get_fee_discount_signer(&dex_engine_contract, &dex_id).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_xyk_fee_discount_ed25519() {
+    check_xyk_fee_discount(KeyType::ED25519).await;
+}
+
+#[tokio::test]
+async fn test_xyk_fee_discount_secp256k1() {
+    check_xyk_fee_discount(KeyType::SECP256K1).await;
+}
+
+async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
+    let initial_near_deposit = NearToken::from_near(20);
+    let storage_deposit_for_pool = NearToken::from_millinear(50);
+    let add_liquidity_ft1 = 1_000_000_000u128;
+    let add_liquidity_ft2 = 2_000_000_000u128;
+    let user1_deposit_ft1 = 500_000_000u128;
+    let swap_amount_ft1 = 10_000_000u128;
+    let exact_amount_out_ft2 = 1_000_000u128;
+
+    let fee_fraction = 10_000u32; // 1%
+    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let half_discounted_fee_fraction = 5_000u32; // 0.5%
+    let half_discounted_protocol_fee_fraction = 500u32; // 0.05%
+
+    let fee_discount_signer =
+        SecretKey::from_seed(fee_discount_signer_key_type, "fee-discount-signer");
+    // Same curve as the signer, so that only the signature check can reject it
+    let not_fee_discount_signer =
+        SecretKey::from_seed(fee_discount_signer_key_type, "not-fee-discount-signer");
+    let (
+        TestContext {
+            sandbox,
+            dex_engine_contract,
+            ft1,
+            ft2,
+            deployer,
+            user1,
+            user2,
+            ..
+        },
+        dex_id,
+    ) = setup_xyk_with_fee_discount_signer(&fee_discount_signer).await;
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+    let protocol_fee_receiver_id = PROTOCOL_FEE_RECEIVER_ID.to_owned();
+    let pool_id = get_pool_count(&dex_engine_contract, &dex_id).await;
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(initial_near_deposit)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    for (ft, amount) in [(&ft1, add_liquidity_ft1), (&ft2, add_liquidity_ft2)] {
+        let result = deployer
+            .call(ft.id(), "ft_transfer_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": dex_engine_contract.id(),
+                "amount": U128(amount),
+                "msg": "",
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: (ft1_asset_id.clone(), ft2_asset_id.clone()),
+                            fees: FeeConfiguration::V1(CurrentFees {
+                                receivers: vec![(
+                                    FeeReceiver::Account(user2.id().clone()),
+                                    fee_fraction,
+                                )],
+                            }),
+                            pool_type: PoolType::PrivateLatest,
+                            initial_liquidity: None,
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        U128(storage_deposit_for_pool.as_yoctonear()),
+                    )]),
+                },
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "add_liquidity".to_string(),
+                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
+                    attached_assets: HashMap::from_iter([
+                        (ft1_asset_id.clone(), U128(add_liquidity_ft1)),
+                        (ft2_asset_id.clone(), U128(add_liquidity_ft2)),
+                    ]),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(user1_deposit_ft1),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(user1_deposit_ft1),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let swap_message_with_fee_discount = |fee_discount: SignedFeeDiscount| {
+        near_sdk::borsh::to_vec(&SwapArgs {
+            fee_discount: Some(fee_discount),
+            ..SwapArgs::single_pool(pool_id)
+        })
+        .unwrap()
+    };
+    let swap_ft1_to_ft2 = |message: Vec<u8>, amount: SwapRequestAmount| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": vec![
+                    Operation::SwapSimple {
+                        dex_id: dex_id.clone(),
+                        message: Base64VecU8(message),
+                        asset_in: ft1_asset_id.clone(),
+                        asset_out: ft2_asset_id.clone(),
+                        amount: SwapOperationAmount::Amount(amount),
+                        constraint: None,
+                    },
+                ],
+            }))
+            .transact()
+    };
+    let pool_balances = async || match get_pool(&dex_engine_contract, &dex_id, pool_id)
+        .await
+        .unwrap()
+    {
+        PoolView::Private { assets, .. } => (assets.0.balance.0, assets.1.balance.0),
+        _ => panic!("Expected private pool"),
+    };
+    let user1_balance = async |asset_id: &AssetId| {
+        get_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(user1.id().clone()),
+            asset_id.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+    };
+    let pending_ft1_fees = async |account_id: &AccountId| {
+        get_pending_fees(
+            &dex_engine_contract,
+            &dex_id,
+            account_id,
+            vec![ft1_asset_id.clone()],
+        )
+        .await[&ft1_asset_id]
+            .0
+    };
+
+    let current_block_height = sandbox.view_block().await.unwrap().height();
+    let full_fee_discount_for_user1 = FeeDiscount {
+        routes: SwapArgs::single_pool(pool_id).routes,
+        asset_in: ft1_asset_id.clone(),
+        asset_out: ft2_asset_id.clone(),
+        trader_id: Some(user1.id().clone()),
+        amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        fee_discount: FULL_FEE_FRACTION,
+        expiration_block_height: current_block_height + 1_000,
+    };
+    let full_exact_out_fee_discount_for_user1 = FeeDiscount {
+        amount: SwapRequestAmount::ExactOut(U128(exact_amount_out_ft2)),
+        ..full_fee_discount_for_user1.clone()
+    };
+
+    // Full discount waives pool and protocol fees
+    let (ft1_in_pool, ft2_in_pool) = pool_balances().await;
+    let ft2_before = user1_balance(&ft2_asset_id).await;
+    let result = swap_ft1_to_ft2(
+        swap_message_with_fee_discount(sign_fee_discount(
+            full_fee_discount_for_user1.clone(),
+            &fee_discount_signer,
+        )),
+        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let expected_ft2_out = swap_amount_ft1 * ft2_in_pool / (ft1_in_pool + swap_amount_ft1);
+    assert_eq!(
+        user1_balance(&ft2_asset_id).await,
+        ft2_before + expected_ft2_out
+    );
+    assert_eq!(
+        pool_balances().await,
+        (
+            ft1_in_pool + swap_amount_ft1,
+            ft2_in_pool - expected_ft2_out
+        )
+    );
+    assert_eq!(pending_ft1_fees(user2.id()).await, 0);
+    assert_eq!(pending_ft1_fees(&protocol_fee_receiver_id).await, 0);
+    let swap_events = xyk_events(&result)
+        .into_iter()
+        .filter(|event| matches!(event, XykDexEvent::Swap { .. }))
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            swap_events.as_slice(),
+            [XykDexEvent::Swap { fees_breakdown, .. }] if fees_breakdown.iter().all(|(_, _, amount)| amount.0 == 0)
+        ),
+        "A fully discounted swap logs no fee amounts: {swap_events:#?}"
+    );
+
+    // Half discount that any trader can use halves pool and protocol fees
+    let (ft1_in_pool, ft2_in_pool) = pool_balances().await;
+    let ft2_before = user1_balance(&ft2_asset_id).await;
+    let result = swap_ft1_to_ft2(
+        swap_message_with_fee_discount(sign_fee_discount(
+            FeeDiscount {
+                trader_id: None,
+                fee_discount: FULL_FEE_FRACTION / 2,
+                ..full_fee_discount_for_user1.clone()
+            },
+            &fee_discount_signer,
+        )),
+        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let half_discounted_fee_amount =
+        swap_amount_ft1 * half_discounted_fee_fraction as u128 / 1_000_000;
+    let half_discounted_protocol_fee_amount =
+        swap_amount_ft1 * half_discounted_protocol_fee_fraction as u128 / 1_000_000;
+    let amount_after_fees =
+        swap_amount_ft1 - half_discounted_fee_amount - half_discounted_protocol_fee_amount;
+    let expected_ft2_out = amount_after_fees * ft2_in_pool / (ft1_in_pool + amount_after_fees);
+    assert_eq!(
+        user1_balance(&ft2_asset_id).await,
+        ft2_before + expected_ft2_out
+    );
+    assert_eq!(
+        pending_ft1_fees(user2.id()).await,
+        half_discounted_fee_amount
+    );
+    assert_eq!(
+        pending_ft1_fees(&protocol_fee_receiver_id).await,
+        half_discounted_protocol_fee_amount
+    );
+
+    // Full discount also applies to exact output swaps
+    let (ft1_in_pool, ft2_in_pool) = pool_balances().await;
+    let ft1_before = user1_balance(&ft1_asset_id).await;
+    let result = swap_ft1_to_ft2(
+        swap_message_with_fee_discount(sign_fee_discount(
+            full_exact_out_fee_discount_for_user1.clone(),
+            &fee_discount_signer,
+        )),
+        SwapRequestAmount::ExactOut(U128(exact_amount_out_ft2)),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let expected_ft1_in =
+        ft1_in_pool * exact_amount_out_ft2 / (ft2_in_pool - exact_amount_out_ft2) + 1;
+    assert_eq!(
+        user1_balance(&ft1_asset_id).await,
+        ft1_before - expected_ft1_in
+    );
+    assert_eq!(
+        pending_ft1_fees(user2.id()).await,
+        half_discounted_fee_amount
+    );
+    assert_eq!(
+        pending_ft1_fees(&protocol_fee_receiver_id).await,
+        half_discounted_protocol_fee_amount
+    );
+
+    // Messages from before fee discounts existed end after the pool ID, and pay full fees
+    let (ft1_in_pool, ft2_in_pool) = pool_balances().await;
+    let ft2_before = user1_balance(&ft2_asset_id).await;
+    let result = swap_ft1_to_ft2(
+        near_sdk::borsh::to_vec(&pool_id).unwrap(),
+        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
+    let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
+    let amount_after_fees = swap_amount_ft1 - fee_amount - protocol_fee_amount;
+    let expected_ft2_out = amount_after_fees * ft2_in_pool / (ft1_in_pool + amount_after_fees);
+    assert_eq!(
+        user1_balance(&ft2_asset_id).await,
+        ft2_before + expected_ft2_out
+    );
+    assert_eq!(
+        pending_ft1_fees(user2.id()).await,
+        half_discounted_fee_amount + fee_amount
+    );
+    assert_eq!(
+        pending_ft1_fees(&protocol_fee_receiver_id).await,
+        half_discounted_protocol_fee_amount + protocol_fee_amount
+    );
+
+    let rejected_fee_discounts = [
+        (
+            sign_fee_discount(
+                full_fee_discount_for_user1.clone(),
+                &not_fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount signature verification failed",
+        ),
+        (
+            SignedFeeDiscount {
+                discount: full_fee_discount_for_user1.clone(),
+                signature: sign_fee_discount(
+                    FeeDiscount {
+                        fee_discount: 1,
+                        ..full_fee_discount_for_user1.clone()
+                    },
+                    &fee_discount_signer,
+                )
+                .signature,
+            },
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount signature verification failed",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    routes: SwapArgs::single_pool(pool_id + 1).routes,
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount is for another route",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    asset_in: ft2_asset_id.clone(),
+                    asset_out: ft1_asset_id.clone(),
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount is for other assets",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    trader_id: Some(user2.id().clone()),
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount is for another trader",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1 + 1)),
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount is for another amount",
+        ),
+        (
+            sign_fee_discount(full_fee_discount_for_user1.clone(), &fee_discount_signer),
+            SwapRequestAmount::ExactOut(U128(swap_amount_ft1)),
+            "Fee discount is for another amount",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    expiration_block_height: current_block_height,
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount expired",
+        ),
+        (
+            sign_fee_discount(
+                FeeDiscount {
+                    fee_discount: FULL_FEE_FRACTION + 1,
+                    ..full_fee_discount_for_user1.clone()
+                },
+                &fee_discount_signer,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount can't exceed 100%",
+        ),
+    ];
+    let ft1_before_rejected_swaps = user1_balance(&ft1_asset_id).await;
+    for (fee_discount, amount, expected_error) in rejected_fee_discounts {
+        let result = swap_ft1_to_ft2(swap_message_with_fee_discount(fee_discount), amount)
+            .await
+            .unwrap();
+        assert!(
+            format!("{result:?}").contains(expected_error),
+            "Expected \"{expected_error}\", got {result:#?}"
+        );
+    }
+    assert_eq!(
+        user1_balance(&ft1_asset_id).await,
+        ft1_before_rejected_swaps
+    );
+}
+
+#[tokio::test]
+async fn test_xyk_fee_discount_without_signer() {
+    let wasms = get_compiled_wasms().await;
+
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        ft2,
+        deployer,
+        user1,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.xyk_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: false,
+        ft_storage_deposit_for_all: false,
+    })
+    .await;
+
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let fee_discount = sign_fee_discount(
+        FeeDiscount {
+            routes: SwapArgs::single_pool(0).routes,
+            asset_in: AssetId::Nep141(ft1.id().clone()),
+            asset_out: AssetId::Nep141(ft2.id().clone()),
+            trader_id: None,
+            amount: SwapRequestAmount::ExactIn(U128(1)),
+            fee_discount: FULL_FEE_FRACTION,
+            expiration_block_height: u64::MAX,
+        },
+        &SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer"),
+    );
+    // The dex rejects the discount before it looks for the pool or the trader's balance
+    let result = user1
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
+                        fee_discount: Some(fee_discount),
+                        ..SwapArgs::single_pool(0)
+                    }).unwrap()),
+                    asset_in: AssetId::Nep141(ft1.id().clone()),
+                    asset_out: AssetId::Nep141(ft2.id().clone()),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(1))),
+                    constraint: None,
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("Fee discounts are disabled on this dex"),
+        "A new dex has no fee discount signer: {result:#?}"
+    );
+}
+
+fn route(percent: SplitFraction, pool_ids: Vec<PoolId>) -> SwapRoute {
+    SwapRoute {
+        fraction: FULL_SPLIT_FRACTION / 100 * percent,
+        pool_ids,
+    }
+}
+
+#[tokio::test]
+async fn test_xyk_route_fee_discount() {
+    let liquidity = 1_000_000_000_000u128;
+    let user1_deposit_ft1 = 100_000_000_000u128;
+    let swap_amount_ft1 = 1_000_000_000u128;
+    let storage_deposit_for_pool = NearToken::from_millinear(50);
+
+    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
+    let (
+        TestContext {
+            sandbox,
+            dex_engine_contract,
+            ft1,
+            ft2,
+            ft3,
+            deployer,
+            user1,
+            user2,
+            ..
+        },
+        dex_id,
+    ) = setup_xyk_with_fee_discount_signer(&fee_discount_signer).await;
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+    let ft3_asset_id = AssetId::Nep141(ft3.id().clone());
+    let first_pool_id = get_pool_count(&dex_engine_contract, &dex_id).await;
+    let second_pool_id = first_pool_id + 1;
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(NearToken::from_near(1))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    for (ft, amount) in [(&ft1, liquidity), (&ft2, liquidity * 2), (&ft3, liquidity)] {
+        let result = deployer
+            .call(ft.id(), "ft_transfer_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": dex_engine_contract.id(),
+                "amount": U128(amount),
+                "msg": "",
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    // Pools ft1-ft2 and ft2-ft3, both with a 1% fee for user2
+    for assets in [
+        (ft1_asset_id.clone(), ft2_asset_id.clone()),
+        (ft2_asset_id.clone(), ft3_asset_id.clone()),
+    ] {
+        let result = deployer
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": vec![Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: assets.clone(),
+                            fees: FeeConfiguration::V1(CurrentFees {
+                                receivers: vec![(FeeReceiver::Account(user2.id().clone()), 10_000)],
+                            }),
+                            pool_type: PoolType::PrivateLatest,
+                            initial_liquidity: Some((U128(liquidity), U128(liquidity))),
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([
+                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
+                        (assets.0, U128(liquidity)),
+                        (assets.1, U128(liquidity)),
+                    ]),
+                }],
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(user1_deposit_ft1),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(user1_deposit_ft1),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let routes = vec![route(100, vec![first_pool_id, second_pool_id])];
+    let swap_ft1_to_ft3 = async |fee_discount: Option<FeeDiscount>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": vec![Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: Base64VecU8(
+                        near_sdk::borsh::to_vec(&SwapArgs {
+                            routes: routes.clone(),
+                            fee_discount: fee_discount.map(|fee_discount| {
+                                sign_fee_discount(fee_discount, &fee_discount_signer)
+                            }),
+                        })
+                        .unwrap(),
+                    ),
+                    asset_in: ft1_asset_id.clone(),
+                    asset_out: ft3_asset_id.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
+                        swap_amount_ft1,
+                    ))),
+                    constraint: None,
+                }],
+            }))
+            .transact()
+            .await
+            .unwrap()
+    };
+    let user2_pending_fees = async || {
+        get_pending_fees(
+            &dex_engine_contract,
+            &dex_id,
+            user2.id(),
+            vec![ft1_asset_id.clone(), ft2_asset_id.clone()],
+        )
+        .await
+    };
+
+    let current_block_height = sandbox.view_block().await.unwrap().height();
+    let full_fee_discount = FeeDiscount {
+        routes: routes.clone(),
+        asset_in: ft1_asset_id.clone(),
+        asset_out: ft3_asset_id.clone(),
+        trader_id: Some(user1.id().clone()),
+        amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        fee_discount: FULL_FEE_FRACTION,
+        expiration_block_height: current_block_height + 1_000,
+    };
+
+    // A discount for the first pool only doesn't apply to a route through both
+    let result = swap_ft1_to_ft3(Some(FeeDiscount {
+        routes: vec![route(100, vec![first_pool_id])],
+        ..full_fee_discount.clone()
+    }))
+    .await;
+    assert!(
+        format!("{result:?}").contains("Fee discount is for another route"),
+        "{result:#?}"
+    );
+
+    // The discount waives the fees of both pools of the route
+    let result = swap_ft1_to_ft3(Some(full_fee_discount)).await;
+    assert_success(&result).unwrap();
+    let pending_fees = user2_pending_fees().await;
+    assert_eq!(pending_fees[&ft1_asset_id], U128(0));
+    assert_eq!(pending_fees[&ft2_asset_id], U128(0));
+
+    // Without the discount, both pools take their fee
+    let result = swap_ft1_to_ft3(None).await;
+    assert_success(&result).unwrap();
+    let pending_fees = user2_pending_fees().await;
+    assert_eq!(pending_fees[&ft1_asset_id], U128(swap_amount_ft1 / 100));
+    assert!(pending_fees[&ft2_asset_id].0 > 0);
 }

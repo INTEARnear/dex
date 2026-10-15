@@ -1,0 +1,13 @@
+---
+source: intear-dex-management/tests/dex_lifecycle.rs
+expression: "cli.view(&[\"xyk\", \"--dex\", \"slimedragon.near/xyk-test\", \"fee-discounts\",\n\"show\"])"
+---
+$ near-intear-dex-management xyk --dex slimedragon.near/xyk-test fee-discounts show network-config sandbox now
+exit code: 0
+--- stdout ---
+Dex                  slimedragon.near/xyk-test
+Fee discount signer  ed25519:Bbahn7rJQYXrgo5Sd99KyMXp4gPJQ5xjgr8UXNiDRUyM
+--- stderr ---
+
+Here is your console command if you need to script it or re-run:
+    near intear-dex-management xyk --dex slimedragon.near/xyk-test fee-discounts show network-config sandbox now

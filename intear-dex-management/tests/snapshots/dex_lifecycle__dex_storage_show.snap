@@ -6,9 +6,9 @@ $ near-intear-dex-management dex storage show slimedragon.near/xyk network-confi
 exit code: 0
 --- stdout ---
 Code       deployed
-Total      20.01591 NEAR
-Used       1.5889 NEAR
-Available  18.42701 NEAR
+Total      20.01624 NEAR
+Used       1.62453 NEAR
+Available  18.39171 NEAR
 --- stderr ---
 
 Here is your console command if you need to script it or re-run:

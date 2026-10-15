@@ -6,8 +6,8 @@ $ near-intear-dex-management dex storage withdraw slimedragon.near slimedragon.n
 exit code: 0
 --- stdout ---
 {
-  "total": "20015910000000000000000000",
-  "available": "18427010000000000000000000"
+  "total": "20016240000000000000000000",
+  "available": "18391710000000000000000000"
 }
 --- stderr ---
 ├  sandbox · signer slimedragon.near · dex.intear.near

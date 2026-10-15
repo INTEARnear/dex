@@ -47,6 +47,7 @@ fn input() -> Vec<u8> {
 
 #[unsafe(no_mangle)]
 fn swap() {
+    near_sdk::env::setup_panic_hook();
     let input = input();
     let request: SwapRequest = borsh::from_slice(&input).expect("Invalid request");
     let amount = match request.amount {

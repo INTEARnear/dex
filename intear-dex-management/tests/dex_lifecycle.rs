@@ -306,10 +306,123 @@ async fn dex_lifecycle() {
         .await
     );
 
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_show_of_new_dex",
+        cli.view(&[
+            "xyk",
+            "--dex",
+            "slimedragon.near/xyk-test",
+            "fee-discounts",
+            "show"
+        ])
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_set_signer_by_account_other_than_slimedragon",
+        cli.transaction(
+            "alice.near",
+            &[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "fee-discounts",
+                "set-signer",
+                "alice.near",
+                &fee_discount_signer,
+            ]
+        )
+        .await
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_set_signer",
+        cli.transaction(
+            "slimedragon.near",
+            &[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "fee-discounts",
+                "set-signer",
+                "slimedragon.near",
+                &fee_discount_signer,
+            ]
+        )
+        .await
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_show",
+        cli.view(&[
+            "xyk",
+            "--dex",
+            "slimedragon.near/xyk-test",
+            "fee-discounts",
+            "show"
+        ])
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_set_signer_to_the_same_key",
+        cli.transaction(
+            "slimedragon.near",
+            &[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "fee-discounts",
+                "set-signer",
+                "slimedragon.near",
+                &fee_discount_signer,
+            ]
+        )
+        .await
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_disable",
+        cli.transaction(
+            "slimedragon.near",
+            &[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "fee-discounts",
+                "disable",
+                "slimedragon.near",
+            ]
+        )
+        .await
+    );
+    insta::assert_snapshot!(
+        "xyk_fee_discounts_disable_when_disabled",
+        cli.transaction(
+            "slimedragon.near",
+            &[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "fee-discounts",
+                "disable",
+                "slimedragon.near",
+            ]
+        )
+        .await
+    );
+
     let test_dex_id: DexId = "slimedragon.near/xyk-test".parse().unwrap();
     rewind_xyk_state_to_before_fee_discounts(&sandbox, &test_dex_id).await;
-    // Views read the final block, a few blocks after the one with the patch
-    sandbox.fast_forward(10).await.unwrap();
+    // Views read the final block, which takes a few blocks to include the patch
+    for _ in 0..20 {
+        sandbox.fast_forward(5).await.unwrap();
+        if cli
+            .view(&[
+                "xyk",
+                "--dex",
+                "slimedragon.near/xyk-test",
+                "pools",
+                "count",
+            ])
+            .contains("Cannot deserialize the contract state")
+        {
+            break;
+        }
+    }
     insta::assert_snapshot!(
         "xyk_pools_count_of_state_before_migration",
         cli.view(&[

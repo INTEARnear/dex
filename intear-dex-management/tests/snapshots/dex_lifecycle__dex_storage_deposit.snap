@@ -6,8 +6,8 @@ $ near-intear-dex-management dex storage deposit alice.near slimedragon.near/xyk
 exit code: 0
 --- stdout ---
 {
-  "total": "20515910000000000000000000",
-  "available": "18927010000000000000000000"
+  "total": "20516240000000000000000000",
+  "available": "18891710000000000000000000"
 }
 --- stderr ---
 ├  sandbox · signer alice.near · dex.intear.near

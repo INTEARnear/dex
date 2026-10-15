@@ -154,6 +154,13 @@ pub struct MigrateArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SetFeeDiscountSignerArgs {
+    /// The key that signs fee discounts from now on, or `None` to disable them
+    pub fee_discount_signer_public_key: Option<PublicKey>,
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
     pub fees: FeeConfiguration,
