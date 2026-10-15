@@ -161,52 +161,75 @@ pub struct BalanceUpdate {
     pub balance: U128,
 }
 
-#[near(event_json(standard = "inteardex"))]
-#[derive(Deserialize)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum IntearDexEvent {
-    #[event_version("1.0.0")]
-    DexDeployed {
-        dex_id: DexId,
-        code_hash: Base58CryptoHash,
-    },
-    #[event_version("1.0.0")]
-    DexEvent {
-        dex_id: DexId,
-        event: near_sdk::serde_json::Value,
-        referrer: Option<AccountId>,
-        user: Option<AccountId>,
-    },
-    /// The events of dexes in a call: base64 of an lz4 block prefixed with its
-    /// uncompressed length as a little-endian u32, which is what
-    /// `lz4_flex::decompress_size_prepended` reads, of the borsh of a
-    /// `Vec<DexEventData>`
-    #[event_version("1.0.0")]
-    DexEventsBorsh(String),
-    #[event_version("1.0.0")]
-    UserDeposit {
-        account_id: AccountId,
-        asset_id: AssetId,
-        amount: U128,
-    },
-    #[event_version("1.0.0")]
-    Withdraw {
-        from: AccountOrDexId,
-        to: AccountId,
-        asset_id: AssetId,
-        amount: U128,
-    },
-    /// The final balance of each owner and asset whose balance changed in
-    /// a call, in the order they first changed
-    #[event_version("2.0.0")]
-    BalanceUpdates(Vec<BalanceUpdate>),
-    #[event_version("1.0.0")]
-    Swap {
-        dex_id: DexId,
-        request: SwapRequest,
-        amount_in: U128,
-        amount_out: U128,
-        trader: AccountId,
-        referrer: Option<AccountId>,
-    },
+#[allow(deprecated)]
+mod deprecation_warning_workaround {
+    use super::*;
+
+    #[near(event_json(standard = "inteardex"))]
+    #[derive(Deserialize)]
+    #[cfg_attr(debug_assertions, derive(Debug))]
+    pub enum IntearDexEvent {
+        #[event_version("1.0.0")]
+        DexDeployed {
+            dex_id: DexId,
+            code_hash: Base58CryptoHash,
+        },
+        #[event_version("1.0.0")]
+        DexEvent {
+            dex_id: DexId,
+            event: near_sdk::serde_json::Value,
+            referrer: Option<AccountId>,
+            user: Option<AccountId>,
+        },
+        /// The events of dexes in a call: base64 of an lz4 block prefixed with its
+        /// uncompressed length as a little-endian u32, which is what
+        /// `lz4_flex::decompress_size_prepended` reads, of the borsh of a
+        /// `Vec<DexEventData>`
+        #[event_version("1.0.0")]
+        DexEventsBorsh(String),
+        #[event_version("1.0.0")]
+        UserDeposit {
+            account_id: AccountId,
+            asset_id: AssetId,
+            amount: U128,
+        },
+        #[event_version("1.0.0")]
+        Withdraw {
+            from: AccountOrDexId,
+            to: AccountId,
+            asset_id: AssetId,
+            amount: U128,
+        },
+        /// The final balance of each owner and asset whose balance changed in
+        /// a call, in the order they first changed
+        #[event_version("2.0.0")]
+        BalanceUpdates(Vec<BalanceUpdate>),
+        /// Not logged anymore.
+        #[deprecated]
+        #[event_version("1.0.0")]
+        UserBalanceUpdate {
+            account_id: AccountId,
+            asset_id: AssetId,
+            balance: U128,
+        },
+        /// A dex's balance after it changed, one log per change. Logged until
+        /// `balance_updates` replaced it, so only read, for backfilling.
+        #[deprecated]
+        #[event_version("1.0.0")]
+        DexBalanceUpdate {
+            dex_id: DexId,
+            asset_id: AssetId,
+            balance: U128,
+        },
+        #[event_version("1.0.0")]
+        Swap {
+            dex_id: DexId,
+            request: SwapRequest,
+            amount_in: U128,
+            amount_out: U128,
+            trader: AccountId,
+            referrer: Option<AccountId>,
+        },
+    }
 }
+pub use deprecation_warning_workaround::*;

@@ -294,10 +294,23 @@ pub fn report_outcome(
             IntearDexEvent::DexDeployed { dex_id, code_hash } => {
                 deployed_code_hashes.push((dex_id, code_hash));
             }
+            #[allow(deprecated)]
+            IntearDexEvent::UserBalanceUpdate {
+                account_id,
+                asset_id,
+                balance: U128(balance),
+            } => {
+                latest_balances.insert(
+                    (account_id.to_string(), asset_id.to_string()),
+                    (account_id, asset_id, balance),
+                );
+            }
+            #[allow(deprecated)]
             IntearDexEvent::DexEvent { .. }
             | IntearDexEvent::UserDeposit { .. }
             | IntearDexEvent::Withdraw { .. }
-            | IntearDexEvent::Swap { .. } => {}
+            | IntearDexEvent::Swap { .. }
+            | IntearDexEvent::DexBalanceUpdate { .. } => {}
         }
     }
     let mut balance_lines = Vec::new();

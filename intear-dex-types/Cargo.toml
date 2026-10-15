@@ -6,6 +6,10 @@ edition = "2024"
 [dependencies]
 near-sdk = { version = "5", default-features = false }
 
+[dev-dependencies]
+# The types are near-sdk types, which only build outside of a contract with this
+near-sdk = { version = "5", default-features = false, features = ["non-contract-usage"] }
+
 [features]
 abi = ["json", "near-sdk/abi"]
 json = []
