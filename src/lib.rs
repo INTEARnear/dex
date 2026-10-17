@@ -6,7 +6,6 @@ pub mod call_events;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
-pub mod migration;
 pub mod rescue;
 pub mod storage_management;
 
