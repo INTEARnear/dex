@@ -21,10 +21,11 @@ use xyk_dex_types::{
     AddLiquidityArgs, CAN_MIGRATE, CreatePoolArgs, CurrentFees, FULL_FEE_FRACTION,
     FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeFraction, FeeReceiver,
     GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, LockPoolArgs,
-    MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, ReferralFees,
-    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve,
-    SetFeeDiscountSignerArgs, SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute,
-    UpgradePoolArgs, V2FeeConfiguration, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    MAX_FEE_RECEIVERS, MAX_REFERRAL_FEE_FRACTION, PROTOCOL_FEE, PROTOCOL_FEE_RECEIVER_ID, PoolId,
+    PoolType, PoolView, ReferralFees, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs, SignedFeeDiscount,
+    SplitFraction, SwapArgs, SwapRoute, UpgradePoolArgs, V2FeeConfiguration,
+    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -339,15 +340,20 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // (100,000,000 * 2,000,000,000) / (1,000,000,000 + 100,000,000) = 181,818,181 FT2
-    let expected_ft2_out = 181_818_181u128;
+    // The pool has no fee receivers, but the protocol still takes 0.1% = 100,000 FT1
+    let protocol_fee_ft1 = 100_000u128;
+    // (99,900,000 * 2,000,000,000) / (1,000,000,000 + 99,900,000) = 181,652,877 FT2
+    let expected_ft2_out = 181_652_877u128;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap();
     match &pool {
         PoolView::Private { assets, .. } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1 + swap_amount_ft1);
+            assert_eq!(
+                assets.0.balance.0,
+                add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_ft1
+            );
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
         }
         _ => panic!("Expected private pool"),
@@ -708,13 +714,16 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let expected_ft2_out = 187_500_000u128;
+    // The pool has no fee receivers, but the protocol still takes 0.1% = 100,000 FT1
+    let protocol_fee_ft1 = 100_000u128;
+    // (99,900,000 * 2,999,999,999) / (1,500,000,000 + 99,900,000) = 187,324,207 FT2
+    let expected_ft2_out = 187_324_207u128;
     let pool_ft1_after_swap =
-        add_liquidity_ft1_deployer + add_liquidity_ft1_user1 + swap_amount_ft1;
+        add_liquidity_ft1_deployer + add_liquidity_ft1_user1 + swap_amount_ft1 - protocol_fee_ft1;
     let pool_ft2_after_swap =
-        add_liquidity_ft2_deployer + added_liquidity_ft2_user1 - expected_ft2_out;
+        add_liquidity_ft2_deployer + added_liquidity_ft2_user1 - 1 - expected_ft2_out;
 
-    assert_ft_balance(&user2, ft2.clone(), U128(expected_ft2_out - 1))
+    assert_ft_balance(&user2, ft2.clone(), U128(expected_ft2_out))
         .await
         .unwrap();
 
@@ -799,8 +808,10 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
         get_pool_shares(&dex_engine_contract, &dex_id, first_pool_id, user1.id()).await;
     assert_eq!(user1_shares, Some(U128(0)));
 
-    let deployer_ft1_expected_received = pool_ft1_after_swap * 2 / 3;
-    let deployer_ft2_expected_received = pool_ft2_after_swap * 2 / 3;
+    let deployer_shares = 10u128.pow(18);
+    let total_shares = 10u128.pow(18) + 10u128.pow(18) / 2 - 1000000000;
+    let deployer_ft1_expected_received = pool_ft1_after_swap * deployer_shares / total_shares;
+    let deployer_ft2_expected_received = pool_ft2_after_swap * deployer_shares / total_shares;
     let user1_ft1_expected_received = pool_ft1_after_swap - deployer_ft1_expected_received;
     let user1_ft2_expected_received = pool_ft2_after_swap - deployer_ft2_expected_received;
 
@@ -840,11 +851,12 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
     .await
     .unwrap();
 
-    let user1_ft2_add_liquidity_refund = add_liquidity_ft2_user1 - added_liquidity_ft2_user1;
+    // The pool took 1 less FT2 than added_liquidity_ft2_user1, as its balance shows above
+    let user1_ft2_add_liquidity_refund = add_liquidity_ft2_user1 - (added_liquidity_ft2_user1 - 1);
     assert_ft_balance(
         &user1,
         ft1.clone(),
-        U128((ft1_initial_deposit - add_liquidity_ft1_user1) + user1_ft1_expected_received - 1),
+        U128((ft1_initial_deposit - add_liquidity_ft1_user1) + user1_ft1_expected_received),
     )
     .await
     .unwrap();
@@ -2572,15 +2584,22 @@ async fn test_xyk_exact_output() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // amount_in = ceil((1_000_000_000 * 100_000_000) / (2_000_000_000 - 100_000_000)) = 52_631_579
-    let expected_ft1_in = 52_631_579u128;
+    // amount_in_without_fees = floor((1_000_000_000 * 100_000_000) / (2_000_000_000 - 100_000_000)) + 1
+    //                        = 52_631_579
+    // The pool has no fee receivers, but the protocol still takes 0.1%:
+    // amount_in = ceil(52_631_579 / 0.999) = 52_684_264, of which 52_684 is the protocol fee
+    let expected_ft1_in = 52_684_264u128;
+    let protocol_fee_ft1 = 52_684u128;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap();
     match &pool {
         PoolView::Private { assets, .. } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1 + expected_ft1_in);
+            assert_eq!(
+                assets.0.balance.0,
+                add_liquidity_ft1 + expected_ft1_in - protocol_fee_ft1
+            );
             assert_eq!(assets.1.balance.0, add_liquidity_ft2 - exact_output_ft2);
         }
         _ => panic!("Expected private pool"),
@@ -2994,8 +3013,11 @@ async fn test_xyk_launch_pool_flow() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let expected_ft2_out =
-        near_swap_in * launch_liquidity_ft2 / (phantom_liquidity_near + near_swap_in);
+    // The pool has no fee receivers, but the protocol still takes its fee
+    let protocol_fee_near = near_swap_in * PROTOCOL_FEE as u128 / 1_000_000;
+    let near_swap_in_after_fees = near_swap_in - protocol_fee_near;
+    let expected_ft2_out = near_swap_in_after_fees * launch_liquidity_ft2
+        / (phantom_liquidity_near + near_swap_in_after_fees);
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
         .await
         .unwrap();
@@ -3009,7 +3031,10 @@ async fn test_xyk_launch_pool_flow() {
             launched_asset,
             ..
         } => {
-            assert_eq!(quote_asset.balance.0, phantom_liquidity_near + near_swap_in);
+            assert_eq!(
+                quote_asset.balance.0,
+                phantom_liquidity_near + near_swap_in_after_fees
+            );
             assert_eq!(
                 launched_asset.balance.0,
                 launch_liquidity_ft2 - expected_ft2_out
@@ -3304,8 +3329,11 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let expected_ft2_out =
-        near_swap_in * launch_liquidity_ft2 / (phantom_liquidity_near + near_swap_in);
+    // The pool has no fee receivers, but the protocol still takes its fee
+    let protocol_fee_near = near_swap_in * PROTOCOL_FEE as u128 / 1_000_000;
+    let near_swap_in_after_fees = near_swap_in - protocol_fee_near;
+    let expected_ft2_out = near_swap_in_after_fees * launch_liquidity_ft2
+        / (phantom_liquidity_near + near_swap_in_after_fees);
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
         .await
         .unwrap();
@@ -3319,7 +3347,10 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
             launched_asset,
             ..
         } => {
-            assert_eq!(quote_asset.balance.0, phantom_liquidity_near + near_swap_in);
+            assert_eq!(
+                quote_asset.balance.0,
+                phantom_liquidity_near + near_swap_in_after_fees
+            );
             assert_eq!(
                 launched_asset.balance.0,
                 launch_liquidity_ft2 - expected_ft2_out
@@ -3880,10 +3911,11 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
     let storage_deposit_for_fee_assets = NearToken::from_near(1);
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
-    let trader_ft1_for_swaps = 400_000_000u128;
+    let trader_ft1_for_swaps = 500_000_000u128;
     let first_swap_amount = 100_000_000u128;
     let second_swap_amount = 200_000_000u128;
     let swap_without_referral_fees_amount = 100_000_000u128;
+    let max_referral_fee_swap_amount = 50_000_000u128;
     let user2_fee_fraction = 20_000u32; // 2%
     let user3_fee_fraction = 10_000u32; // 1%
     let first_pool_id = 0u32;
@@ -4125,12 +4157,17 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
             .checked_div(1_000_000)
             .unwrap()
     };
+    // The protocol takes 20% of each referral fee, rounded down, and the referrer the rest
+    let protocol_share_of = |fee_fraction: FeeFraction| fee_fraction / 5;
+    let referrer_share_of =
+        |fee_fraction: FeeFraction| fee_fraction - protocol_share_of(fee_fraction);
     let referral_fees = vec![
         (user2.id().clone(), user2_fee_fraction),
         (user3.id().clone(), user3_fee_fraction),
     ];
 
-    // Only user2 collects fees in ft1, so user3 isn't paid
+    // Only user2 collects fees in ft1, so user3 isn't paid, and the protocol only gets its
+    // fee and its share of user2's referral fee
     register_fee_assets(&user2).await;
     let result = swap(first_swap_amount, referral_fees.clone())
         .await
@@ -4138,9 +4175,20 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
     assert_success(&result).unwrap();
     assert_eq!(
         pending_referral_fee(user2.id().clone()).await,
-        Some(U128(fee_of(first_swap_amount, user2_fee_fraction)))
+        Some(U128(fee_of(
+            first_swap_amount,
+            referrer_share_of(user2_fee_fraction)
+        )))
     );
     assert_eq!(pending_referral_fee(user3.id().clone()).await, None);
+    let mut protocol_fees = fee_of(
+        first_swap_amount,
+        PROTOCOL_FEE + protocol_share_of(user2_fee_fraction),
+    );
+    assert_eq!(
+        pending_referral_fee(PROTOCOL_FEE_RECEIVER_ID.to_owned()).await,
+        Some(U128(protocol_fees))
+    );
 
     // Both collect fees in ft1 now
     register_fee_assets(&user3).await;
@@ -4148,10 +4196,13 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-    let user2_fees = fee_of(first_swap_amount, user2_fee_fraction)
-        .checked_add(fee_of(second_swap_amount, user2_fee_fraction))
+    let mut user2_fees = fee_of(first_swap_amount, referrer_share_of(user2_fee_fraction))
+        .checked_add(fee_of(
+            second_swap_amount,
+            referrer_share_of(user2_fee_fraction),
+        ))
         .unwrap();
-    let user3_fees = fee_of(second_swap_amount, user3_fee_fraction);
+    let user3_fees = fee_of(second_swap_amount, referrer_share_of(user3_fee_fraction));
     assert_eq!(
         pending_referral_fee(user2.id().clone()).await,
         Some(U128(user2_fees))
@@ -4160,8 +4211,21 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
         pending_referral_fee(user3.id().clone()).await,
         Some(U128(user3_fees))
     );
+    protocol_fees = protocol_fees
+        .checked_add(fee_of(
+            second_swap_amount,
+            PROTOCOL_FEE
+                + protocol_share_of(user2_fee_fraction)
+                + protocol_share_of(user3_fee_fraction),
+        ))
+        .unwrap();
+    assert_eq!(
+        pending_referral_fee(PROTOCOL_FEE_RECEIVER_ID.to_owned()).await,
+        Some(U128(protocol_fees))
+    );
 
-    // Naming a referrer of the operations doesn't charge a fee
+    // Naming a referrer of the operations doesn't charge a fee, and the protocol fee is
+    // charged even though the pool has no fee receivers
     let result = swap(swap_without_referral_fees_amount, vec![])
         .await
         .unwrap();
@@ -4169,6 +4233,42 @@ async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
     assert_eq!(
         pending_referral_fee(user2.id().clone()).await,
         Some(U128(user2_fees))
+    );
+    protocol_fees = protocol_fees
+        .checked_add(fee_of(swap_without_referral_fees_amount, PROTOCOL_FEE))
+        .unwrap();
+    assert_eq!(
+        pending_referral_fee(PROTOCOL_FEE_RECEIVER_ID.to_owned()).await,
+        Some(U128(protocol_fees))
+    );
+
+    // The highest referral fee is split without overflowing
+    let result = swap(
+        max_referral_fee_swap_amount,
+        vec![(user2.id().clone(), MAX_REFERRAL_FEE_FRACTION)],
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    user2_fees = user2_fees
+        .checked_add(fee_of(
+            max_referral_fee_swap_amount,
+            referrer_share_of(MAX_REFERRAL_FEE_FRACTION),
+        ))
+        .unwrap();
+    assert_eq!(
+        pending_referral_fee(user2.id().clone()).await,
+        Some(U128(user2_fees))
+    );
+    protocol_fees = protocol_fees
+        .checked_add(fee_of(
+            max_referral_fee_swap_amount,
+            PROTOCOL_FEE + protocol_share_of(MAX_REFERRAL_FEE_FRACTION),
+        ))
+        .unwrap();
+    assert_eq!(
+        pending_referral_fee(PROTOCOL_FEE_RECEIVER_ID.to_owned()).await,
+        Some(U128(protocol_fees))
     );
 
     let referrers =

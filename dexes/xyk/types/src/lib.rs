@@ -49,9 +49,11 @@ pub const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
     NEAR_ACCOUNT_ID,
 ];
 pub const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
-/// The most all referrers of a swap can charge together
+/// The most all referrers of a swap can charge together in each pool it swaps through
 pub const MAX_REFERRAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 20; // 5%
 pub const MAX_REFERRERS: usize = 5;
+/// The part of each referral fee that goes to the protocol fee receiver instead of the referrer
+pub const REFERRAL_FEE_PROTOCOL_SHARE: FeeFractionFraction = FULL_FEE_FRACTION_FRACTION / 5; // 20%
 const _: () = assert!(
     MAX_TOTAL_FEE_FRACTION + PROTOCOL_FEE + MAX_REFERRAL_FEE_FRACTION < FULL_FEE_FRACTION,
     "Pool, protocol, and referral fees combined must stay below 100%"
@@ -64,8 +66,9 @@ pub struct SwapArgs {
     pub routes: Vec<SwapRoute>,
     pub fee_discount: Option<SignedFeeDiscount>,
     /// Fees the swap pays referrers on top of pool and protocol fees, in the
-    /// asset the pool takes fees in. A referrer who hasn't registered that
-    /// asset with [`RegisterFeeAssetsArgs`] isn't paid.
+    /// asset the pool takes fees in, [`REFERRAL_FEE_PROTOCOL_SHARE`] of which
+    /// goes to the protocol. A referrer who hasn't registered that asset with
+    /// [`RegisterFeeAssetsArgs`] isn't paid, and neither is that share.
     pub referral_fees: ReferralFees,
 }
 
@@ -816,15 +819,14 @@ impl FeeConfiguration {
         asset_account_ids: &[&AccountIdRef],
         timestamp: Timestamp,
     ) -> CurrentFees {
+        let protocol_fee = if should_reduce_fee(asset_account_ids) {
+            PROTOCOL_FEE_REDUCED
+        } else {
+            PROTOCOL_FEE
+        };
         match self {
             FeeConfiguration::V1(fees) => {
                 let mut receivers = fees.receivers.clone();
-                let mut protocol_fee = PROTOCOL_FEE;
-                if receivers.is_empty() {
-                    protocol_fee = 0;
-                } else if should_reduce_fee(asset_account_ids) {
-                    protocol_fee = PROTOCOL_FEE_REDUCED;
-                }
                 receivers.push((
                     FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
                     protocol_fee,
@@ -833,13 +835,7 @@ impl FeeConfiguration {
             }
             FeeConfiguration::V2(fees) => {
                 let mut receivers = Vec::new();
-                let mut protocol_fee = if fees.receivers.is_empty() {
-                    0
-                } else if should_reduce_fee(asset_account_ids) {
-                    PROTOCOL_FEE_REDUCED
-                } else {
-                    PROTOCOL_FEE
-                };
+                let mut protocol_fee = protocol_fee;
                 for (receiver, amount) in fees.receivers.iter() {
                     match amount {
                         FeeAmount::Fixed(fee_fraction) => {
@@ -922,10 +918,37 @@ impl CurrentFees {
             })
     }
 
+    /// Adds a referral fee of `fee_fraction`, which [`REFERRAL_FEE_PROTOCOL_SHARE`] of goes to
+    /// the protocol fee receiver, rounded down, and the rest to the referrer
     pub fn with_referral_fee(mut self, referrer_id: AccountId, fee_fraction: FeeFraction) -> Self {
         if fee_fraction > 0 {
-            self.receivers
-                .push((FeeReceiver::Account(referrer_id), fee_fraction));
+            let protocol_share = FeeFraction::try_from(
+                u64::from(fee_fraction)
+                    .checked_mul(u64::from(REFERRAL_FEE_PROTOCOL_SHARE))
+                    .unwrap()
+                    .checked_div(u64::from(FULL_FEE_FRACTION_FRACTION))
+                    .unwrap(),
+            )
+            .expect("Protocol share can't be higher than the referral fee");
+            self.receivers.push((
+                FeeReceiver::Account(referrer_id),
+                fee_fraction
+                    .checked_sub(protocol_share)
+                    .expect("Protocol share can't be higher than the referral fee"),
+            ));
+            let (_, protocol_fee) = self
+                .receivers
+                .iter_mut()
+                .find(|(receiver, _)| {
+                    matches!(
+                        receiver,
+                        FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID
+                    )
+                })
+                .expect("Fees with the protocol fee always have the protocol fee receiver");
+            *protocol_fee = protocol_fee
+                .checked_add(protocol_share)
+                .expect("Fee fraction overflow");
         }
         self
     }
