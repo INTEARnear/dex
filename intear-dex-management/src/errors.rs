@@ -197,8 +197,6 @@ pub enum PreflightError {
         account_id: AccountId,
         dex_id: DexId,
     },
-    #[error("Referral fees must be less than 5%")]
-    ReferralFeeTooHigh,
     #[error("{owner} already collects fees in {assets} on {dex_id}")]
     FeeAssetsAlreadyRegistered {
         owner: AccountId,
@@ -306,7 +304,6 @@ impl PreflightError {
             | Self::AmountsOfOneAsset { .. }
             | Self::NoPendingFees { .. }
             | Self::NoCommunityFees { .. }
-            | Self::ReferralFeeTooHigh
             | Self::FeeAssetsAlreadyRegistered { .. }
             | Self::FeeDiscountSignerUnchanged { .. } => None,
         };

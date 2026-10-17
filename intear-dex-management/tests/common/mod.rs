@@ -15,8 +15,9 @@ use near_workspaces::types::{AccessKey, KeyType, NearToken, SecretKey};
 use near_workspaces::{Account, AccountDetailsPatch, AccountId, Worker};
 use serde_json::json;
 use xyk_dex_types::{
-    AddLiquidityArgs, CreatePoolArgs, CurrentFees, FeeAmount, FeeConfiguration, FeeReceiver,
-    LockPoolArgs, PoolId, PoolType, ScheduledFeeCurve, SwapArgs, V2FeeConfiguration,
+    AddLiquidityArgs, CreatePoolArgs, CurrentFees, FeeAmount, FeeConfiguration, FeeFraction,
+    FeeReceiver, LockPoolArgs, PoolId, PoolType, ReferralFees, ScheduledFeeCurve, SwapArgs,
+    V2FeeConfiguration,
 };
 
 const ENGINE_ACCOUNT_ID: &str = "dex.intear.near";
@@ -432,18 +433,29 @@ pub async fn start_sandbox_with_xyk_pools() -> Worker<Sandbox> {
 }
 
 /// A swap on slimedragon.near/xyk from `trader`'s balance on the engine,
-/// for state that the CLI's commands work on, like collected fees
+/// for state that the CLI's commands work on, like collected fees. A referrer
+/// with a fee is paid it, and named as the referrer of the swap.
 pub async fn swap_through_engine(
     sandbox: &Worker<Sandbox>,
     trader: &str,
     pool_id: PoolId,
     (asset_in, asset_out): (AssetId, AssetId),
     amount: SwapRequestAmount,
-    referrer: Option<&str>,
+    referral_fee: Option<(&str, FeeFraction)>,
 ) {
+    let swap_args = SwapArgs {
+        referral_fees: ReferralFees(
+            referral_fee
+                .map(|(referrer, fee_fraction)| (referrer.parse().unwrap(), fee_fraction))
+                .into_iter()
+                .collect(),
+        ),
+        ..SwapArgs::single_pool(pool_id)
+    };
+    let referrer = referral_fee.map(|(referrer, _)| referrer);
     let swap = Operation::SwapSimple {
         dex_id: "slimedragon.near/xyk".parse().unwrap(),
-        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
+        message: Base64VecU8(near_sdk::borsh::to_vec(&swap_args).unwrap()),
         asset_in,
         asset_out,
         amount: SwapOperationAmount::Amount(amount),
@@ -482,14 +494,14 @@ pub async fn transfer_on_engine(
     .await;
 }
 
-/// Gives an xyk dex without pools the state layout from before fee
-/// discounts, which its `migrate` converts. The engine keeps a dex's state in
-/// its dex storage collection, whose prefix is 1, under the dex id and
+/// Gives an xyk dex without pools the state layout from before swaps named
+/// their referral fees, which its `migrate` converts. The engine keeps a dex's
+/// state in its dex storage collection, whose prefix is 1, under the dex id and
 /// near-sdk's STATE key. The engine's state is too large to read through RPC,
 /// so the old state is written out: the pool vector (length, then prefix 0),
-/// and the maps of collected fees, referral settings and community fees
-/// (prefixes 2, 3 and 4).
-pub async fn rewind_xyk_state_to_before_fee_discounts(sandbox: &Worker<Sandbox>, dex_id: &DexId) {
+/// the maps of collected fees, referral settings and community fees (prefixes
+/// 2, 3 and 4), and no fee discount signer.
+pub async fn rewind_xyk_state_to_before_referral_fees(sandbox: &Worker<Sandbox>, dex_id: &DexId) {
     let engine_id: AccountId = ENGINE_ACCOUNT_ID.parse().unwrap();
     let key = [
         vec![1u8],
@@ -497,19 +509,20 @@ pub async fn rewind_xyk_state_to_before_fee_discounts(sandbox: &Worker<Sandbox>,
     ]
     .concat();
     let collection_prefix = |prefix: u8| near_sdk::borsh::to_vec(&vec![prefix]).unwrap();
-    let state_before_fee_discounts = [
+    let state_before_referral_fees = [
         0u32.to_le_bytes().to_vec(),
         collection_prefix(0),
         collection_prefix(2),
         collection_prefix(3),
         collection_prefix(4),
+        near_sdk::borsh::to_vec(&None::<near_sdk::PublicKey>).unwrap(),
     ]
     .concat();
     sandbox
         .patch_state(
             &engine_id,
             &key,
-            &near_sdk::borsh::to_vec(&state_before_fee_discounts).unwrap(),
+            &near_sdk::borsh::to_vec(&state_before_referral_fees).unwrap(),
         )
         .await
         .unwrap();

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{Cli, rewind_xyk_state_to_before_fee_discounts, start_sandbox_with_xyk_pools};
+use common::{Cli, rewind_xyk_state_to_before_referral_fees, start_sandbox_with_xyk_pools};
 use intear_dex_test_support::get_compiled_wasms;
 use intear_dex_types::{AssetId, DexId};
 use near_sdk::json_types::Base64VecU8;
@@ -268,8 +268,6 @@ async fn dex_lifecycle() {
                 "--name",
                 "xyk-test",
                 "--migrate",
-                "--fee-discount-signer",
-                &fee_discount_signer,
                 "use-file",
                 xyk_wasm_path
             ]
@@ -406,7 +404,7 @@ async fn dex_lifecycle() {
     );
 
     let test_dex_id: DexId = "slimedragon.near/xyk-test".parse().unwrap();
-    rewind_xyk_state_to_before_fee_discounts(&sandbox, &test_dex_id).await;
+    rewind_xyk_state_to_before_referral_fees(&sandbox, &test_dex_id).await;
     // Views read the final block, which takes a few blocks to include the patch
     for _ in 0..20 {
         sandbox.fast_forward(5).await.unwrap();
@@ -436,7 +434,7 @@ async fn dex_lifecycle() {
     let deploy_test_dex_code = |code_path: &str, migrates: bool| {
         let mut args = vec!["xyk", "deploy", "slimedragon.near", "--name", "xyk-test"];
         if migrates {
-            args.extend(["--migrate", "--fee-discount-signer", &fee_discount_signer]);
+            args.push("--migrate");
         }
         args.extend(["use-file", code_path]);
         args.into_iter().map(String::from).collect::<Vec<_>>()

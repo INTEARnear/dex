@@ -25,29 +25,11 @@ async fn xyk_writes() {
     let usdt = AssetId::Nep141("usdt.tether-token.near".parse().unwrap());
     let intel = AssetId::Nep141("intel.tkn.near".parse().unwrap());
 
-    // referrers set-settings and referrers register-fee-assets of the old CLI
+    // referrers register-fee-assets of the old CLI. Swaps name their referral
+    // fees, which are only paid in assets the referrer registered.
     insta::assert_snapshot!(
-        "referrer_show_without_settings",
+        "referrer_show_without_fee_assets",
         cli.view(&["xyk", "referrer", "show", "carol.near"])
-    );
-    insta::assert_snapshot!(
-        "referrer_set_fees_too_high",
-        cli.transaction(
-            "carol.near",
-            &["xyk", "referrer", "set-fees", "carol.near", "5%", "1%"]
-        )
-        .await
-    );
-    insta::assert_snapshot!(
-        "referrer_set_fees",
-        xyk_transaction_paying_storage(
-            &sandbox,
-            &cli,
-            "carol.near",
-            XYK_DEX_ID,
-            &["xyk", "referrer", "set-fees", "carol.near", "0.1%", "0.05%"]
-        )
-        .await
     );
     insta::assert_snapshot!(
         "referrer_register_fee_assets",
@@ -89,7 +71,7 @@ async fn xyk_writes() {
         cli.view(&["--json", "xyk", "referrer", "show", "carol.near"])
     );
     // Fees for the fee commands: alice.near collects 0.05% of pool #0's
-    // swaps, and carol.near its referral fee in NEAR. After each change made
+    // swaps, and carol.near a referral fee of 0.05% in NEAR. After each change made
     // around the CLI, the views of later commands wait for its block to be
     // final.
     swap_through_engine(
@@ -98,7 +80,7 @@ async fn xyk_writes() {
         0,
         (AssetId::Near, usdt.clone()),
         SwapRequestAmount::ExactIn(U128(ONE_NEAR)),
-        Some("carol.near"),
+        Some(("carol.near", 500)),
     )
     .await;
     swap_through_engine(

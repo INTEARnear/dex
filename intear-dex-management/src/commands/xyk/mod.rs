@@ -94,9 +94,9 @@ pub enum XykAction {
     /// NEAR that launch pools collected for community accounts
     CommunityFees(self::community_fees::CommunityFeesCommands),
     #[strum_discriminants(strum(
-        message = "referrer        - Referral fees: show, set-fees, register-fee-assets"
+        message = "referrer        - Assets referral fees are paid in: show, register-fee-assets"
     ))]
-    /// Referral fees: show, set-fees, register-fee-assets
+    /// Assets referral fees are paid in: show, register-fee-assets
     Referrer(self::referrer::ReferrerCommands),
     #[strum_discriminants(strum(
         message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"

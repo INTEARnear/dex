@@ -7,7 +7,6 @@ exit code: 0
 --- stdout ---
 Referrer          carol.near
 Dex               slimedragon.near/xyk
-Referral fee      not set
 Collects fees in  no pool asset, so it takes no referral fee
 --- stderr ---
 

@@ -19,13 +19,12 @@ use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 use xyk_dex_types::{
     AddLiquidityArgs, CAN_MIGRATE, CreatePoolArgs, CurrentFees, FULL_FEE_FRACTION,
-    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeReceiver,
-    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    GetReferralSettingsArgs, LockPoolArgs, MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId,
-    PoolType, PoolView, ReferralSettings, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
-    RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs, SetReferrerSettingsArgs,
-    SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute, UpgradePoolArgs, V2FeeConfiguration,
-    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeFraction, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, LockPoolArgs,
+    MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, ReferralFees,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve,
+    SetFeeDiscountSignerArgs, SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute,
+    UpgradePoolArgs, V2FeeConfiguration, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -123,25 +122,6 @@ async fn get_community_owned_fees(
             "dex_id": dex_id,
             "method": "get_community_owned_fees",
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetCommunityOwnedFeesArgs {
-                account_id: account_id.clone(),
-            }).unwrap()),
-        }))
-        .await
-        .unwrap();
-    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
-}
-
-async fn get_referral_settings(
-    dex_engine_contract: &Contract,
-    dex_id: &DexId,
-    account_id: &AccountId,
-) -> Option<ReferralSettings> {
-    let result = dex_engine_contract
-        .view("dex_view")
-        .args_json(json!({
-            "dex_id": dex_id,
-            "method": "get_referral_settings",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetReferralSettingsArgs {
                 account_id: account_id.clone(),
             }).unwrap()),
         }))
@@ -3894,17 +3874,18 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
 }
 
 #[tokio::test]
-async fn test_xyk_referral_fee_requires_registered_fee_asset() {
+async fn test_xyk_referral_fees_are_paid_in_registered_fee_assets() {
     let initial_near_deposit = NearToken::from_near(20);
     let storage_deposit_for_pool = NearToken::from_millinear(50);
-    let storage_deposit_for_referral_calls = NearToken::from_near(1);
+    let storage_deposit_for_fee_assets = NearToken::from_near(1);
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
-    let trader_ft1_for_swaps = 300_000_000u128;
+    let trader_ft1_for_swaps = 400_000_000u128;
     let first_swap_amount = 100_000_000u128;
     let second_swap_amount = 200_000_000u128;
-    let referral_fee_fraction = 20_000u32; // 2%
-    let referral_fee_fraction_reduced = 10_000u32; // 1%
+    let swap_without_referral_fees_amount = 100_000_000u128;
+    let user2_fee_fraction = 20_000u32; // 2%
+    let user3_fee_fraction = 10_000u32; // 1%
     let first_pool_id = 0u32;
 
     let wasms = get_compiled_wasms().await;
@@ -3916,6 +3897,9 @@ async fn test_xyk_referral_fee_requires_registered_fee_asset() {
         deployer,
         user1,
         user2,
+        user3,
+        user4,
+        user5,
         ..
     } = setup_test_environment_with_config(TestSetupConfig {
         dex: Some(DexSetupConfig {
@@ -4042,204 +4026,182 @@ async fn test_xyk_referral_fee_requires_registered_fee_asset() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let result = user2
-        .call(dex_engine_contract.id(), "deposit_near")
-        .max_gas()
-        .deposit(storage_deposit_for_referral_calls)
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    assert!(
-        get_referral_settings(&dex_engine_contract, &dex_id, user2.id())
-            .await
-            .is_none()
-    );
-    let result = user2
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": vec![
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "set_referrer_settings".to_string(),
-                    args: Base64VecU8(
-                        near_sdk::borsh::to_vec(&SetReferrerSettingsArgs {
-                            new_settings: ReferralSettings::V1 {
-                                fee_fraction: referral_fee_fraction,
-                                fee_fraction_reduced: referral_fee_fraction_reduced,
-                            },
-                        })
-                        .unwrap(),
-                    ),
-                    attached_assets: HashMap::from_iter([(
-                        AssetId::Near,
-                        U128(storage_deposit_for_referral_calls.as_yoctonear()),
-                    )]),
-                },
-            ],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    assert!(matches!(
-        get_referral_settings(&dex_engine_contract, &dex_id, user2.id()).await,
-        Some(ReferralSettings::V1 {
-            fee_fraction,
-            fee_fraction_reduced,
-        }) if fee_fraction == referral_fee_fraction
-            && fee_fraction_reduced == referral_fee_fraction_reduced
-    ));
-
-    let result = user1
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": vec![
-                Operation::SwapSimple {
-                    dex_id: dex_id.clone(),
-                    message: Base64VecU8(
-                        near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id))
-                        .unwrap(),
-                    ),
-                    asset_in: AssetId::Nep141(ft1.id().clone()),
-                    asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(first_swap_amount))),
-                    constraint: None,
-                },
-                Operation::Withdraw {
-                    asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: WithdrawAmount::Full { at_least: None },
-                    to: None,
-                    rescue_address: None,
-                },
-            ],
-            "referrer": user2.id(),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
+    let swap = |amount: u128, referral_fees: Vec<(AccountId, FeeFraction)>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": vec![
+                    Operation::SwapSimple {
+                        dex_id: dex_id.clone(),
+                        message: Base64VecU8(
+                            near_sdk::borsh::to_vec(&SwapArgs {
+                                referral_fees: ReferralFees(referral_fees),
+                                ..SwapArgs::single_pool(first_pool_id)
+                            })
+                            .unwrap(),
+                        ),
+                        asset_in: AssetId::Nep141(ft1.id().clone()),
+                        asset_out: AssetId::Nep141(ft2.id().clone()),
+                        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount))),
+                        constraint: None,
+                    },
+                    Operation::Withdraw {
+                        asset_id: AssetId::Nep141(ft2.id().clone()),
+                        amount: WithdrawAmount::Full { at_least: None },
+                        to: None,
+                        rescue_address: None,
+                    },
+                ],
+                "referrer": user2.id(),
+            }))
+            .transact()
+    };
+    let register_fee_assets = |referrer: &Account| {
+        let referrer = referrer.clone();
+        let dex_engine_contract = dex_engine_contract.clone();
+        let dex_id = dex_id.clone();
+        let asset_id = AssetId::Nep141(ft1.id().clone());
+        async move {
+            let result = referrer
+                .call(dex_engine_contract.id(), "deposit_near")
+                .max_gas()
+                .deposit(storage_deposit_for_fee_assets)
+                .args_json(json!({}))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+            let result = referrer
+                .call(dex_engine_contract.id(), "execute_operations")
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .args_json(json!({
+                    "operations": vec![
+                        Operation::DexCall {
+                            dex_id: dex_id.clone(),
+                            method: "register_fee_assets".to_string(),
+                            args: Base64VecU8(
+                                near_sdk::borsh::to_vec(&RegisterFeeAssetsArgs {
+                                    asset_ids: vec![asset_id],
+                                })
+                                .unwrap(),
+                            ),
+                            attached_assets: HashMap::from_iter([(
+                                AssetId::Near,
+                                U128(storage_deposit_for_fee_assets.as_yoctonear()),
+                            )]),
+                        },
+                    ],
+                }))
+                .transact()
+                .await
+                .unwrap();
+            assert_success(&result).unwrap();
+        }
+    };
     let referral_fee_asset_id = AssetId::Nep141(ft1.id().clone());
-    let referral_fees_before_registration = get_pending_fees(
-        &dex_engine_contract,
-        &dex_id,
-        user2.id(),
-        vec![referral_fee_asset_id.clone()],
-    )
-    .await;
-    assert_eq!(
-        referral_fees_before_registration
+    let pending_referral_fee = |referrer: AccountId| {
+        let dex_engine_contract = dex_engine_contract.clone();
+        let dex_id = dex_id.clone();
+        let referral_fee_asset_id = referral_fee_asset_id.clone();
+        async move {
+            get_pending_fees(
+                &dex_engine_contract,
+                &dex_id,
+                &referrer,
+                vec![referral_fee_asset_id.clone()],
+            )
+            .await
             .get(&referral_fee_asset_id)
-            .cloned(),
-        None
+            .cloned()
+        }
+    };
+    let fee_of = |amount: u128, fee_fraction: FeeFraction| {
+        amount
+            .checked_mul(fee_fraction as u128)
+            .unwrap()
+            .checked_div(1_000_000)
+            .unwrap()
+    };
+    let referral_fees = vec![
+        (user2.id().clone(), user2_fee_fraction),
+        (user3.id().clone(), user3_fee_fraction),
+    ];
+
+    // Only user2 collects fees in ft1, so user3 isn't paid
+    register_fee_assets(&user2).await;
+    let result = swap(first_swap_amount, referral_fees.clone())
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        pending_referral_fee(user2.id().clone()).await,
+        Some(U128(fee_of(first_swap_amount, user2_fee_fraction)))
+    );
+    assert_eq!(pending_referral_fee(user3.id().clone()).await, None);
+
+    // Both collect fees in ft1 now
+    register_fee_assets(&user3).await;
+    let result = swap(second_swap_amount, referral_fees.clone())
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let user2_fees = fee_of(first_swap_amount, user2_fee_fraction)
+        .checked_add(fee_of(second_swap_amount, user2_fee_fraction))
+        .unwrap();
+    let user3_fees = fee_of(second_swap_amount, user3_fee_fraction);
+    assert_eq!(
+        pending_referral_fee(user2.id().clone()).await,
+        Some(U128(user2_fees))
+    );
+    assert_eq!(
+        pending_referral_fee(user3.id().clone()).await,
+        Some(U128(user3_fees))
     );
 
-    let result = user2
-        .call(dex_engine_contract.id(), "deposit_near")
-        .max_gas()
-        .deposit(storage_deposit_for_referral_calls)
-        .args_json(json!({}))
-        .transact()
+    // Naming a referrer of the operations doesn't charge a fee
+    let result = swap(swap_without_referral_fees_amount, vec![])
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    let result = user2
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": vec![
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "register_fee_assets".to_string(),
-                    args: Base64VecU8(
-                        near_sdk::borsh::to_vec(&RegisterFeeAssetsArgs {
-                            asset_ids: vec![referral_fee_asset_id.clone()],
-                        })
-                        .unwrap(),
-                    ),
-                    attached_assets: HashMap::from_iter([(
-                        AssetId::Near,
-                        U128(storage_deposit_for_referral_calls.as_yoctonear()),
-                    )]),
-                },
-            ],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let referral_fees_after_registration = get_pending_fees(
-        &dex_engine_contract,
-        &dex_id,
-        user2.id(),
-        vec![referral_fee_asset_id.clone()],
-    )
-    .await;
     assert_eq!(
-        referral_fees_after_registration
-            .get(&referral_fee_asset_id)
-            .cloned(),
-        Some(U128(0))
+        pending_referral_fee(user2.id().clone()).await,
+        Some(U128(user2_fees))
     );
 
-    let result = user1
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": vec![
-                Operation::SwapSimple {
-                    dex_id: dex_id.clone(),
-                    message: Base64VecU8(
-                        near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id))
-                        .unwrap(),
-                    ),
-                    asset_in: AssetId::Nep141(ft1.id().clone()),
-                    asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(second_swap_amount))),
-                    constraint: None,
-                },
-                Operation::Withdraw {
-                    asset_id: AssetId::Nep141(ft2.id().clone()),
-                    amount: WithdrawAmount::Full { at_least: None },
-                    to: None,
-                    rescue_address: None,
-                },
+    let referrers =
+        [&user2, &user3, &user4, &user5, &deployer, &user1].map(|referrer| referrer.id().clone());
+    for (referral_fees, error) in [
+        (
+            referrers
+                .iter()
+                .map(|referrer| (referrer.clone(), 1_000))
+                .collect(),
+            "At most 5 referrers are allowed",
+        ),
+        (
+            vec![(referrers[0].clone(), 1_000), (referrers[0].clone(), 1_000)],
+            "Each referrer can only be listed once",
+        ),
+        (
+            vec![
+                (referrers[0].clone(), 30_000),
+                (referrers[1].clone(), 20_001),
             ],
-            "referrer": user2.id(),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let referral_fees_after_second_swap = get_pending_fees(
-        &dex_engine_contract,
-        &dex_id,
-        user2.id(),
-        vec![referral_fee_asset_id.clone()],
-    )
-    .await;
-    let expected_referral_fee = second_swap_amount
-        .checked_mul(referral_fee_fraction as u128)
-        .unwrap()
-        .checked_div(1_000_000)
-        .unwrap();
+            "Referral fees must add up to at most 50000",
+        ),
+    ] {
+        let result = swap(first_swap_amount, referral_fees).await.unwrap();
+        assert!(
+            format!("{result:?}").contains(error),
+            "Expected {error:?}, got {result:#?}"
+        );
+    }
     assert_eq!(
-        referral_fees_after_second_swap
-            .get(&referral_fee_asset_id)
-            .cloned(),
-        Some(U128(expected_referral_fee))
+        pending_referral_fee(user2.id().clone()).await,
+        Some(U128(user2_fees))
     );
 }
 
@@ -5732,6 +5694,7 @@ async fn test_xyk_route_fee_discount() {
                             fee_discount: fee_discount.map(|fee_discount| {
                                 sign_fee_discount(fee_discount, &fee_discount_signer)
                             }),
+                            referral_fees: ReferralFees::default(),
                         })
                         .unwrap(),
                     ),

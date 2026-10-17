@@ -10,7 +10,7 @@ use near_sdk::json_types::U128;
 use near_sdk::{NearToken, PublicKey};
 use xyk_dex_types::{
     GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
-    GetReferralSettingsArgs, PoolId, PoolNeedsUpgradeArgs, PoolView, ReferralSettings,
+    PoolId, PoolNeedsUpgradeArgs, PoolView,
 };
 
 use super::ViewPanicked;
@@ -189,23 +189,6 @@ pub fn community_owned_fees(
         dex_id,
         "get_community_owned_fees",
         &GetCommunityOwnedFeesArgs {
-            account_id: account_id.clone(),
-        },
-    )
-}
-
-pub fn referral_settings(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-    dex_id: &DexId,
-    account_id: &AccountId,
-) -> color_eyre::eyre::Result<Option<ReferralSettings>> {
-    dex_view(
-        network_config,
-        block_reference,
-        dex_id,
-        "get_referral_settings",
-        &GetReferralSettingsArgs {
             account_id: account_id.clone(),
         },
     )

@@ -49,7 +49,9 @@ pub const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
     NEAR_ACCOUNT_ID,
 ];
 pub const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
+/// The most all referrers of a swap can charge together
 pub const MAX_REFERRAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 20; // 5%
+pub const MAX_REFERRERS: usize = 5;
 const _: () = assert!(
     MAX_TOTAL_FEE_FRACTION + PROTOCOL_FEE + MAX_REFERRAL_FEE_FRACTION < FULL_FEE_FRACTION,
     "Pool, protocol, and referral fees combined must stay below 100%"
@@ -61,6 +63,10 @@ pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.n
 pub struct SwapArgs {
     pub routes: Vec<SwapRoute>,
     pub fee_discount: Option<SignedFeeDiscount>,
+    /// Fees the swap pays referrers on top of pool and protocol fees, in the
+    /// asset the pool takes fees in. A referrer who hasn't registered that
+    /// asset with [`RegisterFeeAssetsArgs`] isn't paid.
+    pub referral_fees: ReferralFees,
 }
 
 impl SwapArgs {
@@ -71,23 +77,32 @@ impl SwapArgs {
                 pool_ids: vec![pool_id],
             }],
             fee_discount: None,
+            referral_fees: ReferralFees::default(),
         }
     }
 }
 
-/// A swap through a single pool without a fee discount is serialized as just
-/// its pool ID, which is what dex versions from before routes read
+/// A swap through a single pool without a fee discount or referral fees is
+/// serialized as just its pool ID, which is what dex versions from before
+/// routes read, and one without referral fees leaves them out, as dex versions
+/// from before them read it
 impl BorshSerialize for SwapArgs {
     fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
-        if let ([SwapRoute { fraction, pool_ids }], None) =
-            (self.routes.as_slice(), &self.fee_discount)
-            && *fraction == FULL_SPLIT_FRACTION
+        if let ([SwapRoute { fraction, pool_ids }], None, []) = (
+            self.routes.as_slice(),
+            &self.fee_discount,
+            self.referral_fees.0.as_slice(),
+        ) && *fraction == FULL_SPLIT_FRACTION
             && let [pool_id] = pool_ids.as_slice()
         {
             return pool_id.serialize(writer);
         }
         self.routes.serialize(writer)?;
-        self.fee_discount.serialize(writer)
+        self.fee_discount.serialize(writer)?;
+        if !self.referral_fees.0.is_empty() {
+            self.referral_fees.serialize(writer)?;
+        }
+        Ok(())
     }
 }
 
@@ -98,11 +113,54 @@ impl BorshDeserialize for SwapArgs {
         if let Ok(pool_id) = <[u8; 4]>::try_from(bytes.as_slice()) {
             return Ok(Self::single_pool(PoolId::from_le_bytes(pool_id)));
         }
-        let (routes, fee_discount) = near_sdk::borsh::from_slice(&bytes)?;
+        let mut rest = bytes.as_slice();
+        let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
+        let fee_discount = Option::<SignedFeeDiscount>::deserialize(&mut rest)?;
+        let referral_fees = if rest.is_empty() {
+            ReferralFees::default()
+        } else {
+            ReferralFees::deserialize(&mut rest)?
+        };
+        if !rest.is_empty() {
+            return Err(near_sdk::borsh::io::Error::new(
+                near_sdk::borsh::io::ErrorKind::InvalidData,
+                "Unexpected bytes after swap args",
+            ));
+        }
         Ok(Self {
             routes,
             fee_discount,
+            referral_fees,
         })
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone, Default, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
+
+impl ReferralFees {
+    pub fn validate(&self) -> Result<(), ReferralFeesError> {
+        if self.0.len() > MAX_REFERRERS {
+            return Err(ReferralFeesError::TooManyReferrers);
+        }
+        let mut total_fee_fraction: FeeFraction = 0;
+        for (i, (referrer_id, fee_fraction)) in self.0.iter().enumerate() {
+            if self.0[..i]
+                .iter()
+                .any(|(other_id, _)| other_id == referrer_id)
+            {
+                return Err(ReferralFeesError::DuplicateReferrer);
+            }
+            total_fee_fraction = total_fee_fraction
+                .checked_add(*fee_fraction)
+                .ok_or(ReferralFeesError::TotalTooHigh)?;
+        }
+        if total_fee_fraction > MAX_REFERRAL_FEE_FRACTION {
+            return Err(ReferralFeesError::TotalTooHigh);
+        }
+        Ok(())
     }
 }
 
@@ -148,9 +206,7 @@ pub struct FeeDiscount {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct MigrateArgs {
-    pub fee_discount_signer_public_key: PublicKey,
-}
+pub struct MigrateArgs;
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -234,12 +290,6 @@ pub struct LockPoolArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct SetReferrerSettingsArgs {
-    pub new_settings: ReferralSettings,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct RegisterFeeAssetsArgs {
     pub asset_ids: Vec<AssetId>,
 }
@@ -286,12 +336,6 @@ pub struct PoolNeedsUpgradeArgs {
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct GetCommunityOwnedFeesArgs {
-    pub account_id: AccountId,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct GetReferralSettingsArgs {
     pub account_id: AccountId,
 }
 
@@ -410,16 +454,6 @@ pub enum FeeReceiver {
     Account(AccountId),
     Pool,
     Community(AccountId),
-}
-
-#[near(serializers=[borsh])]
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum ReferralSettings {
-    V1 {
-        fee_fraction: FeeFraction,
-        fee_fraction_reduced: FeeFraction,
-    },
 }
 
 /// The events of the dex, logged as borsh with the engine's `dex_event` host function and
@@ -857,16 +891,6 @@ impl CurrentFees {
         })
     }
 
-    /// With the referral fee of `referrer_id` last, as the dex adds it to the pool and protocol
-    /// fees of a swap, which a fee discount doesn't reduce. The same fees for a fee of 0.
-    pub fn with_referral_fee(mut self, referrer_id: AccountId, fee_fraction: FeeFraction) -> Self {
-        if fee_fraction > 0 {
-            self.receivers
-                .push((FeeReceiver::Account(referrer_id), fee_fraction));
-        }
-        self
-    }
-
     /// Each fee is rounded down after the discount
     pub fn discounted(mut self, fee_discount: FeeFractionFraction) -> CurrentFees {
         let remaining_fee_share = FULL_FEE_FRACTION_FRACTION
@@ -883,39 +907,27 @@ impl CurrentFees {
         }
         self
     }
-}
 
-impl ReferralSettings {
-    pub fn validate(&self) -> Result<(), ReferralSettingsError> {
-        match self {
-            ReferralSettings::V1 {
-                fee_fraction,
-                fee_fraction_reduced,
-            } => {
-                if *fee_fraction > MAX_REFERRAL_FEE_FRACTION {
-                    return Err(ReferralSettingsError::FeeFractionTooHigh);
-                }
-                if *fee_fraction_reduced > MAX_REFERRAL_FEE_FRACTION {
-                    return Err(ReferralSettingsError::FeeFractionReducedTooHigh);
-                }
-            }
-        }
-        Ok(())
+    pub fn with_referral_fees(
+        self,
+        referral_fees: &ReferralFees,
+        is_registered: impl Fn(&AccountId) -> bool,
+    ) -> Self {
+        referral_fees
+            .0
+            .iter()
+            .filter(|(referrer_id, _)| is_registered(referrer_id))
+            .fold(self, |fees, (referrer_id, fee_fraction)| {
+                fees.with_referral_fee(referrer_id.clone(), *fee_fraction)
+            })
     }
 
-    pub fn fee_fraction(&self, asset_account_ids: &[&AccountIdRef]) -> FeeFraction {
-        match self {
-            ReferralSettings::V1 {
-                fee_fraction,
-                fee_fraction_reduced,
-            } => {
-                if should_reduce_fee(asset_account_ids) {
-                    *fee_fraction_reduced
-                } else {
-                    *fee_fraction
-                }
-            }
+    pub fn with_referral_fee(mut self, referrer_id: AccountId, fee_fraction: FeeFraction) -> Self {
+        if fee_fraction > 0 {
+            self.receivers
+                .push((FeeReceiver::Account(referrer_id), fee_fraction));
         }
+        self
     }
 }
 
@@ -998,24 +1010,23 @@ impl fmt::Display for FeeConfigurationError {
 impl std::error::Error for FeeConfigurationError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferralSettingsError {
-    FeeFractionTooHigh,
-    FeeFractionReducedTooHigh,
+pub enum ReferralFeesError {
+    TooManyReferrers,
+    DuplicateReferrer,
+    TotalTooHigh,
 }
 
-impl fmt::Display for ReferralSettingsError {
+impl fmt::Display for ReferralFeesError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FeeFractionTooHigh => write!(
+            Self::TooManyReferrers => write!(f, "At most {MAX_REFERRERS} referrers are allowed"),
+            Self::DuplicateReferrer => write!(f, "Each referrer can only be listed once"),
+            Self::TotalTooHigh => write!(
                 f,
-                "Fee fraction must be at most {MAX_REFERRAL_FEE_FRACTION}"
-            ),
-            Self::FeeFractionReducedTooHigh => write!(
-                f,
-                "Fee fraction reduced must be at most {MAX_REFERRAL_FEE_FRACTION}"
+                "Referral fees must add up to at most {MAX_REFERRAL_FEE_FRACTION}"
             ),
         }
     }
 }
 
-impl std::error::Error for ReferralSettingsError {}
+impl std::error::Error for ReferralFeesError {}

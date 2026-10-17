@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::str::FromStr;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
@@ -20,7 +19,7 @@ use crate::chain::xyk::{self, XykState};
 use crate::deployment::{DEFAULT_XYK_DEX_NAME, ENGINE_ACCOUNT_ID};
 use crate::errors::PreflightError;
 use crate::outcome::{ExpectedDeployment, ExpectedOutcome};
-use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, storage, xyk_storage};
+use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, storage};
 
 const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(100);
 const MIGRATE_GAS: Gas = Gas::from_teragas(50);
@@ -42,10 +41,6 @@ pub struct Deploy {
     #[interactive_clap(skip_default_input_arg)]
     /// Migrate the dex's state to the new code's layout in the same receipt, so that a failed migration reverts the deploy
     migrate: bool,
-    #[interactive_clap(long)]
-    #[interactive_clap(skip_default_input_arg)]
-    /// The key that the migration sets for signing fee discounts, e.g. 'ed25519:…'
-    fee_discount_signer: Option<near_cli_rs::types::public_key::PublicKey>,
     #[interactive_clap(subcommand)]
     code: DeployCode,
 }
@@ -76,24 +71,6 @@ impl Deploy {
         .prompt()
         {
             Ok(migrates) => Ok(Some(migrates)),
-            Err(
-                inquire::error::InquireError::OperationCanceled
-                | inquire::error::InquireError::OperationInterrupted,
-            ) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    fn input_fee_discount_signer(
-        _context: &XykContext,
-    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::public_key::PublicKey>> {
-        match inquire::CustomType::new(
-            "Which key does the migration set for signing fee discounts? e.g. ed25519:…",
-        )
-        .with_error_message("That isn't a public key like ed25519:…")
-        .prompt()
-        {
-            Ok(fee_discount_signer) => Ok(Some(fee_discount_signer)),
             Err(
                 inquire::error::InquireError::OperationCanceled
                 | inquire::error::InquireError::OperationInterrupted,
@@ -143,18 +120,10 @@ impl interactive_clap::FromCli for Deploy {
                 Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
             };
         }
-        if clap_variant.migrate && clap_variant.fee_discount_signer.is_none() {
-            clap_variant.fee_discount_signer = match Self::input_fee_discount_signer(&context) {
-                Ok(Some(fee_discount_signer)) => Some(fee_discount_signer),
-                Ok(None) => return interactive_clap::ResultFromCli::Cancel(Some(clap_variant)),
-                Err(err) => return interactive_clap::ResultFromCli::Err(Some(clap_variant), err),
-            };
-        }
         let new_context_scope = InteractiveClapContextScopeForDeploy {
             signer_account_id,
             name: clap_variant.name.clone(),
             migrate: clap_variant.migrate,
-            fee_discount_signer: clap_variant.fee_discount_signer.clone(),
         };
         let context = match DeployContext::from_previous_context(context, &new_context_scope) {
             Ok(context) => context,
@@ -244,25 +213,10 @@ impl DeployContext {
             &scope.signer_account_id,
             scope.name.as_deref(),
         )?;
-        let migrate_args = match (scope.migrate, &scope.fee_discount_signer) {
-            (true, Some(fee_discount_signer)) => near_sdk::borsh::to_vec(&MigrateArgs {
-                fee_discount_signer_public_key: near_sdk::PublicKey::from_str(
-                    &fee_discount_signer.to_string(),
-                )
-                .map_err(|e| {
-                    eyre!("Failed to convert near_cli_rs PublicKey to near_sdk PublicKey: {e}")
-                })?,
-            })?,
-            (true, None) => {
-                return Err(eyre!("The migration needs the fee discount signer's key")
-                    .suggestion("Add --fee-discount-signer ed25519:… after --migrate"));
-            }
-            (false, Some(_)) => {
-                return Err(eyre!(
-                    "--fee-discount-signer is set by the migration, so it only goes with --migrate"
-                ));
-            }
-            (false, None) => Vec::new(),
+        let migrate_args = if scope.migrate {
+            near_sdk::borsh::to_vec(&MigrateArgs)?
+        } else {
+            Vec::new()
         };
         Ok(Self {
             global_context: previous_context.global_context,
@@ -515,21 +469,13 @@ fn deploy_action_context(
             code.len(),
             preflight.protocol_limits.extra_bytes_per_record,
         )?;
-        let stored_bytes = if migrates {
-            code_bytes
-                .checked_add(xyk_storage::migration_growth_bytes())
-                .ok_or_else(|| eyre!("Storage size overflow"))?
-        } else {
-            code_bytes
-        };
-        if let Some(storage_top_up) = preflight.dex_storage_top_up(&dex_id, stored_bytes)? {
+        // Migrating drops the map of referral settings from the state, so it
+        // only frees storage
+        if let Some(storage_top_up) = preflight.dex_storage_top_up(&dex_id, code_bytes)? {
             steps.push(storage_top_up.step(match (is_upgrade, migrates) {
                 (false, _) => "the code",
-                (true, false) => {
+                (true, _) => {
                     "all of the new code, since the old code's size can't be read; what the old code used becomes available again"
-                }
-                (true, true) => {
-                    "all of the new code and the migrated state, since the old code's size can't be read; what the old code used becomes available again"
                 }
             }));
             function_calls.push(storage_top_up.function_call());

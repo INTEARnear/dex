@@ -2,7 +2,7 @@
 source: intear-dex-management/tests/dex_lifecycle.rs
 expression: "without_code_size(cli.transaction(\"slimedragon.near\",\n&deploy_test_dex_code(xyk_wasm_path,\ntrue).iter().map(String::as_str).collect::<Vec<_>>()).await).replace(xyk_wasm_path,\n\"[TEMP]/xyk_dex.wasm\")"
 ---
-$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:[HASH] use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+$ near-intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
 exit code: 0
 --- stdout ---
 ""
@@ -10,7 +10,7 @@ exit code: 0
 ""
 --- stderr ---
 ├  sandbox · signer slimedragon.near · dex.intear.near
-│  Deposit [AMOUNT] NEAR into slimedragon.near/xyk-test's storage balance on dex.intear.near, which then covers all of the new code and the migrated state, since the old code's size can't be read; what the old code used becomes available again
+│  Deposit [AMOUNT] NEAR into slimedragon.near/xyk-test's storage balance on dex.intear.near, which then covers all of the new code, since the old code's size can't be read; what the old code used becomes available again
 │  Deploy [SIZE] bytes of code (sha256 [HASH]) to slimedragon.near/xyk-test, replacing its code
 │  Migrate the state of slimedragon.near/xyk-test to the new code's layout in the same receipt; if the migration fails, the deploy is reverted too
 │  Actions: dex_storage_deposit ([AMOUNT] NEAR, 10 Tgas), deploy_dex_code (1 yoctoNEAR, 100 Tgas), dex_call (1 yoctoNEAR, 50 Tgas)
@@ -38,7 +38,7 @@ exit code: 0
 │                       args:         {
 │                                       "dex_id": "slimedragon.near/xyk-test",
 │                                       "method": "migrate",
-│                                       "args": "IQAAAACdcLmWbqV+DF209w1+O8dyGlgGedR+/JeGsOKDSqMB8A==",
+│                                       "args": "",
 │                                       "attached_assets": {},
 │                                       "referrer": null
 │                                     }
@@ -87,4 +87,4 @@ The "dex_call" call to <dex.intear.near> on behalf of <slimedragon.near> succeed
 
 
 Here is your console command if you need to script it or re-run:
-    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate --fee-discount-signer ed25519:[HASH] use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send
+    near intear-dex-management xyk deploy slimedragon.near --name xyk-test --migrate use-file [TEMP]/xyk_dex.wasm network-config sandbox sign-with-plaintext-private-key ed25519:3Jr44c7TzFcexmD2nYX7qD5Vm8td8GdDqTK4MvRKi6mCijP254c7sRtTvYDLF3kngAuBosWUkGokz1qYLZSkNyrn send

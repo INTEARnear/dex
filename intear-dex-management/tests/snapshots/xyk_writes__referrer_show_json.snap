@@ -8,16 +8,6 @@ exit code: 0
 {
   "account_id": "carol.near",
   "dex_id": "slimedragon.near/xyk",
-  "referral_fees": {
-    "fee": {
-      "fraction": 1000,
-      "percent": "0.1"
-    },
-    "reduced_fee": {
-      "fraction": 500,
-      "percent": "0.05"
-    }
-  },
   "fee_asset_ids": [
     "near",
     "nep141:usdt.tether-token.near"

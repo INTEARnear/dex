@@ -8,8 +8,7 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, expect,
 };
 use near_sdk::{
-    AccountId, AccountIdRef, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey,
-    assert_one_yocto,
+    AccountId, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey, assert_one_yocto,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -18,12 +17,11 @@ use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
     CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfiguration,
     FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, GetReferralSettingsArgs, INITIAL_SHARES,
-    LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId,
-    PoolNeedsUpgradeArgs, PoolType, PoolView, ReferralSettings, RegisterFeeAssetsArgs,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, SetFeeDiscountSignerArgs,
-    SetReferrerSettingsArgs, SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs,
-    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
+    LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView,
+    ReferralFees, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SignedFeeDiscount, SwapArgs, SwapRoute,
+    UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
     math::{
         exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
         shares_to_tokens, tokens_to_shares,
@@ -61,7 +59,7 @@ enum StorageKey {
     Pools,
     PublicPoolUserShares { pool_id: PoolId },
     FeesCollectedByUsers,
-    ReferralSettings,
+    UnusedReferralSettings,
     CommunityOwnedFees,
 }
 
@@ -71,7 +69,7 @@ enum StorageKey {
 pub struct XykDex {
     pools: Vector<Pool>,
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-    referral_settings: LookupMap<AccountId, ReferralSettings>,
+    _unused_referral_settings: LookupMap<AccountId, ()>,
     community_owned_fees: LookupMap<AccountId, NearToken>,
     fee_discount_signer_public_key: Option<PublicKey>,
 }
@@ -83,6 +81,7 @@ impl Dex for XykDex {
         let Ok(SwapArgs {
             routes,
             fee_discount,
+            referral_fees,
         }) = near_sdk::borsh::from_slice(&request.message.0)
         else {
             panic!("Invalid message");
@@ -99,11 +98,9 @@ impl Dex for XykDex {
         let fee_discount = fee_discount.map(|signed_fee_discount| {
             self.verify_fee_discount(signed_fee_discount, &routes, &request)
         });
-        let referral_settings = request.referrer.as_ref().and_then(|referrer_id| {
-            self.referral_settings
-                .get(referrer_id)
-                .map(|settings| (referrer_id.clone(), settings.clone()))
-        });
+        referral_fees
+            .validate()
+            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
@@ -139,7 +136,7 @@ impl Dex for XykDex {
                 &request,
                 amount,
                 fee_discount,
-                referral_settings.as_ref(),
+                &referral_fees,
                 &mut updated_pool_ids,
             );
             response.amount_in.0 = response
@@ -247,7 +244,7 @@ impl XykDex {
         request: &SwapRequest,
         amount: u128,
         fee_discount: Option<FeeFraction>,
-        referral_settings: Option<&(AccountId, ReferralSettings)>,
+        referral_fees: &ReferralFees,
         updated_pool_ids: &mut Vec<PoolId>,
     ) -> SwapResponse {
         expect!(!pool_ids.is_empty(), "Route has no pools");
@@ -284,7 +281,7 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
-                            referral_settings,
+                            referral_fees,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
@@ -304,7 +301,7 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
-                            referral_settings,
+                            referral_fees,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
@@ -325,7 +322,7 @@ impl XykDex {
         &mut self,
         pool_id: PoolId,
         fee_discount: Option<FeeFraction>,
-        referral_settings: Option<&(AccountId, ReferralSettings)>,
+        referral_fees: &ReferralFees,
         updated_pool_ids: &mut Vec<PoolId>,
         asset_in: AssetId,
         asset_out: AssetId,
@@ -547,20 +544,20 @@ impl XykDex {
         let fee_asset_account_ids = asset_account_ids([&asset_in, &asset_out]);
         let pool_and_protocol_fees =
             fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
-        let current_fees = with_referral_fee(
-            match fee_discount {
-                Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
-                None => pool_and_protocol_fees,
-            },
-            referral_settings,
-            &self.fees_collected_by_users,
-            if should_convert_fees_to_quote_asset {
-                asset_out.clone()
-            } else {
-                asset_in.clone()
-            },
-            &fee_asset_account_ids,
-        );
+        let current_fees = match fee_discount {
+            Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
+            None => pool_and_protocol_fees,
+        }
+        .with_referral_fees(referral_fees, |referrer_id| {
+            self.fees_collected_by_users.contains_key(&(
+                referrer_id.clone(),
+                if should_convert_fees_to_quote_asset {
+                    asset_out.clone()
+                } else {
+                    asset_in.clone()
+                },
+            ))
+        });
 
         let (fees_breakdown, response) = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
@@ -725,47 +722,9 @@ impl XykDex {
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
-            referral_settings: LookupMap::new(StorageKey::ReferralSettings),
+            _unused_referral_settings: LookupMap::new(StorageKey::UnusedReferralSettings),
             community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
             fee_discount_signer_public_key: None,
-        }
-    }
-
-    #[init(ignore_state)]
-    #[payable]
-    pub fn migrate(
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
-        #[serializer(borsh)] args: Vec<u8>,
-    ) -> Self {
-        assert_one_yocto();
-        expect!(
-            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
-            "Only owner can migrate"
-        );
-        let Ok(MigrateArgs {
-            fee_discount_signer_public_key,
-        }) = near_sdk::borsh::from_slice(&args)
-        else {
-            near_sdk::env::panic_str("Invalid args");
-        };
-        expect!(attached_assets.is_empty(), "No assets should be attached");
-
-        #[near(serializers=[borsh])]
-        pub struct OldXykDex {
-            pools: Vector<Pool>,
-            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-            referral_settings: LookupMap<AccountId, ReferralSettings>,
-            community_owned_fees: LookupMap<AccountId, NearToken>,
-        }
-
-        let old_state: OldXykDex = near_sdk::env::state_read().expect("State read failed");
-
-        XykDex {
-            pools: old_state.pools,
-            fees_collected_by_users: old_state.fees_collected_by_users,
-            referral_settings: old_state.referral_settings,
-            community_owned_fees: old_state.community_owned_fees,
-            fee_discount_signer_public_key: Some(fee_discount_signer_public_key),
         }
     }
 
@@ -2122,55 +2081,6 @@ impl XykDex {
 
     #[payable]
     #[result_serializer(borsh)]
-    pub fn set_referrer_settings(
-        &mut self,
-        #[allow(unused_mut)]
-        #[serializer(borsh)]
-        mut attached_assets: HashMap<AssetId, U128>,
-        #[serializer(borsh)] args: Vec<u8>,
-    ) -> DexCallResponse {
-        assert_one_yocto();
-        let Ok(SetReferrerSettingsArgs { new_settings }) = near_sdk::borsh::from_slice(&args)
-        else {
-            near_sdk::env::panic_str("Invalid args");
-        };
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
-        let storage_usage_before = near_sdk::env::storage_usage();
-        expect!(attached_assets.is_empty(), "No assets should be attached");
-        new_settings
-            .validate()
-            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
-        self.referral_settings
-            .insert(near_sdk::env::predecessor_account_id(), new_settings);
-        self.referral_settings.flush();
-        let storage_usage_after = near_sdk::env::storage_usage();
-        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
-            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
-        );
-        expect!(
-            let Some(leftover) = attached_near.checked_sub(storage_cost),
-            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
-        );
-        DexCallResponse {
-            asset_withdraw_requests: if !leftover.is_zero() {
-                vec![AssetWithdrawRequest {
-                    asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
-                    ),
-                }]
-            } else {
-                vec![]
-            },
-            add_storage_deposit: storage_cost,
-            ..Default::default()
-        }
-    }
-
-    #[payable]
-    #[result_serializer(borsh)]
     pub fn register_fee_assets(
         &mut self,
         #[allow(unused_mut)]
@@ -2358,34 +2268,4 @@ impl XykDex {
             .cloned()
             .unwrap_or_default()
     }
-
-    #[result_serializer(borsh)]
-    pub fn get_referral_settings(
-        &self,
-        #[serializer(borsh)] args: GetReferralSettingsArgs,
-    ) -> Option<ReferralSettings> {
-        let GetReferralSettingsArgs { account_id } = args;
-        self.referral_settings.get(&account_id).cloned()
-    }
-}
-
-fn with_referral_fee(
-    fees: CurrentFees,
-    referral_settings: Option<&(AccountId, ReferralSettings)>,
-    fees_collected_by_users: &LookupMap<(AccountId, AssetId), U128>,
-    fee_asset_id: AssetId,
-    asset_account_ids: &[&AccountIdRef],
-) -> CurrentFees {
-    let Some((referrer_id, settings)) = referral_settings else {
-        return fees;
-    };
-    let referral_fee_fraction = settings.fee_fraction(asset_account_ids);
-    if referral_fee_fraction == 0
-        || fees_collected_by_users
-            .get(&(referrer_id.clone(), fee_asset_id))
-            .is_none()
-    {
-        return fees;
-    }
-    fees.with_referral_fee(referrer_id.clone(), referral_fee_fraction)
 }
