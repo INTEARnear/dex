@@ -2303,20 +2303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "insta"
-version = "1.49.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
-dependencies = [
- "console",
- "once_cell",
- "regex",
- "similar",
- "strip-ansi-escapes",
- "tempfile",
-]
-
-[[package]]
 name = "intear-dex"
 version = "0.1.0"
 dependencies = [
@@ -2341,8 +2327,6 @@ dependencies = [
  "color-eyre",
  "crypto-bigint 0.6.1",
  "inquire",
- "insta",
- "intear-dex-test-support",
  "intear-dex-types",
  "interactive-clap",
  "interactive-clap-derive",
@@ -2353,16 +2337,12 @@ dependencies = [
  "near-jsonrpc-primitives 0.37.4",
  "near-primitives 0.37.4",
  "near-sdk",
- "near-workspaces",
  "prettytable",
- "regex",
  "serde",
  "serde_json",
  "shell-words",
  "strum 0.24.1",
- "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "tracing-indicatif",
  "xyk-dex-types",
@@ -5299,12 +5279,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
 name = "simple-amm-dex"
 version = "0.1.0"
 dependencies = [
@@ -5401,15 +5375,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "strip-ansi-escapes"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a8f8038e7e7969abb3f1b7c2a811225e9296da208539e0f79c5251d6cac0025"
-dependencies = [
- "vte 0.14.1",
-]
 
 [[package]]
 name = "strsim"
@@ -6172,16 +6137,7 @@ checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
 dependencies = [
  "itoa",
  "unicode-width 0.2.2",
- "vte 0.15.0",
-]
-
-[[package]]
-name = "vte"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "231fdcd7ef3037e8330d8e17e61011a2c244126acc0a982f4040ac3f9f0bc077"
-dependencies = [
- "memchr",
+ "vte",
 ]
 
 [[package]]
