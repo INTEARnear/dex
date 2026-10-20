@@ -3743,3 +3743,70 @@ async fn test_is_paused() {
         .unwrap();
     assert!(format!("{result:?}").contains("Contract is paused"));
 }
+#[tokio::test]
+async fn test_dex_code_view() {
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let wasms = get_compiled_wasms().await;
+    let dex_wasm = &wasms.minimal_dex_wasm;
+
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_storage_deposit")
+        .max_gas()
+        .deposit(engine_user_storage_deposit())
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": dex_id.id,
+            "code_base64": BASE64_STANDARD.encode(dex_wasm),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let code: Base64VecU8 = dex_engine_contract
+        .view("dex_code")
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(&code.0, dex_wasm);
+
+    let missing_dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "missing".to_string(),
+    };
+    let error = dex_engine_contract
+        .view("dex_code")
+        .args_json(json!({
+            "dex_id": missing_dex_id,
+        }))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("Dex code not found"),
+        "{error:?}"
+    );
+}

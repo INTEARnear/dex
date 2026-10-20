@@ -504,6 +504,15 @@ impl DexEngine {
         self.total_in_custody.get(&asset_id).copied()
     }
 
+    pub fn dex_code(&self, dex_id: DexId) -> Base64VecU8 {
+        Base64VecU8(
+            self.dex_codes
+                .get(&dex_id)
+                .expect("Dex code not found")
+                .clone(),
+        )
+    }
+
     // View method, but needs &mut for compatibility ergonomics with RunnerData
     pub fn dex_view(&self, dex_id: DexId, method: String, args: Base64VecU8) -> Base64VecU8 {
         self.internal_dex_view(dex_id, method, args)
