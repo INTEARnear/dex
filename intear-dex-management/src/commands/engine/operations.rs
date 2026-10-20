@@ -3,8 +3,8 @@ use std::io::Read;
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, Operation, SwapOperationAmount, SwapRequestAmount,
-    WithdrawAmount,
+    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount,
+    SwapRequestAmount, WithdrawAmount,
 };
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
@@ -34,6 +34,8 @@ struct ExecuteOperationsArgs {
     operations: Vec<Operation>,
     #[serde(default)]
     referrer: Option<AccountId>,
+    #[serde(default)]
+    referral_fees: Option<ReferralFees>,
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -110,6 +112,7 @@ impl RunContext {
         let ExecuteOperationsArgs {
             operations,
             referrer,
+            referral_fees,
         } = serde_json::from_slice(&file_bytes)
             .map_err(|error| {
                 eyre!(
@@ -121,6 +124,7 @@ impl RunContext {
                 format!("The arguments look like this:\n    {EXAMPLE_OPERATIONS}")
             })?;
         let execute_operations_args: serde_json::Value = serde_json::from_slice(&file_bytes)?;
+        let referral_fees = referral_fees.unwrap_or_default();
         if operations.is_empty() {
             return Err(eyre!("{} has no operations", scope.file));
         }
@@ -144,7 +148,10 @@ impl RunContext {
             move |preflight| {
                 preflight.ensure_engine_not_paused()?;
                 let signer_id = preflight.signer_id.clone();
-                let mut referenced_accounts: Vec<&AccountId> = referrer.iter().collect();
+                let mut referenced_accounts: Vec<&AccountId> = referrer
+                    .iter()
+                    .chain(referral_fees.0.iter().map(|(referrer_id, _)| referrer_id))
+                    .collect();
                 let mut referenced_dexes: Vec<&DexId> = Vec::new();
                 for operation in &operations {
                     match operation {
@@ -235,6 +242,12 @@ impl RunContext {
                 }
                 if let Some(referrer) = &referrer {
                     steps.push(format!("Name {referrer} as the referrer of the swaps"));
+                }
+                for (referrer_id, fee_fraction) in &referral_fees.0 {
+                    steps.push(format!(
+                        "{referrer_id} takes {} of the first swap's input as its referral fee, if it registered that asset on {ENGINE_ACCOUNT_ID}",
+                        display::format_fee(*fee_fraction)
+                    ));
                 }
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",

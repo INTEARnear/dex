@@ -113,8 +113,7 @@ impl Pool {
         }
     }
 
-    /// The fees of a swap at `timestamp`, with the protocol fee, but without the referral fee of
-    /// a referrer
+    /// The fees of a swap at `timestamp`, with the protocol fee
     pub fn current_fees(&self, timestamp: Timestamp) -> CurrentFees {
         let (asset_0, asset_1) = self.asset_ids();
         self.fee_configuration()

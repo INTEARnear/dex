@@ -16,7 +16,7 @@ use crate::{
 };
 use intear_dex_types::{
     AccountOrDexId, AssetId, CAN_PAUSE, DexEventData, DexId, DirectWithdrawAmount, IntearDexEvent,
-    Operation, SwapRequestAmount, expect,
+    Operation, ReferralFees, SwapRequestAmount, expect,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
@@ -325,6 +325,7 @@ impl DexEngine {
         asset_out: AssetId,
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
+        referral_fees: Option<ReferralFees>,
         constraint: Option<U128>,
     ) -> (U128, U128) {
         let mut events = CallEvents::default();
@@ -339,6 +340,7 @@ impl DexEngine {
             amount,
             TradeAccount::User(near_sdk::env::predecessor_account_id()),
             referrer,
+            referral_fees.unwrap_or_default(),
             constraint,
         );
         events.emit();
@@ -429,7 +431,12 @@ impl DexEngine {
     }
 
     #[payable]
-    pub fn execute_operations(&mut self, operations: Vec<Operation>, referrer: Option<AccountId>) {
+    pub fn execute_operations(
+        &mut self,
+        operations: Vec<Operation>,
+        referrer: Option<AccountId>,
+        referral_fees: Option<ReferralFees>,
+    ) {
         let mut events = CallEvents::default();
         expect!(
             !near_sdk::env::attached_deposit().is_zero(),
@@ -469,6 +476,7 @@ impl DexEngine {
             near_sdk::env::predecessor_account_id(),
             None,
             referrer,
+            referral_fees.unwrap_or_default(),
         );
         events.emit();
     }
@@ -530,10 +538,18 @@ impl DexEngine {
         asset_out: AssetId,
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
+        referral_fees: Option<ReferralFees>,
     ) -> (U128, U128) {
         self.assert_not_paused();
         self.internal_simulate_swap_simple(
-            dex_id, message, trader, asset_in, asset_out, amount, referrer,
+            dex_id,
+            message,
+            trader,
+            asset_in,
+            asset_out,
+            amount,
+            referrer,
+            referral_fees.unwrap_or_default(),
         )
     }
 

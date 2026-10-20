@@ -197,12 +197,6 @@ pub enum PreflightError {
         account_id: AccountId,
         dex_id: DexId,
     },
-    #[error("{owner} already collects fees in {assets} on {dex_id}")]
-    FeeAssetsAlreadyRegistered {
-        owner: AccountId,
-        assets: String,
-        dex_id: DexId,
-    },
     #[error(
         "{account_id} has no storage on {token_id}, so it can't receive the tokens in its wallet"
     )]
@@ -304,7 +298,6 @@ impl PreflightError {
             | Self::AmountsOfOneAsset { .. }
             | Self::NoPendingFees { .. }
             | Self::NoCommunityFees { .. }
-            | Self::FeeAssetsAlreadyRegistered { .. }
             | Self::FeeDiscountSignerUnchanged { .. } => None,
         };
         let report = Report::new(self);

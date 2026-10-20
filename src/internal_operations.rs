@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use intear_dex_types::{
     AccountOrDexId, AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest,
-    DexCallResponse, DexEventData, DexId, DirectWithdrawAmount, Operation, SwapOperationAmount,
-    SwapRequest, SwapRequestAmount, SwapResponse, WithdrawAmount, expect,
+    DexCallResponse, DexEventData, DexId, DirectWithdrawAmount, Operation, ReferralFees,
+    SwapOperationAmount, SwapRequest, SwapRequestAmount, SwapResponse, WithdrawAmount, expect,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -130,13 +130,21 @@ impl DexEngine {
         amount: SwapRequestAmount,
         trader: TradeAccount,
         referrer: Option<AccountId>,
+        referral_fees: ReferralFees,
         constraint: Option<U128>,
     ) -> (U128, U128) {
+        let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
+        let dex_amount = match amount {
+            SwapRequestAmount::ExactIn(amount_in) => SwapRequestAmount::ExactIn(
+                amount_in_after_fees(amount_in, &referral_fees.amounts_out_of(amount_in)),
+            ),
+            SwapRequestAmount::ExactOut(_) => amount,
+        };
         let swap_request = SwapRequest {
             message,
             asset_in,
             asset_out,
-            amount,
+            amount: dex_amount,
             referrer: referrer.clone(),
         };
 
@@ -171,6 +179,14 @@ impl DexEngine {
             }
             None => panic!("No response from swap"),
         };
+        let referral_fees_paid: Vec<(AccountId, U128)> = match amount {
+            SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
+            SwapRequestAmount::ExactOut(_) => referral_fees.amounts_on_top_of(response.amount_in),
+        }
+        .into_iter()
+        .filter(|(_, fee)| fee.0 > 0)
+        .collect();
+        let total_amount_in = amount_in_with_fees(response.amount_in, &referral_fees_paid);
         match swap_request.amount {
             SwapRequestAmount::ExactIn(exact_in) => {
                 expect!(exact_in == response.amount_in, "Amount in does not match");
@@ -188,7 +204,7 @@ impl DexEngine {
                 );
                 if let Some(constraint) = constraint {
                     expect!(
-                        response.amount_in <= constraint,
+                        total_amount_in <= constraint,
                         "Input amount is greater than constraint"
                     );
                 }
@@ -205,6 +221,15 @@ impl DexEngine {
                     swap_request.asset_in.clone(),
                     response.amount_in,
                 );
+                for (referrer_id, fee) in &referral_fees_paid {
+                    self.internal_transfer_asset(
+                        events,
+                        AccountOrDexId::Account(user_trader.clone()),
+                        AccountOrDexId::Account(referrer_id.clone()),
+                        swap_request.asset_in.clone(),
+                        *fee,
+                    );
+                }
                 // asset out
                 self.internal_transfer_asset(
                     events,
@@ -221,7 +246,7 @@ impl DexEngine {
                     .expect("Asset in not found in anonymous assets");
                 anon_swap_balance_in.0 = anon_swap_balance_in
                     .0
-                    .checked_sub(response.amount_in.0)
+                    .checked_sub(total_amount_in.0)
                     .expect("Not enough input balance in anonymous assets");
                 self.internal_increase_assets(
                     events,
@@ -229,6 +254,15 @@ impl DexEngine {
                     swap_request.asset_in.clone(),
                     response.amount_in,
                 );
+                for (referrer_id, fee) in &referral_fees_paid {
+                    // already decreased sandboxed balance by subtracting total_amount_in
+                    self.internal_increase_assets(
+                        events,
+                        AccountOrDexId::Account(referrer_id.clone()),
+                        swap_request.asset_in.clone(),
+                        *fee,
+                    );
+                }
                 // asset out
                 self.internal_decrease_assets(
                     events,
@@ -251,10 +285,32 @@ impl DexEngine {
             amount_out: response.amount_out,
             trader: alleged_trader,
             referrer,
+            referral_fees_paid,
         }
         .emit();
 
-        (response.amount_in, response.amount_out)
+        (total_amount_in, response.amount_out)
+    }
+
+    /// The referral fees of the referrers who registered `asset_in`, as only they can be paid
+    fn payable_referral_fees(
+        &self,
+        referral_fees: ReferralFees,
+        asset_in: &AssetId,
+    ) -> ReferralFees {
+        referral_fees.assert_valid();
+        ReferralFees(
+            referral_fees
+                .0
+                .into_iter()
+                .filter(|(referrer_id, _)| {
+                    self.asset_is_registered(
+                        AccountOrDexId::Account(referrer_id.clone()),
+                        asset_in.clone(),
+                    )
+                })
+                .collect(),
+        )
     }
 
     pub(crate) fn internal_dex_call(
@@ -424,12 +480,20 @@ impl DexEngine {
         asset_out: AssetId,
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
+        referral_fees: ReferralFees,
     ) -> (U128, U128) {
+        let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
+        let dex_amount = match amount {
+            SwapRequestAmount::ExactIn(amount_in) => SwapRequestAmount::ExactIn(
+                amount_in_after_fees(amount_in, &referral_fees.amounts_out_of(amount_in)),
+            ),
+            SwapRequestAmount::ExactOut(_) => amount,
+        };
         let swap_request = SwapRequest {
             message,
             asset_in,
             asset_out,
-            amount,
+            amount: dex_amount,
             referrer: referrer.clone(),
         };
 
@@ -464,8 +528,15 @@ impl DexEngine {
                 );
             }
         }
+        let referral_fees_paid = match amount {
+            SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
+            SwapRequestAmount::ExactOut(_) => referral_fees.amounts_on_top_of(response.amount_in),
+        };
 
-        (response.amount_in, response.amount_out)
+        (
+            amount_in_with_fees(response.amount_in, &referral_fees_paid),
+            response.amount_out,
+        )
     }
 
     pub(crate) fn internal_dex_view(
@@ -645,6 +716,7 @@ impl DexEngine {
         by: AccountId,
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
+        mut referral_fees_of_first_swap: ReferralFees,
     ) {
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
         near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
@@ -831,6 +903,7 @@ impl DexEngine {
                             None => TradeAccount::User(by.clone()),
                         },
                         referrer.clone(),
+                        std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
                     );
                     last_output = Some((asset_out, amount_out));
@@ -941,6 +1014,24 @@ impl DexEngine {
             );
         }
     }
+}
+
+fn amount_in_after_fees(amount_in: U128, referral_fees_paid: &[(AccountId, U128)]) -> U128 {
+    referral_fees_paid
+        .iter()
+        .try_fold(amount_in.0, |amount, (_, fee)| amount.checked_sub(fee.0))
+        .map(U128)
+        .expect("Referral fees exceed the amount in")
+}
+
+fn amount_in_with_fees(dex_amount_in: U128, referral_fees_paid: &[(AccountId, U128)]) -> U128 {
+    referral_fees_paid
+        .iter()
+        .try_fold(dex_amount_in.0, |amount, (_, fee)| {
+            amount.checked_add(fee.0)
+        })
+        .map(U128)
+        .expect("Overflow")
 }
 
 #[near]

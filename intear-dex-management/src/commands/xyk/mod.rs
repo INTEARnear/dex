@@ -25,7 +25,6 @@ pub mod liquidity;
 pub mod pool;
 pub mod pools;
 pub mod presentation;
-pub mod referrer;
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = crate::GlobalContext)]
@@ -93,11 +92,6 @@ pub enum XykAction {
     ))]
     /// NEAR that launch pools collected for community accounts
     CommunityFees(self::community_fees::CommunityFeesCommands),
-    #[strum_discriminants(strum(
-        message = "referrer        - Assets referral fees are paid in: show, register-fee-assets"
-    ))]
-    /// Assets referral fees are paid in: show, register-fee-assets
-    Referrer(self::referrer::ReferrerCommands),
     #[strum_discriminants(strum(
         message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"
     ))]

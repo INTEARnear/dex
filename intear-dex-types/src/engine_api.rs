@@ -7,7 +7,105 @@ use near_sdk::{
     serde::Deserialize,
 };
 
-use crate::{AssetId, DexId, SwapRequest, SwapRequestAmount};
+use crate::{AssetId, DexId, SwapRequest, SwapRequestAmount, expect};
+
+/// 100% = 1000000
+pub type FeeFraction = u32;
+pub const FULL_FEE_FRACTION: FeeFraction = 1000000;
+/// The most all referrers of a swap can charge together
+pub const MAX_REFERRAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 20; // 5%
+pub const MAX_REFERRERS: usize = 5;
+
+/// Fees a swap pays referrers out of its input, before the dex gets it. Each
+/// fee goes to the referrer's internal balance of the input asset, and a
+/// referrer who hasn't registered that asset isn't paid, so the trader keeps
+/// that fee. In a batch of operations, only the first swap pays them.
+#[derive(Clone, Default)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
+
+impl ReferralFees {
+    pub fn assert_valid(&self) {
+        expect!(
+            self.0.len() <= MAX_REFERRERS,
+            "At most {MAX_REFERRERS} referrers are allowed"
+        );
+        let total_fee_fraction = self
+            .0
+            .iter()
+            .try_fold(0 as FeeFraction, |total, (_, fee_fraction)| {
+                total.checked_add(*fee_fraction)
+            });
+        expect!(
+            total_fee_fraction.is_some_and(|total| total <= MAX_REFERRAL_FEE_FRACTION),
+            "Referral fees must add up to at most {MAX_REFERRAL_FEE_FRACTION}"
+        );
+    }
+
+    /// The fee of each referrer out of `amount_in` that includes the fees, rounded down
+    pub fn amounts_out_of(&self, amount_in: U128) -> Vec<(AccountId, U128)> {
+        self.0
+            .iter()
+            .map(|(referrer_id, fee_fraction)| {
+                let fee = fraction_of(amount_in.0, *fee_fraction, FULL_FEE_FRACTION, false);
+                (referrer_id.clone(), U128(fee))
+            })
+            .collect()
+    }
+
+    /// The fee of each referrer on top of `dex_amount_in`, rounded up, so that each fee is its
+    /// fraction of the total input
+    pub fn amounts_on_top_of(&self, dex_amount_in: U128) -> Vec<(AccountId, U128)> {
+        let total_fee_fraction: FeeFraction =
+            self.0.iter().map(|(_, fee_fraction)| *fee_fraction).sum();
+        let dex_fraction = FULL_FEE_FRACTION
+            .checked_sub(total_fee_fraction)
+            .expect("Referral fees exceed 100%");
+        self.0
+            .iter()
+            .map(|(referrer_id, fee_fraction)| {
+                let fee = fraction_of(dex_amount_in.0, *fee_fraction, dex_fraction, true);
+                (referrer_id.clone(), U128(fee))
+            })
+            .collect()
+    }
+}
+
+/// `amount * numerator / denominator`
+fn fraction_of(
+    amount: u128,
+    numerator: FeeFraction,
+    denominator: FeeFraction,
+    round_up: bool,
+) -> u128 {
+    let numerator = u128::from(numerator);
+    let denominator = u128::from(denominator);
+    expect!(
+        numerator < denominator,
+        "numerator must be less than denominator"
+    );
+    let whole_parts = amount
+        .checked_div(denominator)
+        .expect("Fraction of zero")
+        .checked_mul(numerator)
+        .expect("Overflow");
+    let remainder_part = amount
+        .checked_rem(denominator)
+        .expect("Fraction of zero")
+        .checked_mul(numerator)
+        .expect("Overflow");
+    let remainder_part_rounded = if round_up {
+        remainder_part.div_ceil(denominator)
+    } else {
+        remainder_part
+            .checked_div(denominator)
+            .expect("Fraction of zero")
+    };
+    whole_parts
+        .checked_add(remainder_part_rounded)
+        .expect("Overflow")
+}
 
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -118,6 +216,8 @@ pub enum DepositMessage {
     Advanced {
         operations: Vec<Operation>,
         referrer: Option<AccountId>,
+        #[serde(default)]
+        referral_fees: ReferralFees,
     },
 }
 
@@ -133,6 +233,13 @@ impl DepositMessage {
         match self {
             Self::Advanced { referrer, .. } => referrer.clone(),
             _ => None,
+        }
+    }
+
+    pub fn referral_fees(&self) -> ReferralFees {
+        match self {
+            Self::Advanced { referral_fees, .. } => referral_fees.clone(),
+            _ => ReferralFees::default(),
         }
     }
 }
@@ -229,6 +336,8 @@ mod deprecation_warning_workaround {
             amount_out: U128,
             trader: AccountId,
             referrer: Option<AccountId>,
+            #[serde(default)]
+            referral_fees_paid: Vec<(AccountId, U128)>,
         },
     }
 }

@@ -19,9 +19,9 @@ use xyk_dex_types::{
     FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs,
     GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
     LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView,
-    ReferralFees, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SignedFeeDiscount, SwapArgs, SwapRoute,
-    UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
+    SetFeeDiscountSignerArgs, SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs,
+    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
     math::{
         exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
         shares_to_tokens, tokens_to_shares,
@@ -81,7 +81,6 @@ impl Dex for XykDex {
         let Ok(SwapArgs {
             routes,
             fee_discount,
-            referral_fees,
         }) = near_sdk::borsh::from_slice(&request.message.0)
         else {
             panic!("Invalid message");
@@ -98,9 +97,6 @@ impl Dex for XykDex {
         let fee_discount = fee_discount.map(|signed_fee_discount| {
             self.verify_fee_discount(signed_fee_discount, &routes, &request)
         });
-        referral_fees
-            .validate()
-            .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
@@ -136,7 +132,6 @@ impl Dex for XykDex {
                 &request,
                 amount,
                 fee_discount,
-                &referral_fees,
                 &mut updated_pool_ids,
             );
             response.amount_in.0 = response
@@ -244,7 +239,6 @@ impl XykDex {
         request: &SwapRequest,
         amount: u128,
         fee_discount: Option<FeeFraction>,
-        referral_fees: &ReferralFees,
         updated_pool_ids: &mut Vec<PoolId>,
     ) -> SwapResponse {
         expect!(!pool_ids.is_empty(), "Route has no pools");
@@ -281,7 +275,6 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
-                            referral_fees,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
@@ -301,7 +294,6 @@ impl XykDex {
                         .swap_in_pool(
                             pool_id,
                             fee_discount,
-                            referral_fees,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
@@ -317,12 +309,10 @@ impl XykDex {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn swap_in_pool(
         &mut self,
         pool_id: PoolId,
         fee_discount: Option<FeeFraction>,
-        referral_fees: &ReferralFees,
         updated_pool_ids: &mut Vec<PoolId>,
         asset_in: AssetId,
         asset_out: AssetId,
@@ -547,17 +537,7 @@ impl XykDex {
         let current_fees = match fee_discount {
             Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
             None => pool_and_protocol_fees,
-        }
-        .with_referral_fees(referral_fees, |referrer_id| {
-            self.fees_collected_by_users.contains_key(&(
-                referrer_id.clone(),
-                if should_convert_fees_to_quote_asset {
-                    asset_out.clone()
-                } else {
-                    asset_in.clone()
-                },
-            ))
-        });
+        };
 
         let (fees_breakdown, response) = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {

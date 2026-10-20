@@ -41,6 +41,7 @@ impl DexEngine {
                 near_sdk::env::predecessor_account_id(),
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
                 message.referrer(),
+                message.referral_fees(),
             );
         } else {
             self.internal_increase_assets(
@@ -100,6 +101,7 @@ impl FungibleTokenReceiver for DexEngine {
                 sender_id,
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
                 message.referrer(),
+                message.referral_fees(),
             );
         } else {
             self.internal_increase_assets(
@@ -169,6 +171,7 @@ impl NonFungibleTokenReceiver for DexEngine {
                     U128(1),
                 )])),
                 message.referrer(),
+                message.referral_fees(),
             );
         } else {
             self.internal_increase_assets(
@@ -265,6 +268,7 @@ impl DexEngine {
                 sender_id,
                 Some(attached_assets),
                 message.referrer(),
+                message.referral_fees(),
             );
         } else {
             for ((token_id, previous_owner_id), amount) in token_ids
