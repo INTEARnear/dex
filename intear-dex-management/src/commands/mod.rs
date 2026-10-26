@@ -5,7 +5,9 @@
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 pub mod dex;
+pub mod dex_code;
 pub mod engine;
+pub mod otc;
 pub mod xyk;
 
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
@@ -28,4 +30,9 @@ pub enum TopLevelCommand {
     ))]
     /// The XYK dex (slimedragon.near/xyk unless --dex says otherwise)
     Xyk(self::xyk::XykCommands),
+    #[strum_discriminants(strum(
+        message = "otc     - The OTC dex (slimedragon.near/otc unless --dex says otherwise)"
+    ))]
+    /// The OTC dex (slimedragon.near/otc unless --dex says otherwise)
+    Otc(self::otc::OtcCommands),
 }

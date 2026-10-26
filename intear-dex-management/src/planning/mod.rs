@@ -1,3 +1,4 @@
+pub mod otc_storage;
 pub mod storage;
 pub mod xyk_math;
 pub mod xyk_storage;
@@ -420,6 +421,19 @@ impl Preflight {
             function_calls,
         })
     }
+}
+
+/// The NEAR that a dex takes for the storage it adds goes with the
+/// transaction into the signer's balance on the engine, and from there to
+/// the dex, so both need NEAR registered
+pub fn storage_near_registrations(
+    signer_id: &AccountId,
+    dex_id: &DexId,
+) -> [(AccountOrDexId, AssetId); 2] {
+    [
+        (AccountOrDexId::Account(signer_id.clone()), AssetId::Near),
+        (AccountOrDexId::Dex(dex_id.clone()), AssetId::Near),
+    ]
 }
 
 /// A call of `method` on a dex hosted by the engine, with `args` in borsh as

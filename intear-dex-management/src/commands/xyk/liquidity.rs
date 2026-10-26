@@ -465,7 +465,7 @@ impl AddMaxSlippageContext {
                                 preflight.protocol_limits.storage_byte_cost,
                             )?;
                             let registration_calls = preflight.registration_calls(
-                                &super::storage_near_registrations(&signer_id, &dex_id),
+                                &planning::storage_near_registrations(&signer_id, &dex_id),
                             )?;
                             steps.extend(registration_calls.steps);
                             function_calls.extend(registration_calls.function_calls);

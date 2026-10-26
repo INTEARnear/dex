@@ -4,6 +4,7 @@ pub mod custody;
 pub mod engine;
 pub mod fungible_token;
 pub mod networks;
+pub mod otc;
 pub mod protocol;
 pub mod xyk;
 

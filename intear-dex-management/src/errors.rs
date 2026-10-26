@@ -204,6 +204,28 @@ pub enum PreflightError {
         account_id: AccountId,
         token_id: AccountId,
     },
+    #[error(
+        "A first storage deposit on {dex_id} must be at least {minimum}, which its record takes"
+    )]
+    OtcStorageDepositTooSmall { dex_id: DexId, minimum: String },
+    #[error("That key already signs {account_id}'s trade intents on {dex_id}")]
+    OtcAuthorizedKeyUnchanged {
+        account_id: AccountId,
+        dex_id: DexId,
+    },
+    #[error("{owner} has no {asset_label} on {dex_id}")]
+    NoOtcBalance {
+        owner: AccountId,
+        asset_label: String,
+        dex_id: DexId,
+    },
+    #[error("{owner} has {available} on {dex_id}, but this needs {needed}")]
+    InsufficientOtcBalance {
+        owner: AccountId,
+        dex_id: DexId,
+        available: String,
+        needed: String,
+    },
 }
 
 impl PreflightError {
@@ -249,6 +271,9 @@ impl PreflightError {
             } => Some(format!(
                 "Upgrade it first, which anyone can:\n    {upgrade_command}"
             )),
+            Self::NoOtcBalance { .. } => {
+                Some("`otc account --assets …` shows the balances of an account".to_string())
+            }
             Self::NoShares { .. } | Self::NotEnoughShares { .. } => {
                 Some("`xyk liquidity show` shows the shares of an account".to_string())
             }
@@ -298,7 +323,10 @@ impl PreflightError {
             | Self::AmountsOfOneAsset { .. }
             | Self::NoPendingFees { .. }
             | Self::NoCommunityFees { .. }
-            | Self::FeeDiscountSignerUnchanged { .. } => None,
+            | Self::FeeDiscountSignerUnchanged { .. }
+            | Self::OtcStorageDepositTooSmall { .. }
+            | Self::OtcAuthorizedKeyUnchanged { .. }
+            | Self::InsufficientOtcBalance { .. } => None,
         };
         let report = Report::new(self);
         match suggestion {
@@ -565,6 +593,20 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
                 .to_string()
         },
     },
+    ContractPanicHint {
+        message_fragment: "Not enough storage deposit",
+        hint: |_| {
+            "The storage balance on the OTC dex is too small; `otc account` shows it and `otc storage-deposit` adds to it"
+                .to_string()
+        },
+    },
+    ContractPanicHint {
+        message_fragment: "Storage not registered for",
+        hint: |_| {
+            "The account has no storage balance on the OTC dex; `otc storage-deposit` makes one"
+                .to_string()
+        },
+    },
 ];
 
 /// Messages of the token standards' reference implementations, which most
@@ -667,6 +709,7 @@ mod tests {
             include_str!("../../src/rescue.rs"),
             include_str!("../../dexes/xyk/src/lib.rs"),
             include_str!("../../dexes/xyk/types/src/lib.rs"),
+            include_str!("../../dexes/otc/src/lib.rs"),
         ]
         .concat();
         for hint in CONTRACT_PANIC_HINTS {

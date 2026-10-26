@@ -1,13 +1,10 @@
-use std::path::PathBuf;
-use std::process::Command;
-
 use color_eyre::Section;
-use color_eyre::eyre::{Context, eyre};
+use color_eyre::eyre::eyre;
 use intear_dex_types::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
-use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
+use near_sdk::json_types::Base64VecU8;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
@@ -16,14 +13,13 @@ use xyk_dex_types::{CAN_MIGRATE, MigrateArgs};
 use super::XykContext;
 use crate::chain::engine;
 use crate::chain::xyk::{self, XykState};
+use crate::commands::dex_code;
 use crate::deployment::{DEFAULT_XYK_DEX_NAME, ENGINE_ACCOUNT_ID};
 use crate::errors::PreflightError;
 use crate::outcome::{ExpectedDeployment, ExpectedOutcome};
-use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, storage};
+use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
-const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(100);
 const MIGRATE_GAS: Gas = Gas::from_teragas(50);
-const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = XykContext)]
@@ -183,16 +179,7 @@ fn deployed_dex_id(
                 .suggestion("Name the dex with --name after deploy"),
         );
     }
-    let name = name.unwrap_or(DEFAULT_XYK_DEX_NAME);
-    if name.is_empty() || name.contains('/') {
-        return Err(eyre!(
-            "Invalid dex name '{name}': it's the part of the dex id after <signer>/, so it can't be empty or contain /"
-        ));
-    }
-    Ok(DexId {
-        deployer: signer_account_id.clone().into(),
-        id: name.to_string(),
-    })
+    dex_code::deployed_dex_id(signer_account_id, name.unwrap_or(DEFAULT_XYK_DEX_NAME))
 }
 
 #[derive(Clone)]
@@ -259,7 +246,7 @@ impl BuildContext {
         previous_context: DeployContext,
         _scope: &<Build as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let code = build_xyk_dex()?;
+        let code = dex_code::build_dex_package("xyk-dex")?;
         Ok(Self(deploy_action_context(
             previous_context,
             code,
@@ -293,10 +280,7 @@ impl UseFileContext {
         previous_context: DeployContext,
         scope: &<UseFile as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let code = scope.file.read_bytes()?;
-        if !code.starts_with(WASM_MAGIC_BYTES) {
-            return Err(eyre!("{} isn't a WebAssembly module", scope.file));
-        }
+        let code = dex_code::read_wasm_file(&scope.file)?;
         Ok(Self(deploy_action_context(
             previous_context,
             code,
@@ -309,84 +293,6 @@ impl From<UseFileContext> for ActionContext {
     fn from(item: UseFileContext) -> Self {
         item.0
     }
-}
-
-/// Builds xyk-dex in the workspace of the current directory the way its
-/// tests do: a release build for wasm, optimized with wasm-opt
-fn build_xyk_dex() -> color_eyre::eyre::Result<Vec<u8>> {
-    let deploy_built_file_instead = "Or deploy a wasm file that's already built with use-file";
-    // A missing wasm-opt fails before the build, which takes a while
-    let is_wasm_opt_installed = Command::new("wasm-opt")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !is_wasm_opt_installed {
-        return Err(eyre!("wasm-opt isn't installed, and the build needs it")
-            .suggestion("Install binaryen, which provides wasm-opt")
-            .suggestion(deploy_built_file_instead));
-    }
-    let metadata_output = Command::new("cargo")
-        .args(["metadata", "--format-version=1", "--no-deps"])
-        .output()
-        .wrap_err("Couldn't run cargo metadata")?;
-    if !metadata_output.status.success() {
-        return Err(eyre!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&metadata_output.stderr).trim()
-        )
-        .suggestion("Run build in a checkout of the dex repository")
-        .suggestion(deploy_built_file_instead));
-    }
-    let metadata: serde_json::Value = serde_json::from_slice(&metadata_output.stdout)
-        .wrap_err("cargo metadata printed something other than JSON")?;
-    let has_xyk_dex_package = metadata["packages"]
-        .as_array()
-        .is_some_and(|packages| packages.iter().any(|package| package["name"] == "xyk-dex"));
-    let (Some(workspace_root), Some(target_directory)) = (
-        metadata["workspace_root"].as_str(),
-        metadata["target_directory"].as_str(),
-    ) else {
-        return Err(eyre!(
-            "cargo metadata doesn't name the workspace root and target directory"
-        ));
-    };
-    if !has_xyk_dex_package {
-        return Err(
-            eyre!("The workspace at {workspace_root} has no xyk-dex package")
-                .suggestion("Run build in a checkout of the dex repository")
-                .suggestion(deploy_built_file_instead),
-        );
-    }
-    tracing::info!("Building xyk-dex in {workspace_root}");
-    let build_status = Command::new("cargo")
-        .current_dir(workspace_root)
-        .args([
-            "build",
-            "--package=xyk-dex",
-            "--release",
-            "--target=wasm32-unknown-unknown",
-        ])
-        .status()
-        .wrap_err("Couldn't run cargo build")?;
-    if !build_status.success() {
-        return Err(eyre!("cargo build of xyk-dex failed with {build_status}"));
-    }
-    let wasm_path =
-        PathBuf::from(target_directory).join("wasm32-unknown-unknown/release/xyk_dex.wasm");
-    let wasm_opt_status = Command::new("wasm-opt")
-        .arg("-O")
-        .arg(&wasm_path)
-        .arg("-o")
-        .arg(&wasm_path)
-        .status()
-        .wrap_err("Couldn't run wasm-opt")?;
-    if !wasm_opt_status.success() {
-        return Err(eyre!(
-            "wasm-opt failed on {} with {wasm_opt_status}",
-            wasm_path.display()
-        ));
-    }
-    std::fs::read(&wasm_path).wrap_err_with(|| format!("Couldn't read {}", wasm_path.display()))
 }
 
 /// `code_source_args` are the words of the command that pick the code, for
@@ -402,24 +308,18 @@ fn deploy_action_context(
         migrates,
         migrate_args,
     } = deploy_context;
-    let code_hash = Base58CryptoHash::from(near_primitives::hash::hash(&code).0);
     let signer_id: AccountId = dex_id.deployer.clone();
     planning::write_action_context(&global_context, signer_id, move |preflight| {
         preflight.ensure_engine_not_paused()?;
-        let trusted_code_deployer =
-            engine::trusted_code_deployer(&preflight.network_config, &preflight.block_reference)?;
-        if trusted_code_deployer != preflight.signer_id {
-            return Err(PreflightError::NotTrustedCodeDeployer {
-                signer_id: preflight.signer_id.clone(),
-                trusted_code_deployer,
-            }
-            .into_report());
-        }
-        let is_upgrade = engine::dex_exists(
-            &preflight.network_config,
-            &preflight.block_reference,
-            &dex_id,
-        )?;
+        // Initializing stores the state, and migrating drops the map of
+        // referral settings from it, so it only frees storage
+        let dex_code::CodeDeployment {
+            is_upgrade,
+            code_hash,
+            code_label,
+            mut steps,
+            mut function_calls,
+        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0)?;
         let init_command = shell_words::join([
             "near",
             "intear-dex-management",
@@ -454,47 +354,6 @@ fn deploy_action_context(
                 }
                 .into_report());
             }
-        }
-        let code_label = format!(
-            "{} bytes of code (sha256 {})",
-            code.len(),
-            String::from(&code_hash)
-        );
-        let mut steps = Vec::new();
-        let mut function_calls = Vec::new();
-        // The code of an existing dex isn't readable, so an upgrade is
-        // estimated as if the dex had none; the old code's storage is freed
-        let code_bytes = storage::dex_code_record_bytes(
-            &dex_id,
-            code.len(),
-            preflight.protocol_limits.extra_bytes_per_record,
-        )?;
-        // Migrating drops the map of referral settings from the state, so it
-        // only frees storage
-        if let Some(storage_top_up) = preflight.dex_storage_top_up(&dex_id, code_bytes)? {
-            steps.push(storage_top_up.step(match (is_upgrade, migrates) {
-                (false, _) => "the code",
-                (true, _) => {
-                    "all of the new code, since the old code's size can't be read; what the old code used becomes available again"
-                }
-            }));
-            function_calls.push(storage_top_up.function_call());
-        }
-        steps.push(if is_upgrade {
-            format!("Deploy {code_label} to {dex_id}, replacing its code")
-        } else {
-            format!("Deploy {code_label} to {dex_id}, a new dex")
-        });
-        function_calls.push(FunctionCall {
-            method_name: "deploy_dex_code",
-            args: json!({
-                "last_part_of_id": dex_id.id,
-                "code_base64": Base64VecU8(code.clone()),
-            }),
-            deposit: ONE_YOCTO_NEAR,
-            gas: DEPLOY_DEX_CODE_GAS,
-        });
-        if migrates {
             steps.push(format!(
                 "Migrate the state of {dex_id} to the new code's layout in the same receipt; if the migration fails, the deploy is reverted too"
             ));

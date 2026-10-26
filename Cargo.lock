@@ -2338,6 +2338,7 @@ dependencies = [
  "near-jsonrpc-primitives 0.37.4",
  "near-primitives 0.37.4",
  "near-sdk",
+ "otc-dex-types",
  "prettytable",
  "serde",
  "serde_json",

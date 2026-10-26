@@ -1,5 +1,5 @@
 use color_eyre::eyre::{bail, eyre};
-use intear_dex_types::{AccountOrDexId, AssetId, DexId};
+use intear_dex_types::{AssetId, DexId};
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
 use near_sdk::NearToken;
@@ -229,19 +229,6 @@ pub fn amounts_in_pool_order(
     Ok(amounts)
 }
 
-/// The NEAR that an xyk call takes for the storage it adds goes with the
-/// transaction into the signer's balance on the engine, and from there to
-/// the dex, so both need NEAR registered
-pub fn storage_near_registrations(
-    signer_id: &AccountId,
-    dex_id: &DexId,
-) -> [(AccountOrDexId, AssetId); 2] {
-    [
-        (AccountOrDexId::Account(signer_id.clone()), AssetId::Near),
-        (AccountOrDexId::Dex(dex_id.clone()), AssetId::Near),
-    ]
-}
-
 /// Every asset that some pool of the dex holds, once each, in pool order
 pub fn all_pool_asset_ids(
     network_config: &near_cli_rs::config::NetworkConfig,
@@ -317,8 +304,9 @@ pub fn dex_call_paying_for_storage(
             }],
         ));
     }
-    let registration_calls =
-        preflight.registration_calls(&storage_near_registrations(&preflight.signer_id, dex_id))?;
+    let registration_calls = preflight.registration_calls(
+        &planning::storage_near_registrations(&preflight.signer_id, dex_id),
+    )?;
     let mut steps = registration_calls.steps;
     let mut function_calls = registration_calls.function_calls;
     steps.push(action_step);

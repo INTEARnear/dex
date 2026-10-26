@@ -621,7 +621,7 @@ impl PoolFeesContext {
                 );
 
                 let mut registrations =
-                    super::storage_near_registrations(&signer_id, &dex_id).to_vec();
+                    planning::storage_near_registrations(&signer_id, &dex_id).to_vec();
                 // The dex holds the pool's assets
                 registrations.push((AccountOrDexId::Dex(dex_id.clone()), assets.0.clone()));
                 registrations.push((AccountOrDexId::Dex(dex_id.clone()), assets.1.clone()));
