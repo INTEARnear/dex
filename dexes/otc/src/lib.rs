@@ -9,9 +9,15 @@ use intear_dex_types::{
 };
 use near_sdk::{
     AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey,
-    json_types::{Base64VecU8, U64, U128},
+    json_types::{U64, U128},
     near,
     store::{LookupMap, LookupSet, TreeMap},
+};
+use otc_dex_types::{
+    AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition,
+    GetAuthorizedKeyArgs, GetBalanceArgs, IsNonceUsedArgs, MatchArgs, Nonce, OtcDexEvent,
+    OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageBalance,
+    StorageBalanceOfArgs, StorageDepositArgs, WithdrawAssetsArgs, WithdrawRequest,
 };
 
 #[near(serializers=[borsh])]
@@ -27,19 +33,6 @@ enum StorageKey {
     UsedNonces,
 }
 
-#[derive(Default)]
-#[near(serializers=[borsh])]
-pub struct StorageBalance {
-    total: NearToken,
-    used: NearToken,
-}
-
-impl StorageBalance {
-    fn validate(&self) {
-        expect!(self.total >= self.used, "Not enough storage deposit");
-    }
-}
-
 #[near(contract_state)]
 pub struct OtcDex {
     balances: LookupMap<(AccountId, AssetId), U128>,
@@ -48,145 +41,6 @@ pub struct OtcDex {
     used_expirable_nonces_block_height: LookupMap<AccountId, TreeMap<(BlockHeight, Nonce), ()>>,
     used_expirable_nonces_timestamp_millis: LookupMap<AccountId, TreeMap<(U64, Nonce), ()>>,
     used_nonces: LookupSet<(AccountId, Nonce)>,
-}
-
-pub type Nonce = U128;
-
-#[near(serializers=[borsh])]
-enum AuthorizationMethod {
-    Signature(Base64VecU8),
-    Predecessor,
-}
-
-#[near(serializers=[borsh])]
-pub struct AuthorizedTradeIntent {
-    trade_intent: TradeIntent,
-    authorization_method: AuthorizationMethod,
-}
-
-impl AuthorizedTradeIntent {
-    fn validate(&self, dex: &OtcDex, all_user_ids: &[&AccountId], trader: &Caller) {
-        if let Some(expiry) = &self.trade_intent.validity.expiry {
-            match expiry {
-                ExpiryCondition::BlockHeight(block_height) => {
-                    expect!(
-                        near_sdk::env::block_height() <= *block_height,
-                        "Intent expired: Block height expired"
-                    );
-                }
-                ExpiryCondition::Timestamp { milliseconds } => {
-                    expect!(
-                        near_sdk::env::block_timestamp_ms() < milliseconds.0,
-                        "Intent expired: Timestamp expired"
-                    );
-                }
-            }
-        }
-        // nonce is checked after clearing up used nonces
-        if let Some(only_for_whitelisted_parties) =
-            &self.trade_intent.validity.only_for_whitelisted_parties
-        {
-            for other_user_id in all_user_ids {
-                if **other_user_id != self.trade_intent.user_id {
-                    expect!(
-                        only_for_whitelisted_parties.contains(*other_user_id),
-                        "Intent not authorized: User {other_user_id} not whitelisted"
-                    );
-                }
-            }
-        }
-        match &self.authorization_method {
-            AuthorizationMethod::Predecessor => {
-                expect!(
-                    matches!(trader, Caller::Direct(trader_id) if *trader_id == self.trade_intent.user_id),
-                    "Intent not authorized: AuthorizationMethod::Predecessor can only be used if the user calls directly, not in a transfer call"
-                );
-            }
-            AuthorizationMethod::Signature(signature) => {
-                if let Some(expected_public_key) =
-                    dex.get_authorized_key(&self.trade_intent.user_id)
-                {
-                    let data = near_sdk::borsh::to_vec(&self.trade_intent).unwrap();
-                    let hash = near_sdk::env::sha256_array(&data);
-                    let is_verified = match expected_public_key.curve_type() {
-                        CurveType::ED25519 => near_sdk::env::ed25519_verify(
-                            signature
-                                .0
-                                .as_slice()
-                                .try_into()
-                                .expect("Invalid signature length"),
-                            hash,
-                            &expected_public_key.as_bytes()[1..].try_into().unwrap(),
-                        ),
-                        CurveType::SECP256K1 => {
-                            let actual_public_key = near_sdk::env::ecrecover(
-                                &hash,
-                                &signature.0[..signature.0.len().saturating_sub(1)],
-                                *signature.0.last().expect("Invalid signature"),
-                                true,
-                            )
-                            .expect("Invalid signature");
-                            actual_public_key == expected_public_key.as_bytes()[1..]
-                        }
-                        CurveType::MLDSA65 => {
-                            panic!("Intent not authorized: MLDSA65 keys are not supported")
-                        }
-                    };
-                    expect!(
-                        is_verified,
-                        "Intent not authorized: Signature verification failed"
-                    );
-                } else {
-                    panic!(
-                        "Intent not authorized: AuthorizationMethod::Signature cannot be used if there is no authorized key"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[near(serializers=[borsh])]
-#[derive(Debug)]
-pub struct TradeIntent {
-    user_id: AccountId,
-    asset_in: AssetId,
-    asset_out: AssetId,
-    amount_in: U128,
-    amount_out: U128,
-    validity: Validity,
-}
-
-#[derive(Default, PartialEq, Debug)]
-#[near(serializers=[borsh])]
-pub struct Validity {
-    expiry: Option<ExpiryCondition>,
-    nonce: Option<Nonce>,
-    only_for_whitelisted_parties: Option<Vec<AccountId>>,
-}
-
-#[derive(PartialEq, Clone, Copy, Debug)]
-#[near(serializers=[borsh])]
-pub enum ExpiryCondition {
-    BlockHeight(BlockHeight),
-    Timestamp { milliseconds: U64 },
-}
-
-#[near(serializers=[borsh])]
-enum OtcTradeEvent {
-    AuthorizedKeyChanged {
-        account_id: AccountId,
-        key: PublicKey,
-    },
-    Trade {
-        authorized_trade_intents: Vec<AuthorizedTradeIntent>,
-    },
-}
-
-impl OtcTradeEvent {
-    fn emit(&self) {
-        env::dex_event(self);
-    }
 }
 
 #[near]
@@ -228,17 +82,6 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        #[near(serializers=[borsh])]
-        enum OutputDestination {
-            InternalOtcBalance,
-            IntearDexBalance,
-            WithdrawToUser,
-        }
-        #[near(serializers=[borsh])]
-        struct MatchArgs {
-            authorized_trade_intents: Vec<AuthorizedTradeIntent>,
-            output_destination: OutputDestination,
-        }
         let Ok(MatchArgs {
             authorized_trade_intents,
             output_destination,
@@ -308,8 +151,8 @@ impl OtcDex {
         let mut asset_withdraw_requests = Vec::new();
         for authorized_trade_intent in authorized_trade_intents.iter() {
             // validate trade intent
-            authorized_trade_intent.validate(
-                self,
+            self.validate_authorized_trade_intent(
+                authorized_trade_intent,
                 &authorized_trade_intents
                     .iter()
                     .map(|i| &i.trade_intent.user_id)
@@ -426,10 +269,9 @@ impl OtcDex {
             // mark nonce as used
             if let Some(nonce) = &authorized_trade_intent.trade_intent.validity.nonce {
                 expect!(
-                    !self.is_nonce_used(
-                        *nonce,
-                        authorized_trade_intent.trade_intent.user_id.clone()
-                    ),
+                    !self
+                        .used_nonces
+                        .contains(&(authorized_trade_intent.trade_intent.user_id.clone(), *nonce)),
                     "Intent not authorized: Nonce already used"
                 );
             }
@@ -496,7 +338,7 @@ impl OtcDex {
             );
         }
 
-        OtcTradeEvent::Trade {
+        OtcDexEvent::Trade {
             authorized_trade_intents,
         }
         .emit();
@@ -515,8 +357,6 @@ impl OtcDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        #[near(serializers=[borsh])]
-        struct StorageDepositArgs;
         let Ok(StorageDepositArgs) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -558,10 +398,6 @@ impl OtcDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct SetAuthorizedKeyArgs {
-            key: PublicKey,
-        }
         let Ok(SetAuthorizedKeyArgs { key }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -571,7 +407,7 @@ impl OtcDex {
         self.authorized_keys.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
         self.charge_storage_deposit(storage_usage_before, storage_usage_after, caller_id.clone());
-        OtcTradeEvent::AuthorizedKeyChanged {
+        OtcDexEvent::AuthorizedKeyChanged {
             account_id: caller_id,
             key,
         }
@@ -590,8 +426,6 @@ impl OtcDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct DepositAssetsArgs;
         let Ok(DepositAssetsArgs) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -619,10 +453,6 @@ impl OtcDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct RegisterAssetsArgs {
-            asset_ids: Vec<AssetId>,
-        }
         let Ok(RegisterAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -650,19 +480,6 @@ impl OtcDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct WithdrawAssetsArgs {
-            assets: Vec<WithdrawRequest>,
-        }
-        #[near(serializers=[borsh])]
-        struct WithdrawRequest {
-            asset_id: AssetId,
-            // If None, the entire balance of the asset will be withdrawn.
-            amount: Option<U128>,
-            // If None, the assets will be withdrawn to the user's own account.
-            to: Option<AccountId>,
-            to_inner_balance: bool,
-        }
         let Ok(WithdrawAssetsArgs { assets }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -718,50 +535,145 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn storage_balance_of(
         &self,
-        #[serializer(borsh)] account_id: AccountId,
+        #[serializer(borsh)] args: StorageBalanceOfArgs,
     ) -> Option<&StorageBalance> {
-        self.storage_balances.get(&account_id)
+        self.storage_balances.get(&args.account_id)
     }
 
     #[result_serializer(borsh)]
     pub fn get_authorized_key(
         &self,
-        #[serializer(borsh)] account_id: &AccountId,
+        #[serializer(borsh)] args: GetAuthorizedKeyArgs,
     ) -> Option<&PublicKey> {
-        self.authorized_keys.get(account_id)
+        self.authorized_keys.get(&args.account_id)
     }
 
     #[result_serializer(borsh)]
-    pub fn is_nonce_used(
-        &self,
-        #[serializer(borsh)] nonce: Nonce,
-        #[serializer(borsh)] account_id: AccountId,
-    ) -> bool {
-        self.used_nonces.contains(&(account_id, nonce))
+    pub fn is_nonce_used(&self, #[serializer(borsh)] args: IsNonceUsedArgs) -> bool {
+        self.used_nonces.contains(&(args.account_id, args.nonce))
     }
 
     #[result_serializer(borsh)]
-    pub fn get_balance(
-        &self,
-        #[serializer(borsh)] account_id: AccountId,
-        #[serializer(borsh)] asset_id: AssetId,
-    ) -> Option<&U128> {
-        self.balances.get(&(account_id.clone(), asset_id.clone()))
+    pub fn get_balance(&self, #[serializer(borsh)] args: GetBalanceArgs) -> Option<&U128> {
+        self.balances.get(&(args.account_id, args.asset_id))
     }
 }
 
 impl OtcDex {
+    fn validate_authorized_trade_intent(
+        &self,
+        authorized_trade_intent: &AuthorizedTradeIntent,
+        all_user_ids: &[&AccountId],
+        trader: &Caller,
+    ) {
+        let AuthorizedTradeIntent {
+            trade_intent,
+            authorization_method,
+        } = authorized_trade_intent;
+        if let Some(expiry) = &trade_intent.validity.expiry {
+            match expiry {
+                ExpiryCondition::BlockHeight(block_height) => {
+                    expect!(
+                        near_sdk::env::block_height() <= *block_height,
+                        "Intent expired: Block height expired"
+                    );
+                }
+                ExpiryCondition::Timestamp { milliseconds } => {
+                    expect!(
+                        near_sdk::env::block_timestamp_ms() < milliseconds.0,
+                        "Intent expired: Timestamp expired"
+                    );
+                }
+            }
+        }
+        // nonce is checked after clearing up used nonces
+        if let Some(only_for_whitelisted_parties) =
+            &trade_intent.validity.only_for_whitelisted_parties
+        {
+            for other_user_id in all_user_ids {
+                if **other_user_id != trade_intent.user_id {
+                    expect!(
+                        only_for_whitelisted_parties.contains(*other_user_id),
+                        "Intent not authorized: User {other_user_id} not whitelisted"
+                    );
+                }
+            }
+        }
+        match authorization_method {
+            AuthorizationMethod::Predecessor => match trader {
+                Caller::Direct(caller_id) => {
+                    expect!(
+                        *caller_id == trade_intent.user_id,
+                        "Intent not authorized: AuthorizationMethod::Predecessor cannot be used if the predecessor is not the user"
+                    );
+                }
+                Caller::OnTransfer { alleged_sender, .. } => {
+                    expect!(
+                        *alleged_sender == trade_intent.user_id,
+                        "Intent not authorized: AuthorizationMethod::Predecessor cannot be used if the sender of the transfer call is not the user"
+                    );
+                    expect!(
+                        trade_intent.validity.nonce.is_none(),
+                        "Intent not authorized: AuthorizationMethod::Predecessor can't use a nonce in a transfer call"
+                    );
+                }
+            },
+            AuthorizationMethod::Signature(signature) => {
+                if let Some(expected_public_key) = self.authorized_keys.get(&trade_intent.user_id) {
+                    let data = near_sdk::borsh::to_vec(&trade_intent).unwrap();
+                    let hash = near_sdk::env::sha256_array(&data);
+                    let is_verified = match expected_public_key.curve_type() {
+                        CurveType::ED25519 => near_sdk::env::ed25519_verify(
+                            signature
+                                .0
+                                .as_slice()
+                                .try_into()
+                                .expect("Invalid signature length"),
+                            hash,
+                            &expected_public_key.as_bytes()[1..].try_into().unwrap(),
+                        ),
+                        CurveType::SECP256K1 => {
+                            let actual_public_key = near_sdk::env::ecrecover(
+                                &hash,
+                                &signature.0[..signature.0.len().saturating_sub(1)],
+                                *signature.0.last().expect("Invalid signature"),
+                                true,
+                            )
+                            .expect("Invalid signature");
+                            actual_public_key == expected_public_key.as_bytes()[1..]
+                        }
+                        CurveType::MLDSA65 => {
+                            panic!("Intent not authorized: MLDSA65 keys are not supported")
+                        }
+                    };
+                    expect!(
+                        is_verified,
+                        "Intent not authorized: Signature verification failed"
+                    );
+                } else {
+                    panic!(
+                        "Intent not authorized: AuthorizationMethod::Signature cannot be used if there is no authorized key"
+                    );
+                }
+            }
+        }
+    }
+
     fn charge_storage_deposit(&mut self, before: u64, after: u64, payer: AccountId) {
         match after.cmp(&before) {
             std::cmp::Ordering::Greater => {
                 // charge the difference
                 let storage_cost = near_sdk::env::storage_byte_cost()
                     .saturating_mul(after.checked_sub(before).expect("Just compared") as u128);
-                self.storage_balances
+                let storage_balance = self
+                    .storage_balances
                     .entry(payer.clone())
                     .and_modify(|b| b.used = b.used.saturating_add(storage_cost))
-                    .or_insert_with(|| panic!("Storage not registered for {payer}"))
-                    .validate();
+                    .or_insert_with(|| panic!("Storage not registered for {payer}"));
+                expect!(
+                    storage_balance.total >= storage_balance.used,
+                    "Not enough storage deposit"
+                );
             }
             std::cmp::Ordering::Less => {
                 // refund the difference
@@ -775,8 +687,7 @@ impl OtcDex {
                             .checked_sub(storage_cost)
                             .expect("Storage used underflow")
                     })
-                    .or_insert_with(|| panic!("Storage not registered for {payer}"))
-                    .validate();
+                    .or_insert_with(|| panic!("Storage not registered for {payer}"));
             }
             std::cmp::Ordering::Equal => {
                 // nothing changed

@@ -2313,6 +2313,7 @@ dependencies = [
  "near-crypto 0.34.7",
  "near-sdk",
  "near-workspaces",
+ "otc-dex-types",
  "tokio",
  "wasmi",
  "xyk-dex-types",
@@ -4072,7 +4073,16 @@ dependencies = [
  "crypto-bigint 0.6.1",
  "intear-dex-types",
  "near-sdk",
+ "otc-dex-types",
  "talc",
+]
+
+[[package]]
+name = "otc-dex-types"
+version = "0.1.0"
+dependencies = [
+ "intear-dex-types",
+ "near-sdk",
 ]
 
 [[package]]

@@ -36,16 +36,6 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
 
-trait Emit {
-    fn emit(&self);
-}
-
-impl Emit for XykDexEvent {
-    fn emit(&self) {
-        env::dex_event(&self);
-    }
-}
-
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {

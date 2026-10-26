@@ -464,6 +464,13 @@ pub enum XykDexEvent {
     },
 }
 
+impl XykDexEvent {
+    #[cfg(feature = "dex")]
+    pub fn emit(&self) {
+        intear_dex_types::env::dex_event(self);
+    }
+}
+
 impl From<XykDexEventV1> for XykDexEvent {
     fn from(event: XykDexEventV1) -> Self {
         match event {

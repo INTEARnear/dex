@@ -4,6 +4,7 @@ members = [
     "dexes/simple-amm",
     "dexes/minimal",
     "dexes/otc",
+    "dexes/otc/types",
     "dexes/xyk",
     "dexes/xyk/types",
     "intear-dex-management",
@@ -50,6 +51,7 @@ near-workspaces = { version = "0.22", features = ["unstable"] }
 tokio = { version = "1.12.0", features = ["full"] }
 near-crypto = "0.34.2"
 xyk-dex-types = { path = "./dexes/xyk/types" }
+otc-dex-types = { path = "./dexes/otc/types" }
 intear-dex-test-support = { path = "./test-support" }
 lz4_flex = "0.14"
 

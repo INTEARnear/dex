@@ -3,83 +3,20 @@ use common::*;
 
 use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation};
 use near_crypto::{KeyType, SecretKey, Signature};
-use near_sdk::json_types::U64;
+use near_sdk::AccountId;
 use near_sdk::serde_json::json;
-use near_sdk::{AccountId, BlockHeight};
 use near_sdk::{
     NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base64VecU8, U128},
-    near,
 };
 use near_workspaces::{Account, Contract};
+use otc_dex_types::{
+    AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition, GetBalanceArgs,
+    MatchArgs, OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageDepositArgs,
+    TradeIntent, Validity,
+};
 use std::collections::HashMap;
-
-#[near(serializers=[borsh])]
-struct OtcStorageDepositArgs;
-
-#[near(serializers=[borsh])]
-struct OtcDepositAssetsArgs;
-
-#[near(serializers=[borsh])]
-struct OtcRegisterAssetsArgs {
-    asset_ids: Vec<AssetId>,
-}
-
-#[near(serializers=[borsh])]
-struct OtcSetAuthorizedKeyArgs {
-    key: near_sdk::PublicKey,
-}
-
-#[near(serializers=[borsh, json])]
-struct OtcTradeIntent {
-    user_id: AccountId,
-    asset_in: AssetId,
-    asset_out: AssetId,
-    amount_in: U128,
-    amount_out: U128,
-    validity: OtcValidity,
-}
-
-#[derive(Default, PartialEq)]
-#[near(serializers=[borsh, json])]
-struct OtcValidity {
-    expiry: Option<OtcExpiryCondition>,
-    nonce: Option<U128>,
-    only_for_whitelisted_parties: Option<Vec<AccountId>>,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-#[near(serializers=[borsh, json])]
-enum OtcExpiryCondition {
-    BlockHeight(BlockHeight),
-    Timestamp { milliseconds: U64 },
-}
-
-#[near(serializers=[borsh, json])]
-enum OtcAuthorizationMethod {
-    Signature(Base64VecU8),
-    Predecessor,
-}
-
-#[near(serializers=[borsh, json])]
-struct OtcAuthorizedTradeIntent {
-    trade_intent: OtcTradeIntent,
-    authorization_method: OtcAuthorizationMethod,
-}
-
-#[near(serializers=[borsh])]
-enum OtcOutputDestination {
-    InternalOtcBalance,
-    IntearDexBalance,
-    WithdrawToUser,
-}
-
-#[near(serializers=[borsh])]
-struct OtcMatchArgs {
-    authorized_trade_intents: Vec<OtcAuthorizedTradeIntent>,
-    output_destination: OtcOutputDestination,
-}
 
 /// Assert the OTC inner balance of asset of an account.
 async fn assert_otc_inner_asset_balance(
@@ -89,19 +26,13 @@ async fn assert_otc_inner_asset_balance(
     asset: AssetId,
     amount: Option<U128>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    #[near(serializers=[borsh])]
-    struct GetBalanceArgs {
-        user_id: AccountId,
-        asset_id: AssetId,
-    }
-
     let result = dex_engine_contract
         .view("dex_view")
         .args_json(json!({
             "dex_id": dex_id,
             "method": "get_balance",
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetBalanceArgs {
-                user_id: user_id.clone(),
+                account_id: user_id.clone(),
                 asset_id: asset.clone(),
             }).unwrap()),
         }))
@@ -132,7 +63,7 @@ async fn otc_register_assets(
         .args_json(json!({
             "dex_id": dex_id,
             "method": "register_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcRegisterAssetsArgs { asset_ids }).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RegisterAssetsArgs { asset_ids }).unwrap()),
             "attached_assets": {},
         }))
         .transact()
@@ -260,7 +191,7 @@ async fn test_otc_regular_flow() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -291,7 +222,7 @@ async fn test_otc_regular_flow() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near.as_yoctonear()),
                 format!("nep141:{}", ft1.id()): U128(assets_deposit_to_otc_ft),
@@ -333,7 +264,7 @@ async fn test_otc_regular_flow() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: deployer_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -347,35 +278,15 @@ async fn test_otc_regular_flow() {
 
     let user2 = sandbox.dev_create_account().await.unwrap();
     ft_storage_deposit(&ft1, &user2).await;
-    let result = user2
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    let result = user2
-        .call(dex_engine_contract.id(), "register_assets")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "asset_ids": [AssetId::Near],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 
     // User 1's trade intent: sell 100_000_000 FT for 2 NEAR
-    let user1_trade_intent = OtcTradeIntent {
+    let user1_trade_intent = TradeIntent {
         user_id: deployer.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
@@ -386,33 +297,33 @@ async fn test_otc_regular_flow() {
         },
     );
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature(user1_signature),
     };
 
     // User 2's trade intent: sell 2 NEAR for 100_000_000 FT
-    let user2_trade_intent = OtcTradeIntent {
+    let user2_trade_intent = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
-    let user2_authorized_intent = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Predecessor,
+        authorization_method: AuthorizationMethod::Predecessor,
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![user1_authorized_intent, user2_authorized_intent],
-                output_destination: OtcOutputDestination::WithdrawToUser,
+                output_destination: OutputDestination::WithdrawToUser,
             })
             .unwrap(),
         ),
@@ -422,8 +333,48 @@ async fn test_otc_regular_flow() {
         )]),
     }];
 
+    let intent_with_nonce = AuthorizedTradeIntent {
+        trade_intent: TradeIntent {
+            user_id: user2.id().clone(),
+            asset_in: AssetId::Near,
+            asset_out: AssetId::Near,
+            amount_in: U128(0),
+            amount_out: U128(0),
+            validity: Validity {
+                nonce: Some(U128(1)),
+                ..Default::default()
+            },
+        },
+        authorization_method: AuthorizationMethod::Predecessor,
+    };
     let result = user2
-        .call(dex_engine_contract.id(), "execute_operations")
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": [Operation::DexCall {
+                dex_id: dex_id.clone(),
+                method: "match".to_string(),
+                args: Base64VecU8(
+                    near_sdk::borsh::to_vec(&MatchArgs {
+                        authorized_trade_intents: vec![intent_with_nonce],
+                        output_destination: OutputDestination::WithdrawToUser,
+                    })
+                    .unwrap(),
+                ),
+                attached_assets: HashMap::from_iter([(AssetId::Near, U128(0))]),
+            }],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{:?}", result.failures())
+            .contains("AuthorizationMethod::Predecessor can't use a nonce in a transfer call")
+    );
+
+    let result = user2
+        .call(dex_engine_contract.id(), "deposit_near")
         .max_gas()
         .deposit(trade_amount_near)
         .args_json(json!({
@@ -553,7 +504,7 @@ async fn test_otc_relayed_by_third_party() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -570,7 +521,7 @@ async fn test_otc_relayed_by_third_party() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near_user1.as_yoctonear()),
             },
@@ -587,7 +538,7 @@ async fn test_otc_relayed_by_third_party() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user1_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -605,7 +556,7 @@ async fn test_otc_relayed_by_third_party() {
             "operations": [Operation::DexCall {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
-                args: Base64VecU8(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
                 attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
@@ -621,7 +572,7 @@ async fn test_otc_relayed_by_third_party() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 format!("nep141:{}", ft1.id()): U128(assets_deposit_to_otc_ft_user2),
             },
@@ -638,7 +589,7 @@ async fn test_otc_relayed_by_third_party() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user2_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -657,13 +608,13 @@ async fn test_otc_relayed_by_third_party() {
     .await;
     otc_register_assets(&dex_engine_contract, &dex_id, &user2, vec![AssetId::Near]).await;
 
-    let user1_trade_intent = OtcTradeIntent {
+    let user1_trade_intent = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
@@ -674,19 +625,19 @@ async fn test_otc_relayed_by_third_party() {
         },
     );
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature(user1_signature),
     };
 
     // User 2's trade intent: sell 100_000_000 FT for 2 NEAR
-    let user2_trade_intent = OtcTradeIntent {
+    let user2_trade_intent = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
@@ -697,18 +648,18 @@ async fn test_otc_relayed_by_third_party() {
         },
     );
 
-    let user2_authorized_intent = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature(user2_signature),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![user1_authorized_intent, user2_authorized_intent],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -820,7 +771,7 @@ async fn test_otc_single_intent_from_one_account_fails() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -837,7 +788,7 @@ async fn test_otc_single_intent_from_one_account_fails() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near_user1.as_yoctonear()),
             },
@@ -847,27 +798,27 @@ async fn test_otc_single_intent_from_one_account_fails() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let user1_trade_intent = OtcTradeIntent {
+    let user1_trade_intent = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Predecessor,
+        authorization_method: AuthorizationMethod::Predecessor,
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![user1_authorized_intent],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -968,7 +919,7 @@ async fn test_otc_mismatching_intents_fail() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -985,7 +936,7 @@ async fn test_otc_mismatching_intents_fail() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near_user1.as_yoctonear()),
             },
@@ -1002,7 +953,7 @@ async fn test_otc_mismatching_intents_fail() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user1_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1020,7 +971,7 @@ async fn test_otc_mismatching_intents_fail() {
             "operations": [Operation::DexCall {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
-                args: Base64VecU8(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
                 attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
@@ -1036,7 +987,7 @@ async fn test_otc_mismatching_intents_fail() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 format!("nep141:{}", ft1.id()): U128(assets_deposit_to_otc_ft_user2),
             },
@@ -1053,7 +1004,7 @@ async fn test_otc_mismatching_intents_fail() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user2_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1063,13 +1014,13 @@ async fn test_otc_mismatching_intents_fail() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let user1_trade_intent = OtcTradeIntent {
+    let user1_trade_intent = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
@@ -1080,19 +1031,19 @@ async fn test_otc_mismatching_intents_fail() {
         },
     );
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature(user1_signature),
     };
 
     // User 2's trade intent: sell mismatched FT amount for 2 NEAR
-    let user2_trade_intent = OtcTradeIntent {
+    let user2_trade_intent = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(mismatched_ft_amount),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
@@ -1103,18 +1054,18 @@ async fn test_otc_mismatching_intents_fail() {
         },
     );
 
-    let user2_authorized_intent = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature(user2_signature),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![user1_authorized_intent, user2_authorized_intent],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -1247,7 +1198,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -1264,7 +1215,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near_user1.as_yoctonear()),
             },
@@ -1281,7 +1232,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user1_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1299,7 +1250,7 @@ async fn test_otc_three_intents_with_same_value() {
             "operations": [Operation::DexCall {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
-                args: Base64VecU8(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
                 attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
@@ -1315,7 +1266,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 format!("nep141:{}", ft1.id()): U128(assets_deposit_to_otc_ft1_user2),
             },
@@ -1332,7 +1283,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user2_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1350,7 +1301,7 @@ async fn test_otc_three_intents_with_same_value() {
             "operations": [Operation::DexCall {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
-                args: Base64VecU8(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
                 attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
@@ -1366,7 +1317,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 format!("nep141:{}", ft2.id()): U128(assets_deposit_to_otc_ft2_user3),
             },
@@ -1383,7 +1334,7 @@ async fn test_otc_three_intents_with_same_value() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user3_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1410,13 +1361,13 @@ async fn test_otc_three_intents_with_same_value() {
     otc_register_assets(&dex_engine_contract, &dex_id, &user3, vec![AssetId::Near]).await;
 
     // User 1's trade intent: sell 1 NEAR for 100_000 FT1
-    let user1_trade_intent = OtcTradeIntent {
+    let user1_trade_intent = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft1),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
@@ -1427,19 +1378,19 @@ async fn test_otc_three_intents_with_same_value() {
         },
     );
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature(user1_signature),
     };
 
     // User 2's trade intent: sell 100_000 FT1 for 5_000 FT2
-    let user2_trade_intent = OtcTradeIntent {
+    let user2_trade_intent = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Nep141(ft2.id().clone()),
         amount_in: U128(trade_amount_ft1),
         amount_out: U128(trade_amount_ft2),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
@@ -1450,19 +1401,19 @@ async fn test_otc_three_intents_with_same_value() {
         },
     );
 
-    let user2_authorized_intent = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature(user2_signature),
     };
 
     // User 3's trade intent: sell 5_000 FT2 for 1 NEAR
-    let user3_trade_intent = OtcTradeIntent {
+    let user3_trade_intent = TradeIntent {
         user_id: user3.id().clone(),
         asset_in: AssetId::Nep141(ft2.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft2),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user3_trade_intent).unwrap();
@@ -1473,22 +1424,22 @@ async fn test_otc_three_intents_with_same_value() {
         },
     );
 
-    let user3_authorized_intent = OtcAuthorizedTradeIntent {
+    let user3_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user3_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user3_signature),
+        authorization_method: AuthorizationMethod::Signature(user3_signature),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![
                     user1_authorized_intent,
                     user2_authorized_intent,
                     user3_authorized_intent,
                 ],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -1653,7 +1604,7 @@ async fn test_otc_nonces() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "storage_deposit",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
             "attached_assets": {
                 "near": U128(storage_deposit_for_otc.as_yoctonear()),
             },
@@ -1670,7 +1621,7 @@ async fn test_otc_nonces() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 "near": U128(assets_deposit_to_otc_near_user1.as_yoctonear()),
             },
@@ -1687,7 +1638,7 @@ async fn test_otc_nonces() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user1_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1705,7 +1656,7 @@ async fn test_otc_nonces() {
             "operations": [Operation::DexCall {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
-                args: Base64VecU8(near_sdk::borsh::to_vec(&OtcStorageDepositArgs).unwrap()),
+                args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
                 attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
@@ -1721,7 +1672,7 @@ async fn test_otc_nonces() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "deposit_assets",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcDepositAssetsArgs).unwrap()),
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap()),
             "attached_assets": {
                 format!("nep141:{}", ft1.id()): U128(assets_deposit_to_otc_ft_user2),
             },
@@ -1738,7 +1689,7 @@ async fn test_otc_nonces() {
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "method": "set_authorized_key",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcSetAuthorizedKeyArgs {
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
                 key: user2_key.public_key().to_string().parse().unwrap(),
             }).unwrap()),
             "attached_assets": {},
@@ -1759,13 +1710,13 @@ async fn test_otc_nonces() {
 
     // Test 1: Reuse of the same signature with nonce (should fail on second use)
     let nonce1 = U128(12345);
-    let user1_trade_intent_with_nonce = OtcTradeIntent {
+    let user1_trade_intent_with_nonce = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity {
+        validity: Validity {
             expiry: None,
             nonce: Some(nonce1),
             only_for_whitelisted_parties: None,
@@ -1780,18 +1731,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user1_authorized_intent = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_nonce,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature(user1_signature),
     };
 
-    let user2_trade_intent = OtcTradeIntent {
+    let user2_trade_intent = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
@@ -1802,18 +1753,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user2_authorized_intent = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature(user2_signature),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![user1_authorized_intent, user2_authorized_intent],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -1834,13 +1785,13 @@ async fn test_otc_nonces() {
     assert_success(&result).unwrap();
 
     // Second use with the same nonce should fail
-    let user1_trade_intent_with_nonce_reuse = OtcTradeIntent {
+    let user1_trade_intent_with_nonce_reuse = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity {
+        validity: Validity {
             expiry: None,
             nonce: Some(nonce1),
             only_for_whitelisted_parties: None,
@@ -1855,18 +1806,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user1_authorized_intent_reuse = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent_reuse = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_nonce_reuse,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature_reuse),
+        authorization_method: AuthorizationMethod::Signature(user1_signature_reuse),
     };
 
-    let user2_trade_intent_2 = OtcTradeIntent {
+    let user2_trade_intent_2 = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_2).unwrap();
@@ -1877,21 +1828,21 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user2_authorized_intent_2 = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent_2 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_2,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature_2),
+        authorization_method: AuthorizationMethod::Signature(user2_signature_2),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![
                     user1_authorized_intent_reuse,
                     user2_authorized_intent_2,
                 ],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -1914,14 +1865,14 @@ async fn test_otc_nonces() {
     let current_block_height = sandbox.view_block().await.unwrap().height();
     let expiry_block = current_block_height + 5;
 
-    let user1_trade_intent_with_block_expiry = OtcTradeIntent {
+    let user1_trade_intent_with_block_expiry = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity {
-            expiry: Some(OtcExpiryCondition::BlockHeight(expiry_block)),
+        validity: Validity {
+            expiry: Some(ExpiryCondition::BlockHeight(expiry_block)),
             nonce: Some(U128(54321)),
             only_for_whitelisted_parties: None,
         },
@@ -1935,18 +1886,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user1_authorized_intent_expiry = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent_expiry = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_block_expiry,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature_expiry),
+        authorization_method: AuthorizationMethod::Signature(user1_signature_expiry),
     };
 
-    let user2_trade_intent_3 = OtcTradeIntent {
+    let user2_trade_intent_3 = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_3).unwrap();
@@ -1957,9 +1908,9 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user2_authorized_intent_3 = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent_3 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_3,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature_3),
+        authorization_method: AuthorizationMethod::Signature(user2_signature_3),
     };
 
     sandbox.fast_forward(10).await.unwrap();
@@ -1968,12 +1919,12 @@ async fn test_otc_nonces() {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![
                     user1_authorized_intent_expiry,
                     user2_authorized_intent_3,
                 ],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -1997,14 +1948,14 @@ async fn test_otc_nonces() {
     let expiry_block_short = current_block_height + 5;
     let nonce3 = U128(99999);
 
-    let user1_trade_intent_with_expiring_nonce = OtcTradeIntent {
+    let user1_trade_intent_with_expiring_nonce = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity {
-            expiry: Some(OtcExpiryCondition::BlockHeight(expiry_block_short)),
+        validity: Validity {
+            expiry: Some(ExpiryCondition::BlockHeight(expiry_block_short)),
             nonce: Some(nonce3),
             only_for_whitelisted_parties: None,
         },
@@ -2018,18 +1969,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user1_authorized_intent_expiring_nonce = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent_expiring_nonce = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_expiring_nonce,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature_expiring_nonce),
+        authorization_method: AuthorizationMethod::Signature(user1_signature_expiring_nonce),
     };
 
-    let user2_trade_intent_4 = OtcTradeIntent {
+    let user2_trade_intent_4 = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_4).unwrap();
@@ -2040,9 +1991,9 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user2_authorized_intent_4 = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent_4 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_4,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature_4),
+        authorization_method: AuthorizationMethod::Signature(user2_signature_4),
     };
 
     // First use should succeed
@@ -2050,12 +2001,12 @@ async fn test_otc_nonces() {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![
                     user1_authorized_intent_expiring_nonce,
                     user2_authorized_intent_4,
                 ],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),
@@ -2077,13 +2028,13 @@ async fn test_otc_nonces() {
     sandbox.fast_forward(10).await.unwrap();
 
     // Now create a new intent with the same nonce but after expiry - should succeed
-    let user1_trade_intent_reuse_nonce_after_expiry = OtcTradeIntent {
+    let user1_trade_intent_reuse_nonce_after_expiry = TradeIntent {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
         amount_in: U128(trade_amount_near.as_yoctonear()),
         amount_out: U128(trade_amount_ft),
-        validity: OtcValidity {
+        validity: Validity {
             expiry: None,
             nonce: Some(nonce3),
             only_for_whitelisted_parties: None,
@@ -2098,18 +2049,18 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user1_authorized_intent_reuse_nonce = OtcAuthorizedTradeIntent {
+    let user1_authorized_intent_reuse_nonce = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_reuse_nonce_after_expiry,
-        authorization_method: OtcAuthorizationMethod::Signature(user1_signature_reuse_nonce),
+        authorization_method: AuthorizationMethod::Signature(user1_signature_reuse_nonce),
     };
 
-    let user2_trade_intent_5 = OtcTradeIntent {
+    let user2_trade_intent_5 = TradeIntent {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
         amount_in: U128(trade_amount_ft),
         amount_out: U128(trade_amount_near.as_yoctonear()),
-        validity: OtcValidity::default(),
+        validity: Validity::default(),
     };
 
     let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_5).unwrap();
@@ -2120,21 +2071,21 @@ async fn test_otc_nonces() {
         },
     );
 
-    let user2_authorized_intent_5 = OtcAuthorizedTradeIntent {
+    let user2_authorized_intent_5 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_5,
-        authorization_method: OtcAuthorizationMethod::Signature(user2_signature_5),
+        authorization_method: AuthorizationMethod::Signature(user2_signature_5),
     };
 
     let operations = vec![Operation::DexCall {
         dex_id: dex_id.clone(),
         method: "match".to_string(),
         args: Base64VecU8(
-            near_sdk::borsh::to_vec(&OtcMatchArgs {
+            near_sdk::borsh::to_vec(&MatchArgs {
                 authorized_trade_intents: vec![
                     user1_authorized_intent_reuse_nonce,
                     user2_authorized_intent_5,
                 ],
-                output_destination: OtcOutputDestination::InternalOtcBalance,
+                output_destination: OutputDestination::InternalOtcBalance,
             })
             .unwrap(),
         ),

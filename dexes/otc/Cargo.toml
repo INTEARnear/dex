@@ -9,5 +9,6 @@ crate-type = ["cdylib"]
 [dependencies]
 near-sdk = { version = "5", features = ["unstable"] }
 intear-dex-types = { path = "../../intear-dex-types", features = ["dex"] }
+otc-dex-types = { path = "types", features = ["dex"] }
 talc = { version = "4.4.3", default-features = false, features = ["lock_api"] }
 crypto-bigint = { version = "0.6.1", default-features = false }
