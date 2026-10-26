@@ -355,10 +355,9 @@ pub fn predecessor_account_id(
     register_id: u64,
 ) -> Result<(), wasmi::Error> {
     let predecessor_id = match &caller.data().call_type {
-        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
-            trader.alleged_account_id()
-        }
-        CallType::TradeView { trader, .. } => trader,
+        CallType::Call { caller: trader, .. }
+        | CallType::Trade { trader, .. }
+        | CallType::TradeView { trader, .. } => trader.alleged_account_id(),
         CallType::View { .. } => {
             return Err(wasmi::Error::new(
                 "predecessor_account_id is only allowed in trades or call functions",
@@ -372,8 +371,9 @@ pub fn predecessor_account_id(
 
 pub fn caller(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
     let trader = match &caller.data().call_type {
-        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => trader.clone(),
-        CallType::TradeView { trader, .. } => intear_dex_types::Caller::Direct(trader.clone()),
+        CallType::Call { caller: trader, .. }
+        | CallType::Trade { trader, .. }
+        | CallType::TradeView { trader, .. } => trader.clone(),
         CallType::View { .. } => {
             return Err(wasmi::Error::new(
                 "trader is only allowed in trades or call functions",
@@ -801,6 +801,9 @@ pub fn ed25519_verify(
 }
 
 pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
+    if matches!(caller.data().call_type, CallType::TradeView { .. }) {
+        return Ok(());
+    }
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
@@ -877,6 +880,9 @@ fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {
 }
 
 pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
+    if matches!(caller.data().call_type, CallType::TradeView { .. }) {
+        return Ok(());
+    }
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")

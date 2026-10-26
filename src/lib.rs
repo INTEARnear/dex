@@ -96,7 +96,7 @@ enum CallType<'a> {
     },
     TradeView {
         dex_storage: &'a DexStorage,
-        trader: AccountId,
+        trader: Caller,
         ephemeral_storage_updates: HashMap<Vec<u8>, Option<Vec<u8>>>,
     },
     View {
@@ -543,13 +543,14 @@ impl DexEngine {
         self.internal_simulate_swap_simple(
             dex_id,
             message,
-            trader,
+            Caller::Direct(trader),
             asset_in,
             asset_out,
             amount,
             referrer,
             referral_fees.unwrap_or_default(),
         )
+        .unwrap_or_else(|err| panic!("{err}"))
     }
 
     pub fn are_assets_registered(&self, asset_ids: Vec<AssetId>, r#for: AccountOrDexId) -> bool {

@@ -9,7 +9,7 @@ use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
 pub use engine_api::{
     AccountOrDexId, BalanceUpdate, DepositMessage, DexEventData, DirectWithdrawAmount,
     FULL_FEE_FRACTION, FeeFraction, IntearDexEvent, MAX_REFERRAL_FEE_FRACTION, MAX_REFERRERS,
-    Operation, ReferralFees, SwapOperationAmount, WithdrawAmount,
+    Operation, ReferralFees, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 #[cfg(feature = "json")]
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};

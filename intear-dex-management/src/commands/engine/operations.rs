@@ -168,6 +168,9 @@ impl RunContext {
                             ..
                         }
                         | Operation::SwapSimple { dex_id, .. } => referenced_dexes.push(dex_id),
+                        Operation::SwapAdvanced { options, .. } => {
+                            referenced_dexes.extend(options.iter().map(|option| &option.dex_id))
+                        }
                         Operation::DexCall { dex_id, method, .. } => {
                             if method == "swap" {
                                 return Err(PreflightError::ReservedDexMethod.into_report());
@@ -310,6 +313,49 @@ fn operation_step(
             .map(|minimum_amount_out| format!(", getting at least {minimum_amount_out}")),
         None => Ok(String::new()),
     };
+    let swap_label = |venue: &str,
+                      asset_in: &AssetId,
+                      asset_out: &AssetId,
+                      amount: &SwapOperationAmount,
+                      constraint: &Option<U128>|
+     -> color_eyre::eyre::Result<String> {
+        Ok(match amount {
+            SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount_in))) => format!(
+                "Swap {} for {} {venue}{}",
+                amount_label(asset_in, *amount_in)?,
+                asset_label(asset_out)?,
+                at_least_out(asset_out, constraint)?
+            ),
+            SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(amount_out))) => {
+                let at_most_in = match constraint {
+                    Some(U128(maximum_amount_in)) => {
+                        format!(
+                            ", paying at most {}",
+                            amount_label(asset_in, *maximum_amount_in)?
+                        )
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    "Swap {} for {} {venue}{at_most_in}",
+                    asset_label(asset_in)?,
+                    amount_label(asset_out, *amount_out)?
+                )
+            }
+            SwapOperationAmount::OutputOfLastIn => format!(
+                "Swap the {} that the previous swap made for {} {venue}{}",
+                asset_label(asset_in)?,
+                asset_label(asset_out)?,
+                at_least_out(asset_out, constraint)?
+            ),
+            SwapOperationAmount::EntireBalanceIn => format!(
+                "Swap all of {signer_id}'s {} for {} {venue}{}",
+                asset_label(asset_in)?,
+                asset_label(asset_out)?,
+                at_least_out(asset_out, constraint)?
+            ),
+        })
+    };
     Ok(match operation {
         Operation::RegisterAssets { asset_ids, r#for } => format!(
             "Register {} for {}",
@@ -366,42 +412,33 @@ fn operation_step(
             asset_out,
             amount,
             constraint,
-        } => match amount {
-            SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount_in))) => format!(
-                "Swap {} for {} on {dex_id}{}",
-                amount_label(asset_in, *amount_in)?,
-                asset_label(asset_out)?,
-                at_least_out(asset_out, constraint)?
+        } => swap_label(
+            &format!("on {dex_id}"),
+            asset_in,
+            asset_out,
+            amount,
+            constraint,
+        )?,
+        Operation::SwapAdvanced {
+            asset_in,
+            asset_out,
+            amount,
+            constraint,
+            options,
+        } => swap_label(
+            &format!(
+                "on the best of {}",
+                options
+                    .iter()
+                    .map(|option| option.dex_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(amount_out))) => {
-                let at_most_in = match constraint {
-                    Some(U128(maximum_amount_in)) => {
-                        format!(
-                            ", paying at most {}",
-                            amount_label(asset_in, *maximum_amount_in)?
-                        )
-                    }
-                    None => String::new(),
-                };
-                format!(
-                    "Swap {} for {} on {dex_id}{at_most_in}",
-                    asset_label(asset_in)?,
-                    amount_label(asset_out, *amount_out)?
-                )
-            }
-            SwapOperationAmount::OutputOfLastIn => format!(
-                "Swap the {} that the previous swap made for {} on {dex_id}{}",
-                asset_label(asset_in)?,
-                asset_label(asset_out)?,
-                at_least_out(asset_out, constraint)?
-            ),
-            SwapOperationAmount::EntireBalanceIn => format!(
-                "Swap all of {signer_id}'s {} for {} on {dex_id}{}",
-                asset_label(asset_in)?,
-                asset_label(asset_out)?,
-                at_least_out(asset_out, constraint)?
-            ),
-        },
+            asset_in,
+            asset_out,
+            amount,
+            constraint,
+        )?,
         Operation::DexCall {
             dex_id,
             method,

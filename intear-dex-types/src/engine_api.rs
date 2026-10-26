@@ -133,6 +133,15 @@ pub enum SwapOperationAmount {
     EntireBalanceIn,
 }
 
+/// A dex that [`Operation::SwapAdvanced`] can swap on, with the message to pass to it
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct SwapOption {
+    pub dex_id: DexId,
+    pub message: Base64VecU8,
+}
+
 #[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 #[near(serializers=[json])]
@@ -170,6 +179,18 @@ pub enum Operation {
         amount: SwapOperationAmount,
         /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
         constraint: Option<U128>,
+    },
+    /// Simulate the swap on each of `options` and swap on the one that gives
+    /// the most output (for ExactIn) or takes the least input (for ExactOut).
+    /// Options whose simulation fails are skipped, and the swap fails if it's
+    /// worse than the simulation of the chosen option.
+    SwapAdvanced {
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapOperationAmount,
+        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
+        constraint: Option<U128>,
+        options: Vec<SwapOption>,
     },
     /// Call a method on a dex.
     DexCall {

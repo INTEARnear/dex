@@ -26,7 +26,7 @@ impl CallEvents {
         }
     }
 
-    pub fn dex_events_emitted(&mut self, dex_events: Vec<DexEventData>) {
+    pub fn extend_dex_events(&mut self, dex_events: Vec<DexEventData>) {
         self.dex_events.extend(dex_events);
     }
 
