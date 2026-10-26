@@ -28,7 +28,7 @@ enum StorageKey {
 }
 
 #[derive(Default)]
-#[near(serializers=[borsh, json])]
+#[near(serializers=[borsh])]
 pub struct StorageBalance {
     total: NearToken,
     used: NearToken,
@@ -52,13 +52,13 @@ pub struct OtcDex {
 
 pub type Nonce = U128;
 
-#[near(serializers=[json, borsh])]
+#[near(serializers=[borsh])]
 enum AuthorizationMethod {
     Signature(Base64VecU8),
     Predecessor,
 }
 
-#[near(serializers=[json, borsh])]
+#[near(serializers=[borsh])]
 pub struct AuthorizedTradeIntent {
     trade_intent: TradeIntent,
     authorization_method: AuthorizationMethod,
@@ -146,7 +146,7 @@ impl AuthorizedTradeIntent {
     }
 }
 
-#[near(serializers=[json, borsh])]
+#[near(serializers=[borsh])]
 #[derive(Debug)]
 pub struct TradeIntent {
     user_id: AccountId,
@@ -154,40 +154,39 @@ pub struct TradeIntent {
     asset_out: AssetId,
     amount_in: U128,
     amount_out: U128,
-    #[serde(default, skip_serializing_if = "is_default")]
     validity: Validity,
 }
 
 #[derive(Default, PartialEq, Debug)]
-#[near(serializers=[json, borsh])]
+#[near(serializers=[borsh])]
 pub struct Validity {
     expiry: Option<ExpiryCondition>,
     nonce: Option<Nonce>,
     only_for_whitelisted_parties: Option<Vec<AccountId>>,
 }
 
-fn is_default<T: Default + PartialEq>(value: &T) -> bool {
-    value == &T::default()
-}
-
 #[derive(PartialEq, Clone, Copy, Debug)]
-#[near(serializers=[borsh, json])]
+#[near(serializers=[borsh])]
 pub enum ExpiryCondition {
     BlockHeight(BlockHeight),
     Timestamp { milliseconds: U64 },
 }
 
-#[near(event_json(standard = "simpleswap"))]
+#[near(serializers=[borsh])]
 enum OtcTradeEvent {
-    #[event_version("1.0.0")]
     AuthorizedKeyChanged {
         account_id: AccountId,
         key: PublicKey,
     },
-    #[event_version("1.0.0")]
     Trade {
         authorized_trade_intents: Vec<AuthorizedTradeIntent>,
     },
+}
+
+impl OtcTradeEvent {
+    fn emit(&self) {
+        env::dex_event(self);
+    }
 }
 
 #[near]

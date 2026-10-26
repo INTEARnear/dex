@@ -36,20 +36,13 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn dex_event(len: u64, ptr: u64);
-}
-
 trait Emit {
     fn emit(&self);
 }
 
 impl Emit for XykDexEvent {
-    /// Logs the event as borsh through the engine, which costs less gas than JSON
     fn emit(&self) {
-        let event = near_sdk::borsh::to_vec(self).expect("Failed to serialize event");
-        unsafe { dex_event(event.len() as u64, event.as_ptr() as u64) };
+        env::dex_event(&self);
     }
 }
 

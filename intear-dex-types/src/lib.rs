@@ -279,12 +279,15 @@ impl Caller {
 
 #[cfg(feature = "dex")]
 pub mod env {
+    use near_sdk::borsh::BorshSerialize;
+
     use crate::Caller;
 
     mod sys {
         #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
         unsafe extern "C" {
             pub fn caller(register_id: u64);
+            pub fn dex_event(len: u64, ptr: u64);
         }
     }
 
@@ -294,6 +297,11 @@ pub mod env {
         unsafe { sys::caller(REGISTER_ID) };
         let caller = near_sdk::env::read_register(REGISTER_ID).expect("Caller not returned");
         near_sdk::borsh::from_slice(&caller).expect("Invalid caller")
+    }
+
+    pub fn dex_event<T: BorshSerialize>(event: &T) {
+        let event = near_sdk::borsh::to_vec(event).expect("Failed to serialize event");
+        unsafe { sys::dex_event(event.len() as u64, event.as_ptr() as u64) };
     }
 }
 
