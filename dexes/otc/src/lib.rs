@@ -642,43 +642,25 @@ impl OtcDex {
 
     fn mark_trade_intent_used(&mut self, authorized_trade_intent: &AuthorizedTradeIntent) {
         let trade_intent = &authorized_trade_intent.trade_intent;
-        // remove up to 10 used nonces that are no longer valid
-        const NONCES_TO_REMOVE_AT_ONCE: usize = 10;
         let storage_usage_before = near_sdk::env::storage_usage();
         if let Some(map) = self
             .used_expirable_nonces_block_height
             .get_mut(&trade_intent.user_id)
-        {
-            for (block_height, nonce) in map
-                .keys()
-                .take(NONCES_TO_REMOVE_AT_ONCE)
-                .copied()
-                .collect::<Vec<_>>()
-            {
-                if block_height < near_sdk::env::block_height() {
+            && let Some((block_height, nonce)) = map.keys().next().copied()
+                && block_height < near_sdk::env::block_height() {
                     map.remove(&(block_height, nonce));
                     self.used_nonces
                         .remove(&(trade_intent.user_id.clone(), nonce));
                 }
-            }
-        }
         if let Some(map) = self
             .used_expirable_nonces_timestamp_millis
             .get_mut(&trade_intent.user_id)
-        {
-            for (timestamp_millis, nonce) in map
-                .keys()
-                .take(NONCES_TO_REMOVE_AT_ONCE)
-                .copied()
-                .collect::<Vec<_>>()
-            {
-                if timestamp_millis.0 < near_sdk::env::block_timestamp_ms() {
+            && let Some((timestamp_millis, nonce)) = map.keys().next().copied()
+                && timestamp_millis.0 < near_sdk::env::block_timestamp_ms() {
                     map.remove(&(timestamp_millis, nonce));
                     self.used_nonces
                         .remove(&(trade_intent.user_id.clone(), nonce));
                 }
-            }
-        }
 
         // mark nonce as used
         if let AuthorizationMethod::Signature { nonce, .. } =

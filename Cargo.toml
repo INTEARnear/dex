@@ -38,7 +38,7 @@ near-sdk = { version = "5.29", default-features = false, features = [
     "unstable",
 ] }
 wasmi = { version = "1", default-features = false }
-intear-dex-types = { path = "./intear-dex-types", features = ["json"] }
+intear-dex-types = { path = "./intear-dex-types" }
 near-contract-standards = "5.29"
 lz4_flex = { version = "0.14", default-features = false, features = [
     "alloc",

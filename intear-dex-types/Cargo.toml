@@ -11,7 +11,6 @@ near-sdk = { version = "5", default-features = false }
 near-sdk = { version = "5", default-features = false, features = ["non-contract-usage"] }
 
 [features]
-abi = ["json", "near-sdk/abi"]
-json = []
+abi = ["near-sdk/abi"]
 # Host functions for dex code
 dex = []

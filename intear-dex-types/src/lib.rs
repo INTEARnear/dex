@@ -1,17 +1,14 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-#[cfg(feature = "json")]
 mod engine_api;
 
 use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
 
-#[cfg(feature = "json")]
 pub use engine_api::{
     AccountOrDexId, BalanceUpdate, DepositMessage, DexEventData, DirectWithdrawAmount,
     FULL_FEE_FRACTION, FeeFraction, IntearDexEvent, MAX_REFERRAL_FEE_FRACTION, MAX_REFERRERS,
     Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
-#[cfg(feature = "json")]
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use near_sdk::{
     AccountId, NearToken,
@@ -24,8 +21,7 @@ pub const CAN_PAUSE: &[&str] = &["slimedragon.near", "pause.slimedragon.near"];
 /// Request for a swap operation.
 #[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[cfg_attr(not(feature = "json"), near(serializers=[borsh]))]
-#[cfg_attr(feature = "json", near(serializers=[borsh, json]))]
+#[near(serializers=[borsh, json])]
 pub struct SwapRequest {
     /// Custom message to be passed to the dex. For example,
     /// it could be the pool ID or route.
@@ -151,7 +147,6 @@ impl FromStr for AssetId {
     }
 }
 
-#[cfg(feature = "json")]
 impl Serialize for AssetId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -161,7 +156,6 @@ impl Serialize for AssetId {
     }
 }
 
-#[cfg(feature = "json")]
 impl<'de> Deserialize<'de> for AssetId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -186,8 +180,7 @@ impl near_sdk::schemars::JsonSchema for AssetId {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[cfg_attr(not(feature = "json"), near(serializers=[borsh]))]
-#[cfg_attr(feature = "json", near(serializers=[borsh, json]))]
+#[near(serializers=[borsh, json])]
 pub enum SwapRequestAmount {
     ExactIn(U128),
     ExactOut(U128),
@@ -219,7 +212,6 @@ impl FromStr for DexId {
     }
 }
 
-#[cfg(feature = "json")]
 impl Serialize for DexId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -229,7 +221,6 @@ impl Serialize for DexId {
     }
 }
 
-#[cfg(feature = "json")]
 impl<'de> Deserialize<'de> for DexId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

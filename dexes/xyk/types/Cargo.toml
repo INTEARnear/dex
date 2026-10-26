@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 near-sdk = { version = "5", default-features = false }
-intear-dex-types = { path = "../../../intear-dex-types", features = ["json"] }
+intear-dex-types = { path = "../../../intear-dex-types" }
 ethnum = "1.5.3"
 
 [dev-dependencies]

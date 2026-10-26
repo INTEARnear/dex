@@ -16,7 +16,8 @@ pub struct StorageBalance {
     pub used: NearToken,
 }
 
-#[near(serializers=[borsh])]
+#[derive(Debug)]
+#[near(serializers=[borsh, json])]
 pub enum AuthorizationMethod {
     /// Signature of the sha256 of the borsh of the [`TradeIntentSignaturePayload`]
     /// of the trade intent and `nonce`, by the authorized key of the user. The
@@ -30,13 +31,14 @@ pub enum AuthorizationMethod {
     Predecessor,
 }
 
-#[near(serializers=[borsh])]
+#[derive(Debug)]
+#[near(serializers=[borsh, json])]
 pub struct AuthorizedTradeIntent {
     pub trade_intent: TradeIntent,
     pub authorization_method: AuthorizationMethod,
 }
 
-#[near(serializers=[borsh])]
+#[near(serializers=[borsh, json])]
 #[derive(Clone, Debug)]
 pub struct TradeIntent {
     pub user_id: AccountId,
@@ -48,7 +50,8 @@ pub struct TradeIntent {
 }
 
 /// What the authorized key of the user signs for [`AuthorizationMethod::Signature`]
-#[near(serializers=[borsh])]
+#[derive(Debug)]
+#[near(serializers=[borsh, json])]
 pub struct TradeIntentSignaturePayload {
     pub chain_id: String,
     pub engine_contract_id: AccountId,
@@ -58,14 +61,14 @@ pub struct TradeIntentSignaturePayload {
 }
 
 #[derive(Default, Clone, PartialEq, Debug)]
-#[near(serializers=[borsh])]
+#[near(serializers=[borsh, json])]
 pub struct Validity {
     pub expiry: Option<ExpiryCondition>,
     pub only_for_whitelisted_parties: Option<Vec<AccountId>>,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
-#[near(serializers=[borsh])]
+#[near(serializers=[borsh, json])]
 pub enum ExpiryCondition {
     BlockHeight(BlockHeight),
     Timestamp { milliseconds: U64 },
