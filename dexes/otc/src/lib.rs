@@ -779,15 +779,3 @@ impl OtcDex {
         }
     }
 }
-
-#[near(serializers=[borsh])]
-pub struct SimplePool {
-    assets: (AssetWithBalance, AssetWithBalance),
-    owner_id: AccountId,
-}
-
-#[near(serializers=[borsh])]
-pub struct AssetWithBalance {
-    asset_id: AssetId,
-    balance: U128,
-}
