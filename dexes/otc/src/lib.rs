@@ -369,7 +369,6 @@ impl OtcDex {
                     },
                 });
             } else {
-                let storage_usage_before = near_sdk::env::storage_usage();
                 self.balances
                     .entry((
                         authorized_trade_intent.trade_intent.user_id.clone(),
@@ -380,14 +379,13 @@ impl OtcDex {
                             b.0.checked_add(authorized_trade_intent.trade_intent.amount_out.0)
                                 .expect("Balance overflow")
                     })
-                    .or_insert(authorized_trade_intent.trade_intent.amount_out);
-                self.balances.flush();
-                let storage_usage_after = near_sdk::env::storage_usage();
-                self.charge_storage_deposit(
-                    storage_usage_before,
-                    storage_usage_after,
-                    authorized_trade_intent.trade_intent.user_id.clone(),
-                );
+                    .or_insert_with(|| {
+                        panic!(
+                            "{} has no registered balance for asset {}",
+                            authorized_trade_intent.trade_intent.user_id,
+                            authorized_trade_intent.trade_intent.asset_out,
+                        )
+                    });
             }
 
             // remove up to 10 used nonces that are no longer valid
@@ -605,6 +603,38 @@ impl OtcDex {
                 .entry((near_sdk::env::predecessor_account_id(), asset_id.clone()))
                 .and_modify(|b| b.0 = b.0.checked_add(amount.0).expect("Balance overflow"))
                 .or_insert(*amount);
+        }
+        self.balances.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        self.charge_storage_deposit(
+            storage_usage_before,
+            storage_usage_after,
+            near_sdk::env::predecessor_account_id(),
+        );
+        DexCallResponse::default()
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn register_assets(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_one_yocto();
+        #[near(serializers=[borsh])]
+        struct RegisterAssetsArgs {
+            asset_ids: Vec<AssetId>,
+        }
+        let Ok(RegisterAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        let storage_usage_before = near_sdk::env::storage_usage();
+        for asset_id in asset_ids {
+            self.balances
+                .entry((near_sdk::env::predecessor_account_id(), asset_id))
+                .or_default();
         }
         self.balances.flush();
         let storage_usage_after = near_sdk::env::storage_usage();

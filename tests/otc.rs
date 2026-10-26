@@ -12,7 +12,7 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near,
 };
-use near_workspaces::Contract;
+use near_workspaces::{Account, Contract};
 use std::collections::HashMap;
 
 #[near(serializers=[borsh])]
@@ -20,6 +20,11 @@ struct OtcStorageDepositArgs;
 
 #[near(serializers=[borsh])]
 struct OtcDepositAssetsArgs;
+
+#[near(serializers=[borsh])]
+struct OtcRegisterAssetsArgs {
+    asset_ids: Vec<AssetId>,
+}
 
 #[near(serializers=[borsh])]
 struct OtcSetAuthorizedKeyArgs {
@@ -111,6 +116,29 @@ async fn assert_otc_inner_asset_balance(
         .into());
     }
     Ok(())
+}
+
+/// Register OTC inner balances of assets for an account, so that trades can credit them.
+async fn otc_register_assets(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+    account: &Account,
+    asset_ids: Vec<AssetId>,
+) {
+    let result = account
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "register_assets",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&OtcRegisterAssetsArgs { asset_ids }).unwrap()),
+            "attached_assets": {},
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
 }
 
 #[tokio::test]
@@ -599,6 +627,15 @@ async fn test_otc_relayed_by_third_party() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+
+    otc_register_assets(
+        &dex_engine_contract,
+        &dex_id,
+        &user1,
+        vec![AssetId::Nep141(ft1.id().clone())],
+    )
+    .await;
+    otc_register_assets(&dex_engine_contract, &dex_id, &user2, vec![AssetId::Near]).await;
 
     let user1_trade_intent = OtcTradeIntent {
         user_id: user1.id().clone(),
@@ -1336,6 +1373,22 @@ async fn test_otc_three_intents_with_same_value() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    otc_register_assets(
+        &dex_engine_contract,
+        &dex_id,
+        &user1,
+        vec![AssetId::Nep141(ft1.id().clone())],
+    )
+    .await;
+    otc_register_assets(
+        &dex_engine_contract,
+        &dex_id,
+        &user2,
+        vec![AssetId::Nep141(ft2.id().clone())],
+    )
+    .await;
+    otc_register_assets(&dex_engine_contract, &dex_id, &user3, vec![AssetId::Near]).await;
+
     // User 1's trade intent: sell 1 NEAR for 100_000 FT1
     let user1_trade_intent = OtcTradeIntent {
         user_id: user1.id().clone(),
@@ -1674,6 +1727,15 @@ async fn test_otc_nonces() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+
+    otc_register_assets(
+        &dex_engine_contract,
+        &dex_id,
+        &user1,
+        vec![AssetId::Nep141(ft1.id().clone())],
+    )
+    .await;
+    otc_register_assets(&dex_engine_contract, &dex_id, &user2, vec![AssetId::Near]).await;
 
     // Test 1: Reuse of the same signature with nonce (should fail on second use)
     let nonce1 = U128(12345);
