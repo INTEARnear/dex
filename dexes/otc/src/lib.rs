@@ -74,6 +74,15 @@ impl Dex for OtcDex {
                 "Amount out doesn't match the intent"
             ),
         }
+        if maker_trade.validity.only_for_whitelisted_parties.is_some() {
+            expect!(
+                match &trader {
+                    Caller::Direct(_) => true,
+                    Caller::OnTransfer { transfer_of, .. } => *transfer_of == request.asset_in,
+                },
+                "Intent not authorized: a whitelisted intent can't be swapped in a transfer call of another asset, whose sender can be faked"
+            );
+        }
         self.validate_authorized_trade_intent(
             &maker_intent,
             &[&maker_trade.user_id, &trader_id],

@@ -2,7 +2,8 @@ mod common;
 use common::*;
 
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount, SwapRequestAmount,
+    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount,
+    SwapRequestAmount, WithdrawAmount,
 };
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::AccountId;
@@ -2506,6 +2507,70 @@ async fn test_otc_swap() {
 
     // The intent that failed to be taken can still be
     let result = swap(&trader, &second_intent, trade_amount_ft)
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    // Any contract can claim in ft_on_transfer that the whitelisted trader sent its token, so a
+    // whitelisted intent can't be taken in a transfer call of another asset
+    let fake_token_asset = AssetId::Nep141(outsider.id().clone());
+    let result = outsider
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({ "asset_ids": [fake_token_asset] }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = outsider
+        .call(dex_engine_contract.id(), "ft_on_transfer")
+        .max_gas()
+        .args_json(json!({
+            "sender_id": trader.id(),
+            "amount": U128(1),
+            "msg": near_sdk::serde_json::to_string(&[Operation::SwapSimple {
+                dex_id: dex_id.clone(),
+                message: signed(maker_trade(), 5),
+                asset_in: AssetId::Near,
+                asset_out: ft_asset.clone(),
+                amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(trade_amount_ft))),
+                constraint: None,
+            }])
+            .unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_failed_with(
+        result,
+        "a whitelisted intent can't be swapped in a transfer call of another asset",
+    );
+
+    // But it can be in a transfer call of the asset in, as its sender is real
+    let result = trader
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(trade_amount_near)
+        .args_json(json!({
+            "operations": [
+                Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: signed(maker_trade(), 6),
+                    asset_in: AssetId::Near,
+                    asset_out: ft_asset.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(trade_amount_ft))),
+                    constraint: Some(U128(trade_amount_near.as_yoctonear())),
+                },
+                Operation::Withdraw {
+                    asset_id: ft_asset.clone(),
+                    amount: WithdrawAmount::Full { at_least: None },
+                    to: None,
+                    rescue_address: None,
+                },
+            ],
+        }))
+        .transact()
         .await
         .unwrap();
     assert_success(&result).unwrap();
