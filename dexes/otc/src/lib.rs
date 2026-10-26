@@ -478,8 +478,18 @@ impl OtcDex {
                 }
             }
 
-            // self.used_nonces is not flushed because it
-            // is a LookupSet which writes immediately
+            if let Some(map) = self
+                .used_expirable_nonces_block_height
+                .get_mut(&authorized_trade_intent.trade_intent.user_id)
+            {
+                map.flush();
+            }
+            if let Some(map) = self
+                .used_expirable_nonces_timestamp_millis
+                .get_mut(&authorized_trade_intent.trade_intent.user_id)
+            {
+                map.flush();
+            }
             self.used_expirable_nonces_block_height.flush();
             self.used_expirable_nonces_timestamp_millis.flush();
 
