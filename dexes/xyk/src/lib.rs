@@ -4,8 +4,8 @@ use core::panic;
 use std::{collections::HashMap, num::NonZeroU128};
 
 use intear_dex_types::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Dex, DexCallResponse, SwapRequest,
-    SwapRequestAmount, SwapResponse, expect,
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
+    SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey, assert_one_yocto,
@@ -218,7 +218,13 @@ impl XykDex {
         );
         if let Some(trader_id) = &discount.trader_id {
             expect!(
-                *trader_id == near_sdk::env::predecessor_account_id(),
+                match env::caller() {
+                    Caller::Direct(account_id) => account_id == *trader_id,
+                    Caller::OnTransfer {
+                        alleged_sender,
+                        transfer_of,
+                    } => alleged_sender == *trader_id && transfer_of == request.asset_in,
+                },
                 "Fee discount is for another trader"
             );
         }
@@ -715,9 +721,12 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
         expect!(
-            near_sdk::env::predecessor_account_id() == CAN_MIGRATE,
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
+        expect!(
+            caller_id == CAN_MIGRATE,
             "Only owner can set the fee discount signer"
         );
         let Ok(SetFeeDiscountSignerArgs {
@@ -740,7 +749,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(CreatePoolArgs {
             assets,
             fees,
@@ -867,10 +879,7 @@ impl XykDex {
         let pool_id = self.pools.len();
         let new_public_pool_user_shares = || {
             let mut user_shares = LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
-            user_shares.insert(
-                near_sdk::env::predecessor_account_id(),
-                Some(INITIAL_SHARES),
-            );
+            user_shares.insert(caller_id.clone(), Some(INITIAL_SHARES));
             user_shares.flush();
             user_shares
         };
@@ -913,7 +922,7 @@ impl XykDex {
                         },
                     ),
                     fees: fees.clone(),
-                    owner_id: near_sdk::env::predecessor_account_id(),
+                    owner_id: caller_id.clone(),
                     locked: false,
                 }
             }
@@ -1011,7 +1020,7 @@ impl XykDex {
                         },
                     ),
                     fees: fees.clone(),
-                    owner_id: near_sdk::env::predecessor_account_id(),
+                    owner_id: caller_id.clone(),
                 }
             }
             PoolType::PublicV1 => {
@@ -1097,7 +1106,7 @@ impl XykDex {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
+                        caller_id.clone(),
                     ),
                 }]
             } else {
@@ -1117,7 +1126,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(RegisterLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1136,8 +1148,7 @@ impl XykDex {
         );
 
         let storage_usage_before = near_sdk::env::storage_usage();
-        let predecessor_id = near_sdk::env::predecessor_account_id();
-        user_shares.entry(predecessor_id).or_insert(None);
+        user_shares.entry(caller_id.clone()).or_insert(None);
         user_shares.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
         let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
@@ -1156,7 +1167,7 @@ impl XykDex {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
+                        caller_id.clone(),
                     ),
                 }]
             } else {
@@ -1176,7 +1187,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(AddLiquidityArgs {
             pool_id,
             min_shares_received,
@@ -1212,10 +1226,7 @@ impl XykDex {
                 fees: _,
                 locked: _,
             } => {
-                expect!(
-                    *owner_id == near_sdk::env::predecessor_account_id(),
-                    "Only pool owner can add liquidity"
-                );
+                expect!(*owner_id == caller_id, "Only pool owner can add liquidity");
                 expect!(
                     min_shares_received.is_none(),
                     "Min shares received must not be specified for private pools"
@@ -1284,7 +1295,7 @@ impl XykDex {
                     "Amounts must be greater than 0"
                 );
                 expect!(
-                    user_shares.contains_key(&near_sdk::env::predecessor_account_id()),
+                    user_shares.contains_key(&caller_id),
                     "User has not registered using register_liquidity"
                 );
                 let mut asset_withdraw_requests = Vec::new();
@@ -1310,10 +1321,7 @@ impl XykDex {
                             *total_shares = Some(INITIAL_SHARES);
                             expect!(
                                 user_shares
-                                    .insert(
-                                        near_sdk::env::predecessor_account_id(),
-                                        Some(INITIAL_SHARES)
-                                    )
+                                    .insert(caller_id.clone(), Some(INITIAL_SHARES))
                                     .is_some_and(|s| s.is_none()),
                                 "User already has shares but there are no total shares"
                             );
@@ -1380,7 +1388,7 @@ impl XykDex {
                                 .checked_add(shares_to_mint.get())
                                 .expect("Overflow");
                             user_shares
-                                .entry(near_sdk::env::predecessor_account_id())
+                                .entry(caller_id.clone())
                                 .and_modify(|shares| match shares {
                                     Some(shares) => {
                                         *shares = shares
@@ -1400,7 +1408,7 @@ impl XykDex {
                                     asset_id: assets.0.asset_id.clone(),
                                     amount: U128(refund_amount_0),
                                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                                        near_sdk::env::predecessor_account_id(),
+                                        caller_id.clone(),
                                     ),
                                 });
                             }
@@ -1411,7 +1419,7 @@ impl XykDex {
                                     asset_id: assets.1.asset_id.clone(),
                                     amount: U128(refund_amount_1),
                                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                                        near_sdk::env::predecessor_account_id(),
+                                        caller_id.clone(),
                                     ),
                                 });
                             }
@@ -1424,7 +1432,7 @@ impl XykDex {
                         }
                     };
                 let new_owned_shares = user_shares
-                    .get(&near_sdk::env::predecessor_account_id())
+                    .get(&caller_id)
                     .copied()
                     .flatten()
                     .expect("User has no shares after adding liquidity");
@@ -1496,7 +1504,10 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(RemoveLiquidityArgs {
             pool_id,
             shares_to_remove,
@@ -1542,7 +1553,7 @@ impl XykDex {
                 locked: _,
             } => {
                 expect!(
-                    *owner_id == near_sdk::env::predecessor_account_id(),
+                    *owner_id == caller_id,
                     "Only pool owner can remove liquidity"
                 );
                 let shares_to_remove = shares_to_remove.unwrap_or(INITIAL_SHARES);
@@ -1601,7 +1612,7 @@ impl XykDex {
                 total_shares,
             } => {
                 let user_shares_before = user_shares
-                    .get(&near_sdk::env::predecessor_account_id())
+                    .get(&caller_id)
                     .copied()
                     .flatten()
                     .expect("User has no shares");
@@ -1662,7 +1673,7 @@ impl XykDex {
                         .checked_sub(shares_to_remove.get())
                         .expect("Underflow"),
                 );
-                user_shares.insert(near_sdk::env::predecessor_account_id(), user_shares_after);
+                user_shares.insert(caller_id.clone(), user_shares_after);
                 let total_shares_after = total_shares.map(|s| s.get()).unwrap_or_default();
                 let (new_owned_asset_0, new_owned_asset_1) = match (
                     user_shares_after,
@@ -1677,7 +1688,7 @@ impl XykDex {
                     _ => (0, 0),
                 };
                 (
-                    near_sdk::env::predecessor_account_id(),
+                    caller_id.clone(),
                     (assets.0.asset_id.clone(), withdrawn_amount_0),
                     (assets.1.asset_id.clone(), withdrawn_amount_1),
                     shares_to_remove.get(),
@@ -1748,7 +1759,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(EditFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1763,10 +1777,7 @@ impl XykDex {
             Pool::PrivateV1 {
                 assets, owner_id, ..
             } => {
-                expect!(
-                    *owner_id == near_sdk::env::predecessor_account_id(),
-                    "Only pool owner can edit fees"
-                );
+                expect!(*owner_id == caller_id, "Only pool owner can edit fees");
                 assets
             }
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
@@ -1782,10 +1793,7 @@ impl XykDex {
                 ..
             } => {
                 expect!(!*locked, "Pool is locked");
-                expect!(
-                    *owner_id == near_sdk::env::predecessor_account_id(),
-                    "Only pool owner can edit fees"
-                );
+                expect!(*owner_id == caller_id, "Only pool owner can edit fees");
                 assets
             }
         };
@@ -1868,7 +1876,7 @@ impl XykDex {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
+                        caller_id.clone(),
                     ),
                 }]
             } else {
@@ -1886,7 +1894,10 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(WithdrawFeesArgs { assets }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -1896,7 +1907,7 @@ impl XykDex {
         for asset_id in assets {
             let Some(balance) = self
                 .fees_collected_by_users
-                .get(&(near_sdk::env::predecessor_account_id(), asset_id.clone()))
+                .get(&(caller_id.clone(), asset_id.clone()))
                 .cloned()
             else {
                 continue;
@@ -1904,16 +1915,12 @@ impl XykDex {
             if balance.0 == 0 {
                 continue;
             }
-            self.fees_collected_by_users.insert(
-                (near_sdk::env::predecessor_account_id(), asset_id.clone()),
-                U128(0),
-            );
+            self.fees_collected_by_users
+                .insert((caller_id.clone(), asset_id.clone()), U128(0));
             asset_withdraw_requests.push(AssetWithdrawRequest {
                 asset_id,
                 amount: balance,
-                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
-                    near_sdk::env::predecessor_account_id(),
-                ),
+                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(caller_id.clone()),
             });
         }
 
@@ -1932,7 +1939,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(UpgradePoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -2005,7 +2015,7 @@ impl XykDex {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
+                        caller_id.clone(),
                     ),
                 }]
             } else {
@@ -2023,7 +2033,10 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(LockPoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -2038,10 +2051,7 @@ impl XykDex {
             Pool::PrivateV2 {
                 owner_id, locked, ..
             } => {
-                expect!(
-                    *owner_id == near_sdk::env::predecessor_account_id(),
-                    "Only pool owner can lock the pool"
-                );
+                expect!(*owner_id == caller_id, "Only pool owner can lock the pool");
                 *locked = true;
             }
             Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
@@ -2068,7 +2078,10 @@ impl XykDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(RegisterFeeAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -2079,10 +2092,7 @@ impl XykDex {
         for asset_id in asset_ids {
             if self
                 .fees_collected_by_users
-                .insert(
-                    (near_sdk::env::predecessor_account_id(), asset_id.clone()),
-                    U128(0),
-                )
+                .insert((caller_id.clone(), asset_id.clone()), U128(0))
                 .is_some()
             {
                 panic!("Asset {asset_id} already registered");
@@ -2103,7 +2113,7 @@ impl XykDex {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        near_sdk::env::predecessor_account_id(),
+                        caller_id.clone(),
                     ),
                 }]
             } else {

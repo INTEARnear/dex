@@ -241,6 +241,7 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, input);
         $crate::impl_host_function!($var, attached_deposit);
         $crate::impl_host_function!($var, predecessor_account_id);
+        $crate::impl_host_function!($var, caller);
         $crate::impl_host_function!($var, value_return);
         $crate::impl_host_function!($var, panic);
         $crate::impl_host_function!($var, panic_utf8);
@@ -330,7 +331,7 @@ pub fn attached_deposit(
 ) -> Result<(), wasmi::Error> {
     let attached_deposit = match caller.data().call_type {
         CallType::Call {
-            is_authorized: true,
+            caller: intear_dex_types::Caller::Direct(_),
             ..
         } => NearToken::from_yoctonear(1),
         _ => NearToken::default(),
@@ -353,21 +354,34 @@ pub fn predecessor_account_id(
     mut caller: Caller<'_, RunnerData>,
     register_id: u64,
 ) -> Result<(), wasmi::Error> {
-    let (CallType::Call { predecessor_id, .. }
-    | CallType::Trade {
-        alleged_trader: predecessor_id,
-        ..
-    }
-    | CallType::TradeView {
-        trader: predecessor_id,
-        ..
-    }) = &caller.data().call_type
-    else {
-        return Err(wasmi::Error::new(
-            "predecessor_account_id is only allowed in trades or call functions",
-        ));
+    let predecessor_id = match &caller.data().call_type {
+        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
+            trader.alleged_account_id()
+        }
+        CallType::TradeView { trader, .. } => trader,
+        CallType::View { .. } => {
+            return Err(wasmi::Error::new(
+                "predecessor_account_id is only allowed in trades or call functions",
+            ));
+        }
     };
     let buf = predecessor_id.to_string().into_bytes();
+    caller.data_mut().registers.insert(register_id, buf);
+    Ok(())
+}
+
+pub fn caller(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
+    let trader = match &caller.data().call_type {
+        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => trader.clone(),
+        CallType::TradeView { trader, .. } => intear_dex_types::Caller::Direct(trader.clone()),
+        CallType::View { .. } => {
+            return Err(wasmi::Error::new(
+                "trader is only allowed in trades or call functions",
+            ));
+        }
+    };
+    let buf = near_sdk::borsh::to_vec(&trader)
+        .map_err(|err| wasmi::Error::new(format!("Failed to serialize trader: {err}")))?;
     caller.data_mut().registers.insert(register_id, buf);
     Ok(())
 }
@@ -855,8 +869,9 @@ pub fn dex_event(
 
 fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {
     match &data.call_type {
-        CallType::Call { predecessor_id, .. } => Some(predecessor_id.clone()),
-        CallType::Trade { alleged_trader, .. } => Some(alleged_trader.clone()),
+        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
+            Some(trader.alleged_account_id().clone())
+        }
         _ => None,
     }
 }

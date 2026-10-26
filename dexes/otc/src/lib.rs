@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use crypto_bigint::{ConstChoice, I256, U256};
 use intear_dex_types::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Dex, DexCallResponse, SwapRequest,
-    SwapResponse, expect,
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
+    SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey, assert_one_yocto,
+    AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey,
     json_types::{Base64VecU8, U64, U128},
     near,
     store::{LookupMap, LookupSet, TreeMap},
@@ -65,7 +65,7 @@ pub struct AuthorizedTradeIntent {
 }
 
 impl AuthorizedTradeIntent {
-    fn validate(&self, dex: &OtcDex, all_user_ids: &[&AccountId]) {
+    fn validate(&self, dex: &OtcDex, all_user_ids: &[&AccountId], trader: &Caller) {
         if let Some(expiry) = &self.trade_intent.validity.expiry {
             match expiry {
                 ExpiryCondition::BlockHeight(block_height) => {
@@ -98,8 +98,8 @@ impl AuthorizedTradeIntent {
         match &self.authorization_method {
             AuthorizationMethod::Predecessor => {
                 expect!(
-                    near_sdk::env::predecessor_account_id() == self.trade_intent.user_id,
-                    "Intent not authorized: AuthorizationMethod::Predecessor cannot be used if the predecessor is not the user"
+                    matches!(trader, Caller::Direct(trader_id) if *trader_id == self.trade_intent.user_id),
+                    "Intent not authorized: AuthorizationMethod::Predecessor can only be used if the user calls directly, not in a transfer call"
                 );
             }
             AuthorizationMethod::Signature(signature) => {
@@ -247,14 +247,13 @@ impl OtcDex {
         else {
             near_sdk::env::panic_str("Invalid args");
         };
+        let trader = env::caller();
 
         let mut all_required_assets_were_attached = false;
         if !attached_assets.is_empty() {
             let mut required_assets = HashMap::<AssetId, U128>::new();
             for authorized_trade_intent in authorized_trade_intents.iter() {
-                if authorized_trade_intent.trade_intent.user_id
-                    == near_sdk::env::predecessor_account_id()
-                {
+                if authorized_trade_intent.trade_intent.user_id == *trader.alleged_account_id() {
                     required_assets
                         .entry(authorized_trade_intent.trade_intent.asset_in.clone())
                         .and_modify(|b| {
@@ -272,8 +271,8 @@ impl OtcDex {
             all_required_assets_were_attached = true;
         }
         expect!(
-            all_required_assets_were_attached || !near_sdk::env::attached_deposit().is_zero(),
-            "You must attach all required assets if dex call is not authorized",
+            all_required_assets_were_attached || matches!(trader, Caller::Direct(_)),
+            "You must attach all required assets in a transfer call",
         );
 
         let mut assets_net_change = HashMap::<AssetId, I256>::new();
@@ -316,11 +315,11 @@ impl OtcDex {
                     .iter()
                     .map(|i| &i.trade_intent.user_id)
                     .collect::<Vec<&AccountId>>(),
+                &trader,
             );
 
             // update balances
-            if authorized_trade_intent.trade_intent.user_id
-                == near_sdk::env::predecessor_account_id()
+            if authorized_trade_intent.trade_intent.user_id == *trader.alleged_account_id()
                 && all_required_assets_were_attached
             {
                 // already accepted attached_assets
@@ -344,8 +343,7 @@ impl OtcDex {
                     });
             }
 
-            if authorized_trade_intent.trade_intent.user_id
-                == near_sdk::env::predecessor_account_id()
+            if authorized_trade_intent.trade_intent.user_id == *trader.alleged_account_id()
                 && matches!(
                     output_destination,
                     OutputDestination::IntearDexBalance | OutputDestination::WithdrawToUser
@@ -523,7 +521,7 @@ impl OtcDex {
         let Ok(StorageDepositArgs) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let predecessor_id = near_sdk::env::predecessor_account_id();
+        let account_id = env::caller().alleged_account_id().clone();
         let Some(attached_near) = attached_assets.remove(&AssetId::Near) else {
             panic!("Near not attached");
         };
@@ -533,7 +531,7 @@ impl OtcDex {
             "No assets other than NEAR should be attached"
         );
         self.storage_balances
-            .entry(predecessor_id.clone())
+            .entry(account_id.clone())
             .and_modify(|b| b.total = b.total.saturating_add(attached_near))
             .or_insert(StorageBalance {
                 total: attached_near,
@@ -542,7 +540,7 @@ impl OtcDex {
         let storage_usage_before = near_sdk::env::storage_usage();
         self.storage_balances.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
-        self.charge_storage_deposit(storage_usage_before, storage_usage_after, predecessor_id);
+        self.charge_storage_deposit(storage_usage_before, storage_usage_after, account_id);
 
         DexCallResponse {
             add_storage_deposit: attached_near,
@@ -557,7 +555,10 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct SetAuthorizedKeyArgs {
             key: PublicKey,
@@ -567,17 +568,12 @@ impl OtcDex {
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
         let storage_usage_before = near_sdk::env::storage_usage();
-        self.authorized_keys
-            .insert(near_sdk::env::predecessor_account_id(), key.clone());
+        self.authorized_keys.insert(caller_id.clone(), key.clone());
         self.authorized_keys.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
-        self.charge_storage_deposit(
-            storage_usage_before,
-            storage_usage_after,
-            near_sdk::env::predecessor_account_id(),
-        );
+        self.charge_storage_deposit(storage_usage_before, storage_usage_after, caller_id.clone());
         OtcTradeEvent::AuthorizedKeyChanged {
-            account_id: near_sdk::env::predecessor_account_id(),
+            account_id: caller_id,
             key,
         }
         .emit();
@@ -591,7 +587,10 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct DepositAssetsArgs;
         let Ok(DepositAssetsArgs) = near_sdk::borsh::from_slice(&args) else {
@@ -600,17 +599,13 @@ impl OtcDex {
         let storage_usage_before = near_sdk::env::storage_usage();
         for (asset_id, amount) in attached_assets.iter() {
             self.balances
-                .entry((near_sdk::env::predecessor_account_id(), asset_id.clone()))
+                .entry((caller_id.clone(), asset_id.clone()))
                 .and_modify(|b| b.0 = b.0.checked_add(amount.0).expect("Balance overflow"))
                 .or_insert(*amount);
         }
         self.balances.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
-        self.charge_storage_deposit(
-            storage_usage_before,
-            storage_usage_after,
-            near_sdk::env::predecessor_account_id(),
-        );
+        self.charge_storage_deposit(storage_usage_before, storage_usage_after, caller_id);
         DexCallResponse::default()
     }
 
@@ -621,7 +616,10 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct RegisterAssetsArgs {
             asset_ids: Vec<AssetId>,
@@ -633,16 +631,12 @@ impl OtcDex {
         let storage_usage_before = near_sdk::env::storage_usage();
         for asset_id in asset_ids {
             self.balances
-                .entry((near_sdk::env::predecessor_account_id(), asset_id))
+                .entry((caller_id.clone(), asset_id))
                 .or_default();
         }
         self.balances.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
-        self.charge_storage_deposit(
-            storage_usage_before,
-            storage_usage_after,
-            near_sdk::env::predecessor_account_id(),
-        );
+        self.charge_storage_deposit(storage_usage_before, storage_usage_after, caller_id);
         DexCallResponse::default()
     }
 
@@ -653,7 +647,10 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct WithdrawAssetsArgs {
             assets: Vec<WithdrawRequest>,
@@ -682,12 +679,12 @@ impl OtcDex {
         {
             let amount = amount.unwrap_or_else(|| {
                 self.balances
-                    .get(&(near_sdk::env::predecessor_account_id(), asset_id.clone()))
+                    .get(&(caller_id.clone(), asset_id.clone()))
                     .copied()
                     .unwrap_or_default()
             });
             self.balances
-                .entry((near_sdk::env::predecessor_account_id(), asset_id.clone()))
+                .entry((caller_id.clone(), asset_id.clone()))
                 .and_modify(|b| {
                     b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
                         panic!(
@@ -699,9 +696,7 @@ impl OtcDex {
                 .or_insert_with(|| {
                     panic!("Not enough balance for asset {asset_id}: 0 < {}", amount.0)
                 });
-            let to = to
-                .clone()
-                .unwrap_or_else(near_sdk::env::predecessor_account_id);
+            let to = to.clone().unwrap_or_else(|| caller_id.clone());
             asset_withdraw_requests.push(AssetWithdrawRequest {
                 asset_id: asset_id.clone(),
                 amount,
@@ -714,11 +709,7 @@ impl OtcDex {
         }
         self.balances.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
-        self.charge_storage_deposit(
-            storage_usage_before,
-            storage_usage_after,
-            near_sdk::env::predecessor_account_id(),
-        );
+        self.charge_storage_deposit(storage_usage_before, storage_usage_after, caller_id);
         DexCallResponse {
             asset_withdraw_requests,
             ..Default::default()

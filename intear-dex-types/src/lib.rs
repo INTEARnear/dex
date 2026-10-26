@@ -252,6 +252,51 @@ impl near_sdk::schemars::JsonSchema for DexId {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[borsh])]
+pub enum Caller {
+    /// The account called the engine directly, so the call is fully authorized
+    Direct(AccountId),
+    /// Assets were sent to the engine with operations: a token contract called its
+    /// `*_on_transfer` and claims that `alleged_sender` sent `transfer_of`, or
+    /// `alleged_sender` called `deposit_near`. The alleged sender can be faked by
+    /// a malicious transfer_of contract.
+    OnTransfer {
+        alleged_sender: AccountId,
+        transfer_of: AssetId,
+    },
+}
+
+impl Caller {
+    pub fn alleged_account_id(&self) -> &AccountId {
+        match self {
+            Self::Direct(account_id) => account_id,
+            Self::OnTransfer { alleged_sender, .. } => alleged_sender,
+        }
+    }
+}
+
+#[cfg(feature = "dex")]
+pub mod env {
+    use crate::Caller;
+
+    mod sys {
+        #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
+        unsafe extern "C" {
+            pub fn caller(register_id: u64);
+        }
+    }
+
+    const REGISTER_ID: u64 = u64::MAX;
+
+    pub fn caller() -> Caller {
+        unsafe { sys::caller(REGISTER_ID) };
+        let caller = near_sdk::env::read_register(REGISTER_ID).expect("Caller not returned");
+        near_sdk::borsh::from_slice(&caller).expect("Invalid caller")
+    }
+}
+
 pub trait Dex {
     fn swap(&mut self, request: SwapRequest) -> SwapResponse;
 }

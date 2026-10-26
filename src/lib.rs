@@ -15,8 +15,8 @@ use crate::{
     call_events::CallEvents, internal_operations::TradeAccount, storage_management::StorageBalances,
 };
 use intear_dex_types::{
-    AccountOrDexId, AssetId, CAN_PAUSE, DexEventData, DexId, DirectWithdrawAmount, IntearDexEvent,
-    Operation, ReferralFees, SwapRequestAmount, expect,
+    AccountOrDexId, AssetId, CAN_PAUSE, Caller, DexEventData, DexId, DirectWithdrawAmount,
+    IntearDexEvent, Operation, ReferralFees, SwapRequestAmount, expect,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
@@ -92,7 +92,7 @@ enum StorageKey {
 enum CallType<'a> {
     Trade {
         dex_storage_mut: &'a mut DexStorage,
-        alleged_trader: AccountId,
+        trader: Caller,
     },
     TradeView {
         dex_storage: &'a DexStorage,
@@ -104,8 +104,7 @@ enum CallType<'a> {
     },
     Call {
         dex_storage_mut: &'a mut DexStorage,
-        predecessor_id: AccountId,
-        is_authorized: bool,
+        caller: Caller,
     },
 }
 
@@ -369,7 +368,7 @@ impl DexEngine {
             method,
             args,
             attached_assets,
-            near_sdk::env::predecessor_account_id(),
+            Caller::Direct(near_sdk::env::predecessor_account_id()),
             None,
             referrer,
         );
@@ -473,7 +472,7 @@ impl DexEngine {
         self.internal_execute_operations(
             &mut events,
             operations,
-            near_sdk::env::predecessor_account_id(),
+            Caller::Direct(near_sdk::env::predecessor_account_id()),
             None,
             referrer,
             referral_fees.unwrap_or_default(),

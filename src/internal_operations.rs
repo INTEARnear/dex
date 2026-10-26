@@ -23,7 +23,7 @@ pub enum TradeAccount<'a> {
     User(AccountId),
     Sandboxed {
         assets: &'a mut HashMap<AssetId, U128>,
-        alleged_trader: AccountId,
+        trader: intear_dex_types::Caller,
     },
 }
 
@@ -150,16 +150,16 @@ impl DexEngine {
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
         let storage_usage_before = near_sdk::env::storage_usage();
-        let alleged_trader = match &trader {
-            TradeAccount::User(account) => account.clone(),
-            TradeAccount::Sandboxed { alleged_trader, .. } => alleged_trader.clone(),
+        let dex_trader = match &trader {
+            TradeAccount::User(account) => intear_dex_types::Caller::Direct(account.clone()),
+            TradeAccount::Sandboxed { trader, .. } => trader.clone(),
         };
         let (response, dex_events) = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::Trade {
                 dex_storage_mut: &mut self.dex_storage,
-                alleged_trader: alleged_trader.clone(),
+                trader: dex_trader.clone(),
             },
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
             "swap",
@@ -283,7 +283,7 @@ impl DexEngine {
             request: swap_request,
             amount_in: response.amount_in,
             amount_out: response.amount_out,
-            trader: alleged_trader,
+            trader: dex_trader.alleged_account_id().clone(),
             referrer,
             referral_fees_paid,
         }
@@ -320,7 +320,7 @@ impl DexEngine {
         method: String,
         args: Base64VecU8,
         attached_assets: HashMap<AssetId, U128>,
-        predecessor: AccountId,
+        trader: intear_dex_types::Caller,
         anon_swap_available_assets: Option<&mut HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
     ) -> Base64VecU8 {
@@ -332,7 +332,7 @@ impl DexEngine {
         if anon_swap_available_assets.is_none() {
             for (asset_id, amount) in attached_assets.clone() {
                 self.assert_has_enough(
-                    AccountOrDexId::Account(predecessor.clone()),
+                    AccountOrDexId::Account(trader.alleged_account_id().clone()),
                     asset_id.clone(),
                     amount,
                 );
@@ -350,8 +350,7 @@ impl DexEngine {
             &dex_id,
             CallType::Call {
                 dex_storage_mut: &mut self.dex_storage,
-                predecessor_id: predecessor.clone(),
-                is_authorized: anon_swap_available_assets.is_none(),
+                caller: trader.clone(),
             },
             near_sdk::borsh::to_vec(&request).expect("Failed to serialize request"),
             &method,
@@ -388,7 +387,7 @@ impl DexEngine {
             for (asset_id, amount) in request.attached_assets {
                 self.internal_transfer_asset(
                     events,
-                    AccountOrDexId::Account(predecessor.clone()),
+                    AccountOrDexId::Account(trader.alleged_account_id().clone()),
                     AccountOrDexId::Dex(dex_id.clone()),
                     asset_id.clone(),
                     amount,
@@ -713,11 +712,12 @@ impl DexEngine {
         &mut self,
         events: &mut CallEvents,
         operations: Vec<Operation>,
-        by: AccountId,
+        trader: intear_dex_types::Caller,
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
         mut referral_fees_of_first_swap: ReferralFees,
     ) {
+        let by = trader.alleged_account_id().clone();
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
         near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
         let mut last_output = None;
@@ -898,7 +898,7 @@ impl DexEngine {
                         match &mut anon_swap_available_assets {
                             Some(assets) => TradeAccount::Sandboxed {
                                 assets,
-                                alleged_trader: by.clone(),
+                                trader: trader.clone(),
                             },
                             None => TradeAccount::User(by.clone()),
                         },
@@ -920,7 +920,7 @@ impl DexEngine {
                         method,
                         args,
                         attached_assets,
-                        by.clone(),
+                        trader.clone(),
                         anon_swap_available_assets.as_mut(),
                         referrer.clone(),
                     );

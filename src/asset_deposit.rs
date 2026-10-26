@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use intear_dex_types::{AccountOrDexId, AssetId, DepositMessage, expect};
+use intear_dex_types::{AccountOrDexId, AssetId, Caller, DepositMessage, expect};
 use near_contract_standards::{
     fungible_token::receiver::FungibleTokenReceiver,
     non_fungible_token::{self, core::NonFungibleTokenReceiver},
@@ -38,7 +38,10 @@ impl DexEngine {
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
-                near_sdk::env::predecessor_account_id(),
+                Caller::OnTransfer {
+                    alleged_sender: near_sdk::env::predecessor_account_id(),
+                    transfer_of: AssetId::Near,
+                },
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
                 message.referrer(),
                 message.referral_fees(),
@@ -98,7 +101,10 @@ impl FungibleTokenReceiver for DexEngine {
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
-                sender_id,
+                Caller::OnTransfer {
+                    alleged_sender: sender_id,
+                    transfer_of: AssetId::Nep141(contract_id.clone()),
+                },
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
                 message.referrer(),
                 message.referral_fees(),
@@ -165,7 +171,10 @@ impl NonFungibleTokenReceiver for DexEngine {
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
-                previous_owner_id,
+                Caller::OnTransfer {
+                    alleged_sender: previous_owner_id,
+                    transfer_of: AssetId::Nep171(contract_id.clone(), token_id.clone()),
+                },
                 Some(HashMap::from_iter([(
                     AssetId::Nep171(contract_id, token_id),
                     U128(1),
@@ -262,10 +271,17 @@ impl DexEngine {
         }
 
         if let Some(message) = message {
+            expect!(
+                let [token_id] = token_ids.as_slice(),
+                "Operations can only follow a transfer of one token"
+            );
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
-                sender_id,
+                Caller::OnTransfer {
+                    alleged_sender: sender_id,
+                    transfer_of: AssetId::Nep245(contract_id.clone(), token_id.clone()),
+                },
                 Some(attached_assets),
                 message.referrer(),
                 message.referral_fees(),

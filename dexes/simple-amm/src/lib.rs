@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use crypto_bigint::U256;
 use intear_dex_types::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Dex, DexCallResponse, SwapRequest,
-    SwapRequestAmount, SwapResponse, expect,
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
+    SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto, json_types::U128,
@@ -145,7 +145,10 @@ impl SimpleAmmDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct CreatePoolArgs {
             assets: (AssetId, AssetId),
@@ -175,7 +178,7 @@ impl SimpleAmmDex {
                         balance: U128(0),
                     },
                 ),
-                owner_id: near_sdk::env::predecessor_account_id(),
+                owner_id: caller_id.clone(),
             },
         );
         expect!(
@@ -217,9 +220,7 @@ impl SimpleAmmDex {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
                     amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(
-                        near_sdk::env::predecessor_account_id(),
-                    ),
+                    withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(caller_id),
                 }]
             } else {
                 vec![]
@@ -238,7 +239,10 @@ impl SimpleAmmDex {
         mut attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct AddLiquidityArgs {
             pool_id: PoolId,
@@ -250,7 +254,7 @@ impl SimpleAmmDex {
             panic!("Pool not found");
         };
         expect!(
-            pool.owner_id == near_sdk::env::predecessor_account_id(),
+            pool.owner_id == caller_id,
             "Only pool owner can add liquidity"
         );
         let asset_1_amount = attached_assets
@@ -294,7 +298,10 @@ impl SimpleAmmDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
         #[near(serializers=[borsh])]
         struct RemoveLiquidityArgs {
             pool_id: PoolId,
@@ -312,7 +319,7 @@ impl SimpleAmmDex {
             panic!("Pool not found");
         };
         expect!(
-            pool.owner_id == near_sdk::env::predecessor_account_id(),
+            pool.owner_id == caller_id,
             "Only pool owner can remove liquidity"
         );
         pool.assets.0.balance.0 = pool

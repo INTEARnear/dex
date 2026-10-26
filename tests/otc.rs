@@ -347,6 +347,26 @@ async fn test_otc_regular_flow() {
 
     let user2 = sandbox.dev_create_account().await.unwrap();
     ft_storage_deposit(&ft1, &user2).await;
+    let result = user2
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(engine_user_storage_deposit())
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user2
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
 
     // User 1's trade intent: sell 100_000_000 FT for 2 NEAR
     let user1_trade_intent = OtcTradeIntent {
@@ -403,7 +423,7 @@ async fn test_otc_regular_flow() {
     }];
 
     let result = user2
-        .call(dex_engine_contract.id(), "deposit_near")
+        .call(dex_engine_contract.id(), "execute_operations")
         .max_gas()
         .deposit(trade_amount_near)
         .args_json(json!({
