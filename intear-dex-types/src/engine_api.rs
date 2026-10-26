@@ -133,6 +133,17 @@ pub enum SwapOperationAmount {
     EntireBalanceIn,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub enum SwapAdvancedMode {
+    /// Try every option and swap on the one with the best result
+    FindBest,
+    /// Swap on the first option, in order, that succeeds and meets the
+    /// constraint, without trying the options after it
+    FallbackQueue,
+}
+
 /// A dex that [`Operation::SwapAdvanced`] can swap on, with the message to pass to it
 #[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -180,10 +191,11 @@ pub enum Operation {
         /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
         constraint: Option<U128>,
     },
-    /// Simulate the swap on each of `options` and swap on the one that gives
-    /// the most output (for ExactIn) or takes the least input (for ExactOut).
-    /// Options whose simulation fails are skipped, and the swap fails if it's
-    /// worse than the simulation of the chosen option.
+    /// Simulate the swap on `options` and swap on the one that `mode` picks:
+    /// the one that gives the most output (for ExactIn) or takes the least
+    /// input (for ExactOut), or the first one that meets the constraint.
+    /// Options whose simulation fails are skipped, and the simulation of the
+    /// chosen option is made real, without running the dex again.
     SwapAdvanced {
         asset_in: AssetId,
         asset_out: AssetId,
@@ -191,6 +203,7 @@ pub enum Operation {
         /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
         constraint: Option<U128>,
         options: Vec<SwapOption>,
+        mode: SwapAdvancedMode,
     },
     /// Call a method on a dex.
     DexCall {

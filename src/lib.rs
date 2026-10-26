@@ -19,7 +19,7 @@ use intear_dex_types::{
     IntearDexEvent, Operation, ReferralFees, SwapRequestAmount, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
+    AccountId, BorshStorageKey, IntoStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
     json_types::{Base64VecU8, U128},
     near,
     store::{IterableMap, LookupMap},
@@ -91,13 +91,9 @@ enum StorageKey {
 
 enum CallType<'a> {
     Trade {
-        dex_storage_mut: &'a mut DexStorage,
-        trader: Caller,
-    },
-    TradeView {
         dex_storage: &'a DexStorage,
         trader: Caller,
-        ephemeral_storage_updates: HashMap<Vec<u8>, Option<Vec<u8>>>,
+        pending_storage_updates: PendingStorageUpdates,
     },
     View {
         dex_storage: &'a DexStorage,
@@ -110,18 +106,19 @@ enum CallType<'a> {
 
 type DexStorage = LookupMap<(DexId, Vec<u8>), Vec<u8>>;
 
+type PendingStorageUpdates = HashMap<Vec<u8>, Option<Vec<u8>>>;
+
+const STORAGE_BYTES_PER_RECORD: u64 = 40;
+
 impl CallType<'_> {
     pub fn dex_storage_get(&self, dex_id: DexId, key: Vec<u8>) -> Option<&Vec<u8>> {
         match self {
             CallType::Trade {
-                dex_storage_mut, ..
-            } => dex_storage_mut.get(&(dex_id, key)),
-            CallType::TradeView {
                 dex_storage,
                 trader: _,
-                ephemeral_storage_updates,
+                pending_storage_updates,
             } => {
-                if let Some(value) = ephemeral_storage_updates.get(&key) {
+                if let Some(value) = pending_storage_updates.get(&key) {
                     value.as_ref()
                 } else if let Some(value) = dex_storage.get(&(dex_id, key)) {
                     Some(value)
@@ -139,14 +136,11 @@ impl CallType<'_> {
     pub fn dex_storage_contains_key(&self, dex_id: DexId, key: Vec<u8>) -> bool {
         match self {
             CallType::Trade {
-                dex_storage_mut, ..
-            } => dex_storage_mut.contains_key(&(dex_id, key)),
-            CallType::TradeView {
                 dex_storage,
-                ephemeral_storage_updates,
+                pending_storage_updates,
                 ..
             } => {
-                if let Some(value) = ephemeral_storage_updates.get(&key) {
+                if let Some(value) = pending_storage_updates.get(&key) {
                     value.is_some()
                 } else {
                     dex_storage.contains_key(&(dex_id, key))
@@ -167,21 +161,18 @@ impl CallType<'_> {
     ) -> Result<Option<Vec<u8>>, wasmi::Error> {
         match self {
             CallType::Trade {
-                dex_storage_mut, ..
-            } => Ok(dex_storage_mut.insert((dex_id, key), value)),
-            CallType::TradeView {
                 dex_storage,
-                ephemeral_storage_updates,
+                pending_storage_updates,
                 ..
             } => {
-                if let Some(prev_value) = ephemeral_storage_updates.get(&key).cloned() {
-                    ephemeral_storage_updates.insert(key, Some(value));
+                if let Some(prev_value) = pending_storage_updates.get(&key).cloned() {
+                    pending_storage_updates.insert(key, Some(value));
                     Ok(prev_value)
                 } else if let Some(prev_value) = dex_storage.get(&(dex_id, key.clone())) {
-                    ephemeral_storage_updates.insert(key, Some(value));
+                    pending_storage_updates.insert(key, Some(value));
                     Ok(Some(prev_value.clone()))
                 } else {
-                    ephemeral_storage_updates.insert(key, Some(value));
+                    pending_storage_updates.insert(key, Some(value));
                     Ok(None)
                 }
             }
@@ -199,14 +190,11 @@ impl CallType<'_> {
     ) -> Result<Option<Vec<u8>>, wasmi::Error> {
         match self {
             CallType::Trade {
-                dex_storage_mut, ..
-            } => Ok(dex_storage_mut.remove(&(dex_id, key))),
-            CallType::TradeView {
                 dex_storage,
-                ephemeral_storage_updates,
+                pending_storage_updates,
                 ..
             } => {
-                if let Some(prev_value) = ephemeral_storage_updates.insert(key.clone(), None) {
+                if let Some(prev_value) = pending_storage_updates.insert(key.clone(), None) {
                     Ok(prev_value)
                 } else {
                     Ok(dex_storage.get(&(dex_id, key.clone())).cloned())
@@ -219,12 +207,48 @@ impl CallType<'_> {
         }
     }
 
+    /// How much the contract's storage usage would change if a simulated trade's
+    /// storage updates were written, so that the dex sees the same storage usage
+    /// as in a real trade
+    pub fn pending_storage_usage(&self, dex_id: &DexId) -> Result<i64, wasmi::Error> {
+        let CallType::Trade {
+            dex_storage,
+            pending_storage_updates,
+            ..
+        } = self
+        else {
+            return Ok(0);
+        };
+        let prefix_len = StorageKey::DexStorage.into_storage_key().len();
+        let record_size = |key: &Vec<u8>, value: Option<&Vec<u8>>| -> Result<i64, wasmi::Error> {
+            let Some(value) = value else {
+                return Ok(0);
+            };
+            let key_len = near_sdk::borsh::object_length(&(dex_id, key))
+                .map_err(|err| wasmi::Error::new(format!("Failed to measure key: {err}")))?;
+            let value_len = near_sdk::borsh::object_length(value)
+                .map_err(|err| wasmi::Error::new(format!("Failed to measure value: {err}")))?;
+            prefix_len
+                .checked_add(key_len)
+                .and_then(|size| size.checked_add(value_len))
+                .and_then(|size| i64::try_from(size).ok())
+                .and_then(|size| size.checked_add(STORAGE_BYTES_PER_RECORD as i64))
+                .ok_or_else(|| wasmi::Error::new("Storage record size overflow"))
+        };
+        pending_storage_updates
+            .iter()
+            .try_fold(0i64, |total, (key, new_value)| {
+                let old_value = dex_storage.get(&(dex_id.clone(), key.clone()));
+                record_size(key, new_value.as_ref())?
+                    .checked_sub(record_size(key, old_value)?)
+                    .and_then(|change| total.checked_add(change))
+                    .ok_or_else(|| wasmi::Error::new("Storage usage overflow"))
+            })
+    }
+
     pub fn dex_storage_flush(&mut self) {
         match self {
-            CallType::Trade {
-                dex_storage_mut, ..
-            } => dex_storage_mut.flush(),
-            CallType::TradeView { .. } => (),
+            CallType::Trade { .. } => (),
             CallType::View { .. } => (),
             CallType::Call {
                 dex_storage_mut, ..
@@ -243,6 +267,7 @@ pub struct RunnerData<'a> {
     dex_storage_usage_before_transaction: u64,
     referrer: Option<AccountId>,
     dex_events: Vec<DexEventData>,
+    pending_logs: Vec<String>,
 }
 
 #[near]
@@ -550,6 +575,7 @@ impl DexEngine {
             referrer,
             referral_fees.unwrap_or_default(),
         )
+        .map(|swap| (swap.total_amount_in(), swap.amount_out()))
         .unwrap_or_else(|err| panic!("{err}"))
     }
 

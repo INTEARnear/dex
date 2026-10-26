@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use intear_dex_types::{
     AccountOrDexId, AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest,
     DexCallResponse, DexEventData, DexId, DirectWithdrawAmount, Operation, ReferralFees,
-    SwapOperationAmount, SwapOption, SwapRequest, SwapRequestAmount, SwapResponse, WithdrawAmount,
-    expect,
+    SwapAdvancedMode, SwapOperationAmount, SwapOption, SwapRequest, SwapRequestAmount,
+    SwapResponse, WithdrawAmount, expect,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -17,7 +17,8 @@ use near_sdk::{
 use wasmi::{Engine, Func, Linker, Module, Store};
 
 use crate::{
-    CallType, DexEngine, DexEngineExt, IntearDexEvent, RunnerData, call_events::CallEvents,
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, PendingStorageUpdates, RunnerData,
+    call_events::CallEvents,
 };
 
 pub enum TradeAccount<'a> {
@@ -26,6 +27,49 @@ pub enum TradeAccount<'a> {
         assets: &'a mut HashMap<AssetId, U128>,
         trader: intear_dex_types::Caller,
     },
+}
+
+/// What a dex did in a run of one of its functions
+struct DexRun {
+    response: Option<Vec<u8>>,
+    dex_events: Vec<DexEventData>,
+    pending_storage_updates: PendingStorageUpdates,
+    pending_logs: Vec<String>,
+}
+
+/// A swap that a dex ran without writing or logging anything, which can be made real
+pub(crate) struct SimulatedSwap {
+    dex_id: DexId,
+    request: SwapRequest,
+    response: SwapResponse,
+    referral_fees_paid: Vec<(AccountId, U128)>,
+    pending_storage_updates: PendingStorageUpdates,
+    pending_logs: Vec<String>,
+    dex_events: Vec<DexEventData>,
+}
+
+impl SimulatedSwap {
+    pub(crate) fn total_amount_in(&self) -> U128 {
+        amount_in_with_fees(self.response.amount_in, &self.referral_fees_paid)
+    }
+
+    pub(crate) fn amount_out(&self) -> U128 {
+        self.response.amount_out
+    }
+
+    /// Why the swap doesn't meet `constraint`, if it doesn't
+    fn constraint_violation_message(&self, constraint: Option<U128>) -> Option<&'static str> {
+        let constraint = constraint?;
+        match self.request.amount {
+            SwapRequestAmount::ExactIn(_) if self.amount_out() < constraint => {
+                Some("Output amount is less than constraint")
+            }
+            SwapRequestAmount::ExactOut(_) if self.total_amount_in() > constraint => {
+                Some("Input amount is greater than constraint")
+            }
+            _ => None,
+        }
+    }
 }
 
 impl TradeAccount<'_> {
@@ -73,8 +117,7 @@ impl DexEngine {
     }
 
     /// Core WASM execution logic shared between swap, dex_call, and dex_view methods.
-    /// Returns the raw response bytes and the events the dex logged after running
-    /// the WASM function, or why the dex failed.
+    /// Returns what the dex did, or why it failed.
     fn run_wasm_function<'a>(
         code: &[u8],
         dex_id: &DexId,
@@ -83,7 +126,7 @@ impl DexEngine {
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
         referrer: Option<AccountId>,
-    ) -> Result<(Option<Vec<u8>>, Vec<DexEventData>), String> {
+    ) -> Result<DexRun, String> {
         let engine = Engine::default();
         // SAFETY: already validated in internal_deploy_dex_code
         let module = match unsafe { Module::new_unchecked(&engine, code) } {
@@ -104,6 +147,7 @@ impl DexEngine {
                 dex_storage_usage_before_transaction: storage_usage_before,
                 referrer,
                 dex_events: Vec::new(),
+                pending_logs: Vec::new(),
             },
         );
         let mut linker = Linker::new(&engine);
@@ -123,7 +167,18 @@ impl DexEngine {
         func.call(&mut store, &[], &mut [])
             .map_err(|err| format!("Failed to call function '{method}': {err}"))?;
         let runner_data = store.into_data();
-        Ok((runner_data.response, runner_data.dex_events))
+        Ok(DexRun {
+            response: runner_data.response,
+            dex_events: runner_data.dex_events,
+            pending_storage_updates: match runner_data.call_type {
+                CallType::Trade {
+                    pending_storage_updates,
+                    ..
+                } => pending_storage_updates,
+                _ => HashMap::new(),
+            },
+            pending_logs: runner_data.pending_logs,
+        })
     }
 
     pub(crate) fn internal_swap_simple(
@@ -139,82 +194,60 @@ impl DexEngine {
         referral_fees: ReferralFees,
         constraint: Option<U128>,
     ) -> (U128, U128) {
-        let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
-        let dex_amount = match amount {
-            SwapRequestAmount::ExactIn(amount_in) => SwapRequestAmount::ExactIn(
-                amount_in_after_fees(amount_in, &referral_fees.amounts_out_of(amount_in)),
-            ),
-            SwapRequestAmount::ExactOut(_) => amount,
-        };
-        let swap_request = SwapRequest {
-            message,
-            asset_in,
-            asset_out,
-            amount: dex_amount,
-            referrer: referrer.clone(),
-        };
+        let swap = self
+            .internal_simulate_swap_simple(
+                dex_id,
+                message,
+                trader.caller(),
+                asset_in,
+                asset_out,
+                amount,
+                referrer.clone(),
+                referral_fees,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        self.internal_commit_swap(events, swap, trader, referrer, constraint)
+    }
 
-        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
+    /// Writes what a simulated swap did, moves the assets and logs the swap
+    fn internal_commit_swap(
+        &mut self,
+        events: &mut CallEvents,
+        swap: SimulatedSwap,
+        trader: TradeAccount,
+        referrer: Option<AccountId>,
+        constraint: Option<U128>,
+    ) -> (U128, U128) {
+        if let Some(violation_message) = swap.constraint_violation_message(constraint) {
+            panic!("{violation_message}");
+        }
+        let total_amount_in = swap.total_amount_in();
+        let SimulatedSwap {
+            dex_id,
+            request: swap_request,
+            response,
+            referral_fees_paid,
+            pending_storage_updates,
+            pending_logs,
+            dex_events,
+        } = swap;
         let storage_usage_before = near_sdk::env::storage_usage();
-        let dex_trader = trader.caller();
-        let (response, dex_events) = Self::run_wasm_function(
-            code,
-            &dex_id,
-            CallType::Trade {
-                dex_storage_mut: &mut self.dex_storage,
-                trader: dex_trader.clone(),
-            },
-            near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
-            "swap",
-            &self.dex_storage_balances,
-            referrer.clone(),
-        )
-        .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
-        events.extend_dex_events(dex_events);
-
+        for (key, value) in pending_storage_updates {
+            match value {
+                Some(value) => self.dex_storage.insert((dex_id.clone(), key), value),
+                None => self.dex_storage.remove(&(dex_id.clone(), key)),
+            };
+        }
         self.dex_storage.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
         self.dex_storage_balances
             .charge(&dex_id, storage_usage_before, storage_usage_after);
-
-        let response: SwapResponse = match response {
-            Some(response) => {
-                near_sdk::borsh::from_slice(&response).expect("Failed to deserialize swap response")
-            }
-            None => panic!("No response from swap"),
-        };
-        let referral_fees_paid: Vec<(AccountId, U128)> = match amount {
-            SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
-            SwapRequestAmount::ExactOut(_) => referral_fees.amounts_on_top_of(response.amount_in),
+        for log in pending_logs {
+            near_sdk::env::log_str(&log);
         }
-        .into_iter()
-        .filter(|(_, fee)| fee.0 > 0)
-        .collect();
-        let total_amount_in = amount_in_with_fees(response.amount_in, &referral_fees_paid);
-        match swap_request.amount {
-            SwapRequestAmount::ExactIn(exact_in) => {
-                expect!(exact_in == response.amount_in, "Amount in does not match");
-                if let Some(constraint) = constraint {
-                    expect!(
-                        response.amount_out >= constraint,
-                        "Output amount is less than constraint"
-                    );
-                }
-            }
-            SwapRequestAmount::ExactOut(exact_out) => {
-                expect!(
-                    exact_out == response.amount_out,
-                    "Amount out does not match"
-                );
-                if let Some(constraint) = constraint {
-                    expect!(
-                        total_amount_in <= constraint,
-                        "Input amount is greater than constraint"
-                    );
-                }
-            }
-        }
+        events.extend_dex_events(dex_events);
 
+        let dex_trader = trader.caller();
         match trader {
             TradeAccount::User(user_trader) => {
                 // asset in
@@ -296,12 +329,12 @@ impl DexEngine {
         (total_amount_in, response.amount_out)
     }
 
-    /// Simulates the swap on each option and swaps on the one with the best result,
-    /// which must be at least as good as its simulation
+    /// Simulates the swap on the options and makes the simulation that `mode` picks real
     pub(crate) fn internal_swap_advanced(
         &mut self,
         events: &mut CallEvents,
         options: Vec<SwapOption>,
+        mode: SwapAdvancedMode,
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
@@ -311,11 +344,11 @@ impl DexEngine {
         constraint: Option<U128>,
     ) -> (U128, U128) {
         expect!(!options.is_empty(), "At least one swap option is required");
-        let mut best: Option<(SwapOption, U128, U128)> = None;
+        let mut best: Option<SimulatedSwap> = None;
         for option in options {
             let simulation = self.internal_simulate_swap_simple(
                 option.dex_id.clone(),
-                option.message.clone(),
+                option.message,
                 trader.caller(),
                 asset_in.clone(),
                 asset_out.clone(),
@@ -323,8 +356,8 @@ impl DexEngine {
                 referrer.clone(),
                 referral_fees.clone(),
             );
-            let (amount_in, amount_out) = match simulation {
-                Ok(amounts) => amounts,
+            let simulation = match simulation {
+                Ok(simulation) => simulation,
                 Err(err) => {
                     near_sdk::env::log_str(&format!(
                         "Skipping swap option on {}: {err}",
@@ -333,42 +366,34 @@ impl DexEngine {
                     continue;
                 }
             };
+            if mode == SwapAdvancedMode::FallbackQueue {
+                if let Some(violation) = simulation.constraint_violation_message(constraint) {
+                    near_sdk::env::log_str(&format!(
+                        "Skipping swap option on {}: {violation}",
+                        option.dex_id
+                    ));
+                    continue;
+                }
+                return self.internal_commit_swap(events, simulation, trader, referrer, constraint);
+            }
             let is_better = match (&best, amount) {
                 (None, _) => true,
-                (Some((_, _, best_amount_out)), SwapRequestAmount::ExactIn(_)) => {
-                    amount_out > *best_amount_out
+                (Some(best), SwapRequestAmount::ExactIn(_)) => {
+                    simulation.amount_out() > best.amount_out()
                 }
-                (Some((_, best_amount_in, _)), SwapRequestAmount::ExactOut(_)) => {
-                    amount_in < *best_amount_in
+                (Some(best), SwapRequestAmount::ExactOut(_)) => {
+                    simulation.total_amount_in() < best.total_amount_in()
                 }
             };
             if is_better {
-                best = Some((option, amount_in, amount_out));
+                best = Some(simulation);
             }
         }
-        let Some((best_option, simulated_amount_in, simulated_amount_out)) = best else {
+        let Some(best) = best else {
             panic!("All swap options failed");
         };
-        let constraint = match amount {
-            SwapRequestAmount::ExactIn(_) => constraint.map_or(simulated_amount_out, |min_out| {
-                min_out.max(simulated_amount_out)
-            }),
-            SwapRequestAmount::ExactOut(_) => constraint.map_or(simulated_amount_in, |max_in| {
-                max_in.min(simulated_amount_in)
-            }),
-        };
-        self.internal_swap_simple(
-            events,
-            best_option.dex_id,
-            best_option.message,
-            asset_in,
-            asset_out,
-            amount,
-            trader,
-            referrer,
-            referral_fees,
-            Some(constraint),
-        )
+
+        self.internal_commit_swap(events, best, trader, referrer, constraint)
     }
 
     /// The exact amount of a swap operation, which can depend on the previous swap or the balance
@@ -460,7 +485,7 @@ impl DexEngine {
             args: args.0,
             attached_assets,
         };
-        let (response, dex_events) = Self::run_wasm_function(
+        let dex_run = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::Call {
@@ -473,9 +498,9 @@ impl DexEngine {
             referrer,
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
-        events.extend_dex_events(dex_events);
+        events.extend_dex_events(dex_run.dex_events);
 
-        let response: DexCallResponse = match response {
+        let response: DexCallResponse = match dex_run.response {
             Some(response) => near_sdk::borsh::from_slice(&response)
                 .expect("Failed to deserialize dex call response"),
             None => Default::default(),
@@ -596,38 +621,38 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
-    ) -> Result<(U128, U128), String> {
+    ) -> Result<SimulatedSwap, String> {
         let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
-        let dex_amount = match amount {
-            SwapRequestAmount::ExactIn(amount_in) => SwapRequestAmount::ExactIn(
-                amount_in_after_fees(amount_in, &referral_fees.amounts_out_of(amount_in)),
-            ),
-            SwapRequestAmount::ExactOut(_) => amount,
-        };
         let swap_request = SwapRequest {
             message,
             asset_in,
             asset_out,
-            amount: dex_amount,
+            amount: match amount {
+                SwapRequestAmount::ExactIn(amount_in) => SwapRequestAmount::ExactIn(
+                    amount_in_after_fees(amount_in, &referral_fees.amounts_out_of(amount_in)),
+                ),
+                SwapRequestAmount::ExactOut(_) => amount,
+            },
             referrer: referrer.clone(),
         };
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let (response, _dex_events) = Self::run_wasm_function(
+        let dex_run = Self::run_wasm_function(
             code,
             &dex_id,
-            CallType::TradeView {
+            CallType::Trade {
                 dex_storage: &self.dex_storage,
                 trader,
-                ephemeral_storage_updates: HashMap::new(),
+                pending_storage_updates: HashMap::new(),
             },
             near_sdk::borsh::to_vec(&swap_request).expect("Failed to serialize swap request"),
             "swap",
             &self.dex_storage_balances,
             referrer,
-        )?;
+        )
+        .map_err(|err| format!("Running wasm failed: {err}"))?;
         let response: SwapResponse =
-            near_sdk::borsh::from_slice(&response.ok_or("No response from swap")?)
+            near_sdk::borsh::from_slice(&dex_run.response.ok_or("No response from swap")?)
                 .map_err(|_| "Failed to deserialize swap response")?;
         match swap_request.amount {
             SwapRequestAmount::ExactIn(exact_in) if exact_in != response.amount_in => {
@@ -638,15 +663,24 @@ impl DexEngine {
             }
             _ => (),
         }
-        let referral_fees_paid = match amount {
-            SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
-            SwapRequestAmount::ExactOut(_) => referral_fees.amounts_on_top_of(response.amount_in),
-        };
 
-        Ok((
-            amount_in_with_fees(response.amount_in, &referral_fees_paid),
-            response.amount_out,
-        ))
+        Ok(SimulatedSwap {
+            referral_fees_paid: match amount {
+                SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
+                SwapRequestAmount::ExactOut(_) => {
+                    referral_fees.amounts_on_top_of(response.amount_in)
+                }
+            }
+            .into_iter()
+            .filter(|(_, fee)| fee.0 > 0)
+            .collect(),
+            dex_id,
+            request: swap_request,
+            response,
+            pending_storage_updates: dex_run.pending_storage_updates,
+            pending_logs: dex_run.pending_logs,
+            dex_events: dex_run.dex_events,
+        })
     }
 
     pub(crate) fn internal_dex_view(
@@ -661,7 +695,7 @@ impl DexEngine {
         );
 
         let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-        let (response, _dex_events) = Self::run_wasm_function(
+        let dex_run = Self::run_wasm_function(
             code,
             &dex_id,
             CallType::View {
@@ -674,7 +708,7 @@ impl DexEngine {
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
 
-        Base64VecU8::from(response.unwrap_or_default())
+        Base64VecU8::from(dex_run.response.unwrap_or_default())
     }
 
     pub(crate) fn internal_register_assets(
@@ -1005,6 +1039,7 @@ impl DexEngine {
                     amount,
                     constraint,
                     options,
+                    mode,
                 } => {
                     let amount = self.swap_request_amount(
                         amount,
@@ -1016,6 +1051,7 @@ impl DexEngine {
                     let (_amount_in, amount_out) = self.internal_swap_advanced(
                         events,
                         options,
+                        mode,
                         asset_in,
                         asset_out.clone(),
                         amount,

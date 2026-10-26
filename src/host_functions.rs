@@ -2,7 +2,7 @@ use wasmi::Caller;
 
 use crate::{CallType, RunnerData};
 use intear_dex_types::{DexEventData, IntearDexEvent};
-use near_sdk::{AccountId, NearToken};
+use near_sdk::{AccountId, AsNep297Event, NearToken};
 
 #[macro_export]
 macro_rules! declare_unimplemented_host_functions {
@@ -355,9 +355,9 @@ pub fn predecessor_account_id(
     register_id: u64,
 ) -> Result<(), wasmi::Error> {
     let predecessor_id = match &caller.data().call_type {
-        CallType::Call { caller: trader, .. }
-        | CallType::Trade { trader, .. }
-        | CallType::TradeView { trader, .. } => trader.alleged_account_id(),
+        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
+            trader.alleged_account_id()
+        }
         CallType::View { .. } => {
             return Err(wasmi::Error::new(
                 "predecessor_account_id is only allowed in trades or call functions",
@@ -371,9 +371,7 @@ pub fn predecessor_account_id(
 
 pub fn caller(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
     let trader = match &caller.data().call_type {
-        CallType::Call { caller: trader, .. }
-        | CallType::Trade { trader, .. }
-        | CallType::TradeView { trader, .. } => trader.clone(),
+        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => trader.clone(),
         CallType::View { .. } => {
             return Err(wasmi::Error::new(
                 "trader is only allowed in trades or call functions",
@@ -565,7 +563,14 @@ pub fn storage_usage(mut caller: Caller<'_, RunnerData>) -> Result<u64, wasmi::E
             i64::try_from(caller.data().dex_storage_usage_before_transaction)
                 .map_err(|err| wasmi::Error::new(format!("Storage usage overflow: {err}")))?,
         )
-        .ok_or_else(|| wasmi::Error::new("Storage usage underflow"))?;
+        .ok_or_else(|| wasmi::Error::new("Storage usage underflow"))?
+        .checked_add(
+            caller
+                .data()
+                .call_type
+                .pending_storage_usage(&caller.data().dex_id)?,
+        )
+        .ok_or_else(|| wasmi::Error::new("Storage usage overflow"))?;
     let data_used_before_transaction = caller
         .data()
         .dex_storage_balances
@@ -800,10 +805,11 @@ pub fn ed25519_verify(
     }
 }
 
-pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
-    if matches!(caller.data().call_type, CallType::TradeView { .. }) {
-        return Ok(());
-    }
+pub fn log_utf8(
+    mut caller: Caller<'_, RunnerData>,
+    len: u64,
+    ptr: u64,
+) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
@@ -829,18 +835,25 @@ pub fn log_utf8(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<()
     if let Some(event) = message.strip_prefix("EVENT_JSON:")
         && let Ok(event) = near_sdk::serde_json::from_str(event)
     {
-        IntearDexEvent::DexEvent {
+        let event = IntearDexEvent::DexEvent {
             dex_id: caller.data().dex_id.clone(),
             event,
             referrer: caller.data().referrer.clone(),
             user: alleged_event_user(caller.data()),
-        }
-        .emit();
+        };
+        log(caller.data_mut(), event.to_nep297_event().to_event_log());
         return Ok(());
     }
 
-    near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
+    log(caller.data_mut(), format!("[{dex_id}] {message}"));
     Ok(())
+}
+
+fn log(data: &mut RunnerData, log: String) {
+    match data.call_type {
+        CallType::Trade { .. } => data.pending_logs.push(log),
+        _ => near_sdk::env::log_str(&log),
+    }
 }
 
 pub fn dex_event(
@@ -875,14 +888,15 @@ fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {
         CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
             Some(trader.alleged_account_id().clone())
         }
-        _ => None,
+        CallType::View { .. } => None,
     }
 }
 
-pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(), wasmi::Error> {
-    if matches!(caller.data().call_type, CallType::TradeView { .. }) {
-        return Ok(());
-    }
+pub fn log_utf16(
+    mut caller: Caller<'_, RunnerData>,
+    len: u64,
+    ptr: u64,
+) -> Result<(), wasmi::Error> {
     let dex_id = caller.data().dex_id.clone();
     let memory = caller
         .get_export("memory")
@@ -914,6 +928,6 @@ pub fn log_utf16(caller: Caller<'_, RunnerData>, len: u64, ptr: u64) -> Result<(
     };
     let message = String::from_utf16(&utf16)
         .map_err(|err| wasmi::Error::new(format!("log_utf16 received invalid UTF-16: {err}")))?;
-    near_sdk::env::log_str(&format!("[{dex_id}] {message}"));
+    log(caller.data_mut(), format!("[{dex_id}] {message}"));
     Ok(())
 }

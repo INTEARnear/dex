@@ -3,7 +3,7 @@ use std::io::Read;
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount,
+    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount,
     SwapRequestAmount, WithdrawAmount,
 };
 use near_cli_rs::commands::ActionContext;
@@ -425,9 +425,14 @@ fn operation_step(
             amount,
             constraint,
             options,
+            mode,
         } => swap_label(
             &format!(
-                "on the best of {}",
+                "on {} {}",
+                match mode {
+                    SwapAdvancedMode::FindBest => "the best of",
+                    SwapAdvancedMode::FallbackQueue => "the first that works of",
+                },
                 options
                     .iter()
                     .map(|option| option.dex_id.to_string())

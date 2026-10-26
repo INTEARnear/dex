@@ -2,8 +2,8 @@ mod common;
 use common::*;
 
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, FeeFraction, Operation, SwapOperationAmount, SwapRequestAmount,
-    WithdrawAmount,
+    AccountOrDexId, AssetId, DexId, FeeFraction, Operation, SwapAdvancedMode, SwapOperationAmount,
+    SwapOption, SwapRequestAmount, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_sdk::serde_json::json;
@@ -4204,4 +4204,438 @@ async fn test_referral_fees() {
         );
     }
     assert_eq!(balance(user2_balance, &ft1_asset_id).await, user2_ft1);
+}
+
+#[tokio::test]
+async fn test_swap_advanced() {
+    let pool_creation_fee = NearToken::from_millinear(10);
+    let add_liquidity_ft1 = 1_000_000_000u128;
+    let worse_pool_add_liquidity_ft2 = 2_000_000_000u128;
+    let better_pool_add_liquidity_ft2 = 3_000_000_000u128;
+    let trader_ft1_for_swaps = 500_000_000u128;
+    let swap_amount = 1_000_000u128;
+    let worse_pool_id = 0u64;
+    let better_pool_id = 1u64;
+    let missing_pool_id = 2u64;
+
+    let wasms = get_compiled_wasms().await;
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        ft2,
+        deployer,
+        user1,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.simple_amm_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+
+    #[near(serializers=[borsh])]
+    struct CreatePoolArgs {
+        assets: (AssetId, AssetId),
+    }
+    #[near(serializers=[borsh])]
+    struct AddLiquidityArgs {
+        pool_id: u64,
+    }
+    #[near(serializers=[borsh])]
+    struct SwapArgs {
+        pool_id: u64,
+    }
+    #[near(serializers=[borsh])]
+    struct GetPoolArgs {
+        pool_id: u64,
+    }
+    #[near(serializers=[borsh])]
+    struct SimplePool {
+        assets: (AssetWithBalance, AssetWithBalance),
+        owner_id: AccountId,
+    }
+    #[near(serializers=[borsh])]
+    struct AssetWithBalance {
+        asset_id: AssetId,
+        balance: U128,
+    }
+
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(pool_creation_fee.saturating_mul(2))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    for (ft, amount) in [
+        (&ft1, add_liquidity_ft1 * 2),
+        (
+            &ft2,
+            worse_pool_add_liquidity_ft2 + better_pool_add_liquidity_ft2,
+        ),
+    ] {
+        let result = deployer
+            .call(ft.id(), "ft_transfer_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": dex_engine_contract.id(),
+                "amount": U128(amount),
+                "msg": "",
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+    // The better pool gives 3 FT2 per FT1, the worse one 2
+    for (pool_id, add_liquidity_ft2) in [
+        (worse_pool_id, worse_pool_add_liquidity_ft2),
+        (better_pool_id, better_pool_add_liquidity_ft2),
+    ] {
+        let result = deployer
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": [
+                    Operation::DexCall {
+                        dex_id: dex_id.clone(),
+                        method: "create_pool".to_string(),
+                        args: Base64VecU8(
+                            near_sdk::borsh::to_vec(&CreatePoolArgs {
+                                assets: (ft1_asset_id.clone(), ft2_asset_id.clone()),
+                            })
+                            .unwrap(),
+                        ),
+                        attached_assets: HashMap::from_iter([(
+                            AssetId::Near,
+                            U128(pool_creation_fee.as_yoctonear()),
+                        )]),
+                    },
+                    Operation::DexCall {
+                        dex_id: dex_id.clone(),
+                        method: "add_liquidity".to_string(),
+                        args: Base64VecU8(
+                            near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap(),
+                        ),
+                        attached_assets: HashMap::from_iter([
+                            (ft1_asset_id.clone(), U128(add_liquidity_ft1)),
+                            (ft2_asset_id.clone(), U128(add_liquidity_ft2)),
+                        ]),
+                    },
+                ],
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(trader_ft1_for_swaps + swap_amount),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(trader_ft1_for_swaps),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let option = |pool_id: u64| SwapOption {
+        dex_id: dex_id.clone(),
+        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+    };
+    let swap_advanced = |amount: SwapRequestAmount,
+                         constraint: Option<U128>,
+                         pool_ids: &[u64],
+                         mode: SwapAdvancedMode| Operation::SwapAdvanced {
+        asset_in: ft1_asset_id.clone(),
+        asset_out: ft2_asset_id.clone(),
+        amount: SwapOperationAmount::Amount(amount),
+        constraint,
+        options: pool_ids.iter().map(|pool_id| option(*pool_id)).collect(),
+        mode,
+    };
+    let execute = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": operations,
+            }))
+            .transact()
+    };
+    let simulate = |pool_id: u64, amount: SwapRequestAmount| {
+        let view = dex_engine_contract
+            .view("simulate_swap_simple")
+            .args_json(json!({
+                "dex_id": dex_id,
+                "message": option(pool_id).message,
+                "trader": user1.id(),
+                "asset_in": ft1_asset_id,
+                "asset_out": ft2_asset_id,
+                "amount": amount,
+            }));
+        async move { view.await.unwrap().json::<(U128, U128)>().unwrap() }
+    };
+    let balance = |asset_id: &AssetId| {
+        let dex_engine_contract = dex_engine_contract.clone();
+        let of = AccountOrDexId::Account(user1.id().clone());
+        let asset_id = asset_id.clone();
+        async move {
+            get_inner_asset_balance(&dex_engine_contract, of, asset_id)
+                .await
+                .unwrap()
+                .unwrap_or_default()
+                .0
+        }
+    };
+    let pool_balances = |pool_id: u64| {
+        let view = dex_engine_contract.view("dex_view").args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_pool",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetPoolArgs { pool_id }).unwrap()),
+        }));
+        async move {
+            let pool: Option<SimplePool> =
+                near_sdk::borsh::from_slice(&view.await.unwrap().json::<Base64VecU8>().unwrap().0)
+                    .unwrap();
+            let pool = pool.unwrap();
+            (pool.assets.0.balance.0, pool.assets.1.balance.0)
+        }
+    };
+
+    // FindBest swaps on the option with the most output, and skips the options that fail
+    let worse_pool_before = pool_balances(worse_pool_id).await;
+    let result = execute(vec![swap_advanced(
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        None,
+        &[worse_pool_id, missing_pool_id, better_pool_id],
+        SwapAdvancedMode::FindBest,
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    // (1_000_000 * 3_000_000_000) / (1_000_000_000 + 1_000_000) = 2_997_002
+    let expected_output = 2_997_002u128;
+    assert_eq!(balance(&ft2_asset_id).await, expected_output);
+    assert_eq!(
+        pool_balances(better_pool_id).await,
+        (
+            add_liquidity_ft1 + swap_amount,
+            better_pool_add_liquidity_ft2 - expected_output
+        )
+    );
+    assert_eq!(pool_balances(worse_pool_id).await, worse_pool_before);
+    assert!(
+        result.logs().iter().any(|log| log
+            .contains(&format!("Skipping swap option on {dex_id}: "))
+            && log.contains("Pool not found")),
+        "Expected the missing pool to be skipped, got {:#?}",
+        result.logs()
+    );
+    let mut user1_ft1 = trader_ft1_for_swaps - swap_amount;
+    let mut user1_ft2 = expected_output;
+
+    // For an exact output, FindBest swaps on the option that takes the least input
+    let (worse_amount_in, _) = simulate(
+        worse_pool_id,
+        SwapRequestAmount::ExactOut(U128(swap_amount)),
+    )
+    .await;
+    let (better_amount_in, _) = simulate(
+        better_pool_id,
+        SwapRequestAmount::ExactOut(U128(swap_amount)),
+    )
+    .await;
+    assert!(better_amount_in < worse_amount_in);
+    let worse_pool_before = pool_balances(worse_pool_id).await;
+    let result = execute(vec![swap_advanced(
+        SwapRequestAmount::ExactOut(U128(swap_amount)),
+        Some(better_amount_in),
+        &[worse_pool_id, better_pool_id],
+        SwapAdvancedMode::FindBest,
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    user1_ft1 -= better_amount_in.0;
+    user1_ft2 += swap_amount;
+    assert_eq!(balance(&ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance(&ft2_asset_id).await, user1_ft2);
+    assert_eq!(pool_balances(worse_pool_id).await, worse_pool_before);
+
+    // FallbackQueue swaps on the first option that works, even if a later one is better
+    let (_, worse_amount_out) =
+        simulate(worse_pool_id, SwapRequestAmount::ExactIn(U128(swap_amount))).await;
+    let better_pool_before = pool_balances(better_pool_id).await;
+    let result = execute(vec![swap_advanced(
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        None,
+        &[missing_pool_id, worse_pool_id, better_pool_id],
+        SwapAdvancedMode::FallbackQueue,
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    user1_ft1 -= swap_amount;
+    user1_ft2 += worse_amount_out.0;
+    assert_eq!(balance(&ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance(&ft2_asset_id).await, user1_ft2);
+    assert_eq!(pool_balances(better_pool_id).await, better_pool_before);
+
+    // FallbackQueue skips the options that don't meet the constraint
+    let (_, worse_amount_out) =
+        simulate(worse_pool_id, SwapRequestAmount::ExactIn(U128(swap_amount))).await;
+    let (_, better_amount_out) = simulate(
+        better_pool_id,
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+    )
+    .await;
+    let worse_pool_before = pool_balances(worse_pool_id).await;
+    let result = execute(vec![swap_advanced(
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        Some(U128(worse_amount_out.0 + 1)),
+        &[worse_pool_id, better_pool_id],
+        SwapAdvancedMode::FallbackQueue,
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    user1_ft1 -= swap_amount;
+    user1_ft2 += better_amount_out.0;
+    assert_eq!(balance(&ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance(&ft2_asset_id).await, user1_ft2);
+    assert_eq!(pool_balances(worse_pool_id).await, worse_pool_before);
+    assert!(
+        result
+            .logs()
+            .iter()
+            .any(|log| log.contains("Output amount is less than constraint")),
+        "Expected the worse pool to be skipped, got {:#?}",
+        result.logs()
+    );
+
+    // Should fail, without changing balances
+    let (_, better_amount_out) = simulate(
+        better_pool_id,
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+    )
+    .await;
+    let unreachable_constraint = Some(U128(better_amount_out.0 + 1));
+    for (operation, expected_error) in [
+        (
+            swap_advanced(
+                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                None,
+                &[],
+                SwapAdvancedMode::FindBest,
+            ),
+            "At least one swap option is required",
+        ),
+        (
+            swap_advanced(
+                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                None,
+                &[missing_pool_id, missing_pool_id],
+                SwapAdvancedMode::FindBest,
+            ),
+            "All swap options failed",
+        ),
+        (
+            swap_advanced(
+                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                unreachable_constraint,
+                &[worse_pool_id, better_pool_id],
+                SwapAdvancedMode::FindBest,
+            ),
+            "Output amount is less than constraint",
+        ),
+        (
+            swap_advanced(
+                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                unreachable_constraint,
+                &[worse_pool_id, better_pool_id],
+                SwapAdvancedMode::FallbackQueue,
+            ),
+            "All swap options failed",
+        ),
+    ] {
+        let result = execute(vec![operation]).await.unwrap();
+        assert!(
+            format!("{result:?}").contains(expected_error),
+            "Expected {expected_error:?}, got {result:#?}"
+        );
+    }
+    assert_eq!(balance(&ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance(&ft2_asset_id).await, user1_ft2);
+
+    // SwapAdvanced works with assets transferred with the operations
+    let (_, better_amount_out) = simulate(
+        better_pool_id,
+        SwapRequestAmount::ExactIn(U128(swap_amount)),
+    )
+    .await;
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(swap_amount),
+            "msg": near_sdk::serde_json::to_string(&vec![
+                Operation::SwapAdvanced {
+                    asset_in: ft1_asset_id.clone(),
+                    asset_out: ft2_asset_id.clone(),
+                    amount: SwapOperationAmount::EntireBalanceIn,
+                    constraint: None,
+                    options: vec![option(worse_pool_id), option(better_pool_id)],
+                    mode: SwapAdvancedMode::FindBest,
+                },
+                Operation::Withdraw {
+                    asset_id: ft2_asset_id.clone(),
+                    amount: WithdrawAmount::PreviousSwapOutput,
+                    to: None,
+                    rescue_address: None,
+                },
+            ]).unwrap(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_ft_balance(&user1, ft2.clone(), better_amount_out)
+        .await
+        .unwrap();
 }
