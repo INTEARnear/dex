@@ -2,7 +2,7 @@
 
 use std::{fmt, num::NonZeroU128};
 
-use intear_dex_types::{AssetId, SwapRequest, SwapRequestAmount};
+use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount};
 use near_sdk::{
     AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
     borsh::{
@@ -136,7 +136,8 @@ pub struct SwapRoute {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SignedFeeDiscount {
     pub discount: FeeDiscount,
-    /// signature of sha256(borsh(`discount`)) by the dex's fee discount signer
+    /// signature of sha256(borsh([`FeeDiscountSignaturePayload`])) by the
+    /// dex's fee discount signer
     pub signature: Vec<u8>,
 }
 
@@ -155,6 +156,16 @@ pub struct FeeDiscount {
     /// [`FULL_FEE_FRACTION`] waives pool and protocol fees entirely.
     pub fee_discount: FeeFractionFraction,
     pub expiration_block_height: BlockHeight,
+}
+
+/// What the fee discount signer signs for [`SignedFeeDiscount`]
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeDiscountSignaturePayload {
+    pub chain_id: String,
+    pub engine_contract_id: AccountId,
+    pub dex_id: DexId,
+    pub discount: FeeDiscount,
 }
 
 #[near(serializers=[borsh])]

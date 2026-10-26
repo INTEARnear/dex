@@ -16,12 +16,13 @@ use near_sdk::{
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
     CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfiguration,
-    FeeFraction, FeeFractionFraction, FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
-    LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, Pool, PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView,
-    RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse,
-    SetFeeDiscountSignerArgs, SignedFeeDiscount, SwapArgs, SwapRoute, UpgradePoolArgs,
-    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent, asset_account_ids,
+    FeeDiscountSignaturePayload, FeeFraction, FeeFractionFraction, FeeReceiver,
+    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
+    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, Pool,
+    PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SignedFeeDiscount,
+    SwapArgs, SwapRoute, UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    asset_account_ids,
     math::{
         exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
         shares_to_tokens, tokens_to_shares,
@@ -161,7 +162,14 @@ impl XykDex {
             let Some(fee_discount_signer_public_key) = &self.fee_discount_signer_public_key,
             "Fee discounts are disabled on this dex"
         );
-        let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&discount).unwrap());
+        let signature_payload = FeeDiscountSignaturePayload {
+            chain_id: near_sdk::env::chain_id(),
+            engine_contract_id: env::engine_contract_id(),
+            dex_id: env::dex_id(),
+            discount: discount.clone(),
+        };
+        let hash =
+            near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
         expect!(
             match fee_discount_signer_public_key.curve_type() {
                 CurveType::ED25519 => {

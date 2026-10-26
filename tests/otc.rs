@@ -15,8 +15,8 @@ use near_sdk::{
 use near_workspaces::{Account, Contract};
 use otc_dex_types::{
     AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition, GetBalanceArgs,
-    MatchArgs, OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageDepositArgs,
-    TradeIntent, Validity,
+    MatchArgs, Nonce, OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs,
+    StorageDepositArgs, TradeIntent, TradeIntentSignaturePayload, Validity,
 };
 use std::collections::HashMap;
 
@@ -74,6 +74,30 @@ async fn otc_register_assets(
     assert_success(&result).unwrap();
 }
 
+/// What the authorized `key` of `trade_intent`'s user signs to authorize it on `dex_id`
+/// with `nonce`
+fn sign_trade_intent(
+    key: &SecretKey,
+    chain_id: &str,
+    engine_contract_id: &AccountId,
+    dex_id: &DexId,
+    trade_intent: &TradeIntent,
+    nonce: Nonce,
+) -> Base64VecU8 {
+    let signature_payload = TradeIntentSignaturePayload {
+        chain_id: chain_id.to_string(),
+        engine_contract_id: engine_contract_id.clone(),
+        dex_id: dex_id.clone(),
+        trade_intent: trade_intent.clone(),
+        nonce,
+    };
+    let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
+    Base64VecU8(match key.sign(&hash) {
+        Signature::ED25519(sig) => sig.to_bytes().to_vec(),
+        Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
+    })
+}
+
 #[tokio::test]
 async fn test_otc_regular_flow() {
     let initial_near_deposit = NearToken::from_near(20);
@@ -106,6 +130,7 @@ async fn test_otc_regular_flow() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
 
     let initial_near_balance = near_balance_after_refunds(&sandbox, &deployer).await;
     let mut total_near_burnt = NearToken::from_yoctonear(0);
@@ -291,17 +316,21 @@ async fn test_otc_regular_flow() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
-    let user1_signature: Base64VecU8 = Base64VecU8(
-        match deployer_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature = sign_trade_intent(
+        &deployer_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent,
+        U128(1001),
     );
 
     let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature,
+            nonce: U128(1001),
+        },
     };
 
     // User 2's trade intent: sell 2 NEAR for 100_000_000 FT
@@ -334,46 +363,6 @@ async fn test_otc_regular_flow() {
             U128(trade_amount_near.as_yoctonear()),
         )]),
     }];
-
-    let intent_with_nonce = AuthorizedTradeIntent {
-        trade_intent: TradeIntent {
-            user_id: user2.id().clone(),
-            asset_in: AssetId::Near,
-            asset_out: AssetId::Near,
-            amount_in: U128(0),
-            amount_out: U128(0),
-            validity: Validity {
-                nonce: Some(U128(1)),
-                ..Default::default()
-            },
-        },
-        authorization_method: AuthorizationMethod::Predecessor,
-    };
-    let result = user2
-        .call(dex_engine_contract.id(), "deposit_near")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": [Operation::DexCall {
-                dex_id: dex_id.clone(),
-                method: "match".to_string(),
-                args: Base64VecU8(
-                    near_sdk::borsh::to_vec(&MatchArgs {
-                        authorized_trade_intents: vec![intent_with_nonce],
-                        output_destination: OutputDestination::WithdrawToUser,
-                    })
-                    .unwrap(),
-                ),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(0))]),
-            }],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert!(
-        format!("{:?}", result.failures())
-            .contains("AuthorizationMethod::Predecessor can't use a nonce in a transfer call")
-    );
 
     let result = user2
         .call(dex_engine_contract.id(), "deposit_near")
@@ -438,6 +427,7 @@ async fn test_otc_relayed_by_third_party() {
     let wasms = get_compiled_wasms().await;
 
     let TestContext {
+        sandbox,
         dex_engine_contract,
         ft1,
         deployer,
@@ -461,6 +451,7 @@ async fn test_otc_relayed_by_third_party() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -619,17 +610,21 @@ async fn test_otc_relayed_by_third_party() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
-    let user1_signature: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent,
+        U128(1002),
     );
 
     let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature,
+            nonce: U128(1002),
+        },
     };
 
     // User 2's trade intent: sell 100_000_000 FT for 2 NEAR
@@ -642,17 +637,21 @@ async fn test_otc_relayed_by_third_party() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
-    let user2_signature: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent,
+        U128(1003),
     );
 
     let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature,
+            nonce: U128(1003),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -854,6 +853,7 @@ async fn test_otc_mismatching_intents_fail() {
     let wasms = get_compiled_wasms().await;
 
     let TestContext {
+        sandbox,
         dex_engine_contract,
         ft1,
         deployer,
@@ -876,6 +876,7 @@ async fn test_otc_mismatching_intents_fail() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1025,17 +1026,21 @@ async fn test_otc_mismatching_intents_fail() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
-    let user1_signature: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent,
+        U128(1004),
     );
 
     let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature,
+            nonce: U128(1004),
+        },
     };
 
     // User 2's trade intent: sell mismatched FT amount for 2 NEAR
@@ -1048,17 +1053,21 @@ async fn test_otc_mismatching_intents_fail() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
-    let user2_signature: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent,
+        U128(1005),
     );
 
     let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature,
+            nonce: U128(1005),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -1103,6 +1112,7 @@ async fn test_otc_three_intents_with_same_value() {
     let wasms = get_compiled_wasms().await;
 
     let TestContext {
+        sandbox,
         dex_engine_contract,
         ft1,
         ft2,
@@ -1128,6 +1138,7 @@ async fn test_otc_three_intents_with_same_value() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1372,17 +1383,21 @@ async fn test_otc_three_intents_with_same_value() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent).unwrap();
-    let user1_signature: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent,
+        U128(1006),
     );
 
     let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature,
+            nonce: U128(1006),
+        },
     };
 
     // User 2's trade intent: sell 100_000 FT1 for 5_000 FT2
@@ -1395,17 +1410,21 @@ async fn test_otc_three_intents_with_same_value() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
-    let user2_signature: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent,
+        U128(1007),
     );
 
     let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature,
+            nonce: U128(1007),
+        },
     };
 
     // User 3's trade intent: sell 5_000 FT2 for 1 NEAR
@@ -1418,17 +1437,21 @@ async fn test_otc_three_intents_with_same_value() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user3_trade_intent).unwrap();
-    let user3_signature: Base64VecU8 = Base64VecU8(
-        match user3_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user3_signature = sign_trade_intent(
+        &user3_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user3_trade_intent,
+        U128(1008),
     );
 
     let user3_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user3_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user3_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user3_signature,
+            nonce: U128(1008),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -1561,6 +1584,7 @@ async fn test_otc_nonces() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
 
     let result = user1
         .call(dex_engine_contract.id(), "deposit_near")
@@ -1720,22 +1744,25 @@ async fn test_otc_nonces() {
         amount_out: U128(trade_amount_ft),
         validity: Validity {
             expiry: None,
-            nonce: Some(nonce1),
             only_for_whitelisted_parties: None,
         },
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent_with_nonce).unwrap();
-    let user1_signature: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent_with_nonce,
+        nonce1,
     );
 
     let user1_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_nonce,
-        authorization_method: AuthorizationMethod::Signature(user1_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature,
+            nonce: nonce1,
+        },
     };
 
     let user2_trade_intent = TradeIntent {
@@ -1747,17 +1774,21 @@ async fn test_otc_nonces() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent).unwrap();
-    let user2_signature: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent,
+        U128(1009),
     );
 
     let user2_authorized_intent = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent,
-        authorization_method: AuthorizationMethod::Signature(user2_signature),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature,
+            nonce: U128(1009),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -1795,22 +1826,25 @@ async fn test_otc_nonces() {
         amount_out: U128(trade_amount_ft),
         validity: Validity {
             expiry: None,
-            nonce: Some(nonce1),
             only_for_whitelisted_parties: None,
         },
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent_with_nonce_reuse).unwrap();
-    let user1_signature_reuse: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature_reuse = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent_with_nonce_reuse,
+        nonce1,
     );
 
     let user1_authorized_intent_reuse = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_nonce_reuse,
-        authorization_method: AuthorizationMethod::Signature(user1_signature_reuse),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature_reuse,
+            nonce: nonce1,
+        },
     };
 
     let user2_trade_intent_2 = TradeIntent {
@@ -1822,17 +1856,21 @@ async fn test_otc_nonces() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_2).unwrap();
-    let user2_signature_2: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature_2 = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent_2,
+        U128(1010),
     );
 
     let user2_authorized_intent_2 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_2,
-        authorization_method: AuthorizationMethod::Signature(user2_signature_2),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature_2,
+            nonce: U128(1010),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -1875,22 +1913,25 @@ async fn test_otc_nonces() {
         amount_out: U128(trade_amount_ft),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block)),
-            nonce: Some(U128(54321)),
             only_for_whitelisted_parties: None,
         },
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent_with_block_expiry).unwrap();
-    let user1_signature_expiry: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature_expiry = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent_with_block_expiry,
+        U128(54321),
     );
 
     let user1_authorized_intent_expiry = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_block_expiry,
-        authorization_method: AuthorizationMethod::Signature(user1_signature_expiry),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature_expiry,
+            nonce: U128(54321),
+        },
     };
 
     let user2_trade_intent_3 = TradeIntent {
@@ -1902,17 +1943,21 @@ async fn test_otc_nonces() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_3).unwrap();
-    let user2_signature_3: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature_3 = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent_3,
+        U128(1011),
     );
 
     let user2_authorized_intent_3 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_3,
-        authorization_method: AuthorizationMethod::Signature(user2_signature_3),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature_3,
+            nonce: U128(1011),
+        },
     };
 
     sandbox.fast_forward(10).await.unwrap();
@@ -1958,22 +2003,25 @@ async fn test_otc_nonces() {
         amount_out: U128(trade_amount_ft),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block_short)),
-            nonce: Some(nonce3),
             only_for_whitelisted_parties: None,
         },
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent_with_expiring_nonce).unwrap();
-    let user1_signature_expiring_nonce: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature_expiring_nonce = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent_with_expiring_nonce,
+        nonce3,
     );
 
     let user1_authorized_intent_expiring_nonce = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_with_expiring_nonce,
-        authorization_method: AuthorizationMethod::Signature(user1_signature_expiring_nonce),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature_expiring_nonce,
+            nonce: nonce3,
+        },
     };
 
     let user2_trade_intent_4 = TradeIntent {
@@ -1985,17 +2033,21 @@ async fn test_otc_nonces() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_4).unwrap();
-    let user2_signature_4: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature_4 = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent_4,
+        U128(1012),
     );
 
     let user2_authorized_intent_4 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_4,
-        authorization_method: AuthorizationMethod::Signature(user2_signature_4),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature_4,
+            nonce: U128(1012),
+        },
     };
 
     // First use should succeed
@@ -2038,22 +2090,25 @@ async fn test_otc_nonces() {
         amount_out: U128(trade_amount_ft),
         validity: Validity {
             expiry: None,
-            nonce: Some(nonce3),
             only_for_whitelisted_parties: None,
         },
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user1_trade_intent_reuse_nonce_after_expiry).unwrap();
-    let user1_signature_reuse_nonce: Base64VecU8 = Base64VecU8(
-        match user1_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user1_signature_reuse_nonce = sign_trade_intent(
+        &user1_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user1_trade_intent_reuse_nonce_after_expiry,
+        nonce3,
     );
 
     let user1_authorized_intent_reuse_nonce = AuthorizedTradeIntent {
         trade_intent: user1_trade_intent_reuse_nonce_after_expiry,
-        authorization_method: AuthorizationMethod::Signature(user1_signature_reuse_nonce),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user1_signature_reuse_nonce,
+            nonce: nonce3,
+        },
     };
 
     let user2_trade_intent_5 = TradeIntent {
@@ -2065,17 +2120,21 @@ async fn test_otc_nonces() {
         validity: Validity::default(),
     };
 
-    let serialized = near_sdk::borsh::to_vec(&user2_trade_intent_5).unwrap();
-    let user2_signature_5: Base64VecU8 = Base64VecU8(
-        match user2_key.sign(&near_sdk::env::sha256_array(serialized)) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        },
+    let user2_signature_5 = sign_trade_intent(
+        &user2_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
+        &user2_trade_intent_5,
+        U128(1013),
     );
 
     let user2_authorized_intent_5 = AuthorizedTradeIntent {
         trade_intent: user2_trade_intent_5,
-        authorization_method: AuthorizationMethod::Signature(user2_signature_5),
+        authorization_method: AuthorizationMethod::Signature {
+            signature: user2_signature_5,
+            nonce: U128(1013),
+        },
     };
 
     let operations = vec![Operation::DexCall {
@@ -2141,6 +2200,7 @@ async fn test_otc_swap() {
         deployer: maker.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
     let ft_asset = AssetId::Nep141(ft1.id().clone());
 
     // The maker deposits NEAR and FT into its OTC balance and authorizes a key
@@ -2224,7 +2284,7 @@ async fn test_otc_swap() {
 
     // The maker sells FT for NEAR, only to the trader, once per nonce
     let expiry_block_height = sandbox.view_block().await.unwrap().height() + 10_000;
-    let maker_trade = |nonce: u128| TradeIntent {
+    let maker_trade = || TradeIntent {
         user_id: maker.id().clone(),
         asset_in: ft_asset.clone(),
         asset_out: AssetId::Near,
@@ -2232,20 +2292,25 @@ async fn test_otc_swap() {
         amount_out: U128(trade_amount_near.as_yoctonear()),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block_height)),
-            nonce: Some(U128(nonce)),
             only_for_whitelisted_parties: Some(vec![trader.id().clone()]),
         },
     };
-    let signed = |trade_intent: TradeIntent| {
-        let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&trade_intent).unwrap());
-        let signature = match maker_key.sign(&hash) {
-            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
-            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
-        };
+    let signed = |trade_intent: TradeIntent, nonce: u128| {
+        let signature = sign_trade_intent(
+            &maker_key,
+            &chain_id,
+            dex_engine_contract.id(),
+            &dex_id,
+            &trade_intent,
+            U128(nonce),
+        );
         Base64VecU8(
             near_sdk::borsh::to_vec(&AuthorizedTradeIntent {
                 trade_intent,
-                authorization_method: AuthorizationMethod::Signature(Base64VecU8(signature)),
+                authorization_method: AuthorizationMethod::Signature {
+                    signature,
+                    nonce: U128(nonce),
+                },
             })
             .unwrap(),
         )
@@ -2307,7 +2372,7 @@ async fn test_otc_swap() {
         AssetId::Near,
     )
     .await;
-    let first_intent = signed(maker_trade(1));
+    let first_intent = signed(maker_trade(), 1);
 
     // A simulation doesn't use up the nonce
     let simulation = dex_engine_contract
@@ -2377,7 +2442,7 @@ async fn test_otc_swap() {
     let result = swap(&trader, &first_intent, trade_amount_ft).await.unwrap();
     assert_failed_with(result, "Nonce already used");
 
-    let second_intent = signed(maker_trade(2));
+    let second_intent = signed(maker_trade(), 2);
     // Only the whitelisted trader can take it
     assert_success(
         &deposit_near(&outsider, NearToken::from_near(5))
@@ -2400,7 +2465,7 @@ async fn test_otc_swap() {
     // And only signed
     let unsigned_intent = Base64VecU8(
         near_sdk::borsh::to_vec(&AuthorizedTradeIntent {
-            trade_intent: maker_trade(3),
+            trade_intent: maker_trade(),
             authorization_method: AuthorizationMethod::Predecessor,
         })
         .unwrap(),
@@ -2409,6 +2474,35 @@ async fn test_otc_swap() {
         .await
         .unwrap();
     assert_failed_with(result, "AuthorizationMethod::Predecessor cannot be used");
+
+    // A signature for another dex isn't valid on this one
+    let other_dex_id = DexId {
+        deployer: maker.id().clone(),
+        id: "other-dex".to_string(),
+    };
+    let trade_intent_for_other_dex = maker_trade();
+    let signature_for_other_dex = sign_trade_intent(
+        &maker_key,
+        &chain_id,
+        dex_engine_contract.id(),
+        &other_dex_id,
+        &trade_intent_for_other_dex,
+        U128(4),
+    );
+    let intent_for_other_dex = Base64VecU8(
+        near_sdk::borsh::to_vec(&AuthorizedTradeIntent {
+            trade_intent: trade_intent_for_other_dex,
+            authorization_method: AuthorizationMethod::Signature {
+                signature: signature_for_other_dex,
+                nonce: U128(4),
+            },
+        })
+        .unwrap(),
+    );
+    let result = swap(&trader, &intent_for_other_dex, trade_amount_ft)
+        .await
+        .unwrap();
+    assert_failed_with(result, "Signature verification failed");
 
     // The intent that failed to be taken can still be
     let result = swap(&trader, &second_intent, trade_amount_ft)

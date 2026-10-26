@@ -279,15 +279,17 @@ impl Caller {
 
 #[cfg(feature = "dex")]
 pub mod env {
-    use near_sdk::borsh::BorshSerialize;
+    use near_sdk::{AccountId, borsh::BorshSerialize};
 
-    use crate::Caller;
+    use crate::{Caller, DexId};
 
     mod sys {
         #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
         unsafe extern "C" {
             pub fn caller(register_id: u64);
             pub fn dex_event(len: u64, ptr: u64);
+            pub fn dex_id(register_id: u64);
+            pub fn engine_contract_id(register_id: u64);
         }
     }
 
@@ -302,6 +304,22 @@ pub mod env {
     pub fn dex_event<T: BorshSerialize>(event: &T) {
         let event = near_sdk::borsh::to_vec(event).expect("Failed to serialize event");
         unsafe { sys::dex_event(event.len() as u64, event.as_ptr() as u64) };
+    }
+
+    pub fn dex_id() -> DexId {
+        unsafe { sys::dex_id(REGISTER_ID) };
+        let dex_id = near_sdk::env::read_register(REGISTER_ID).expect("Dex ID not returned");
+        near_sdk::borsh::from_slice(&dex_id).expect("Invalid dex ID")
+    }
+
+    pub fn engine_contract_id() -> AccountId {
+        unsafe { sys::engine_contract_id(REGISTER_ID) };
+        let engine_contract_id =
+            near_sdk::env::read_register(REGISTER_ID).expect("Engine contract ID not returned");
+        String::from_utf8(engine_contract_id)
+            .ok()
+            .and_then(|engine_contract_id| engine_contract_id.parse().ok())
+            .expect("Invalid engine contract ID")
     }
 }
 

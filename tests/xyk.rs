@@ -19,12 +19,12 @@ use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 use xyk_dex_types::{
     AddLiquidityArgs, CAN_MIGRATE, CreatePoolArgs, CurrentFees, FULL_FEE_FRACTION,
-    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeReceiver,
-    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, LockPoolArgs,
-    MAX_FEE_RECEIVERS, PROTOCOL_FEE, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs,
-    SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute, UpgradePoolArgs, V2FeeConfiguration,
-    WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeDiscountSignaturePayload,
+    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    LockPoolArgs, MAX_FEE_RECEIVERS, PROTOCOL_FEE, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType,
+    PoolView, RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve,
+    SetFeeDiscountSignerArgs, SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute,
+    UpgradePoolArgs, V2FeeConfiguration, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -143,9 +143,22 @@ async fn get_pool_count(dex_engine_contract: &Contract, dex_id: &DexId) -> PoolI
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
 }
 
-fn sign_fee_discount(discount: FeeDiscount, signer: &SecretKey) -> SignedFeeDiscount {
+/// The fee discount signed by `signer` for the xyk dex `dex_id`
+fn sign_fee_discount(
+    discount: FeeDiscount,
+    signer: &SecretKey,
+    chain_id: &str,
+    engine_contract_id: &AccountId,
+    dex_id: &DexId,
+) -> SignedFeeDiscount {
+    let signature_payload = FeeDiscountSignaturePayload {
+        chain_id: chain_id.to_string(),
+        engine_contract_id: engine_contract_id.clone(),
+        dex_id: dex_id.clone(),
+        discount: discount.clone(),
+    };
     let signature = match signer.sign(&near_sdk::env::sha256_array(
-        near_sdk::borsh::to_vec(&discount).unwrap(),
+        near_sdk::borsh::to_vec(&signature_payload).unwrap(),
     )) {
         Signature::ED25519(signature) => signature.to_bytes().to_vec(),
         Signature::SECP256K1(signature) => <[u8; 65]>::from(signature).to_vec(),
@@ -4771,6 +4784,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         },
         dex_id,
     ) = setup_xyk_with_fee_discount_signer(&fee_discount_signer).await;
+    let chain_id = sandbox.status().await.unwrap().chain_id;
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
     let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
     let protocol_fee_receiver_id = PROTOCOL_FEE_RECEIVER_ID.to_owned();
@@ -4950,6 +4964,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         swap_message_with_fee_discount(sign_fee_discount(
             full_fee_discount_for_user1.clone(),
             &fee_discount_signer,
+            &chain_id,
+            dex_engine_contract.id(),
+            &dex_id,
         )),
         SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
     )
@@ -4993,6 +5010,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 ..full_fee_discount_for_user1.clone()
             },
             &fee_discount_signer,
+            &chain_id,
+            dex_engine_contract.id(),
+            &dex_id,
         )),
         SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
     )
@@ -5026,6 +5046,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         swap_message_with_fee_discount(sign_fee_discount(
             full_exact_out_fee_discount_for_user1.clone(),
             &fee_discount_signer,
+            &chain_id,
+            dex_engine_contract.id(),
+            &dex_id,
         )),
         SwapRequestAmount::ExactOut(U128(exact_amount_out_ft2)),
     )
@@ -5079,6 +5102,23 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
             sign_fee_discount(
                 full_fee_discount_for_user1.clone(),
                 &not_fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
+            ),
+            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            "Fee discount signature verification failed",
+        ),
+        (
+            sign_fee_discount(
+                full_fee_discount_for_user1.clone(),
+                &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &DexId {
+                    deployer: dex_id.deployer.clone(),
+                    id: "other-dex".to_string(),
+                },
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount signature verification failed",
@@ -5092,6 +5132,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                         ..full_fee_discount_for_user1.clone()
                     },
                     &fee_discount_signer,
+                    &chain_id,
+                    dex_engine_contract.id(),
+                    &dex_id,
                 )
                 .signature,
             },
@@ -5105,6 +5148,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount is for another route",
@@ -5117,6 +5163,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount is for other assets",
@@ -5128,6 +5177,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount is for another trader",
@@ -5139,12 +5191,21 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount is for another amount",
         ),
         (
-            sign_fee_discount(full_fee_discount_for_user1.clone(), &fee_discount_signer),
+            sign_fee_discount(
+                full_fee_discount_for_user1.clone(),
+                &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
+            ),
             SwapRequestAmount::ExactOut(U128(swap_amount_ft1)),
             "Fee discount is for another amount",
         ),
@@ -5155,6 +5216,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount expired",
@@ -5166,6 +5230,9 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &dex_id,
             ),
             SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
             "Fee discount can't exceed 100%",
@@ -5192,6 +5259,7 @@ async fn test_xyk_fee_discount_without_signer() {
     let wasms = get_compiled_wasms().await;
 
     let TestContext {
+        sandbox,
         dex_engine_contract,
         ft1,
         ft2,
@@ -5213,6 +5281,7 @@ async fn test_xyk_fee_discount_without_signer() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
     let fee_discount = sign_fee_discount(
         FeeDiscount {
             routes: SwapArgs::single_pool(0).routes,
@@ -5224,6 +5293,9 @@ async fn test_xyk_fee_discount_without_signer() {
             expiration_block_height: u64::MAX,
         },
         &SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer"),
+        &chain_id,
+        dex_engine_contract.id(),
+        &dex_id,
     );
     // The dex rejects the discount before it looks for the pool or the trader's balance
     let result = user1
@@ -5283,6 +5355,7 @@ async fn test_xyk_route_fee_discount() {
         },
         dex_id,
     ) = setup_xyk_with_fee_discount_signer(&fee_discount_signer).await;
+    let chain_id = sandbox.status().await.unwrap().chain_id;
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
     let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
     let ft3_asset_id = AssetId::Nep141(ft3.id().clone());
@@ -5390,7 +5463,7 @@ async fn test_xyk_route_fee_discount() {
                         near_sdk::borsh::to_vec(&SwapArgs {
                             routes: routes.clone(),
                             fee_discount: fee_discount.map(|fee_discount| {
-                                sign_fee_discount(fee_discount, &fee_discount_signer)
+                                sign_fee_discount(fee_discount, &fee_discount_signer, &chain_id, dex_engine_contract.id(), &dex_id)
                             }),
                         })
                         .unwrap(),

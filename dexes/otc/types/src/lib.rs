@@ -1,6 +1,6 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-use intear_dex_types::AssetId;
+use intear_dex_types::{AssetId, DexId};
 use near_sdk::{
     AccountId, BlockHeight, NearToken, PublicKey,
     json_types::{Base64VecU8, U64, U128},
@@ -18,11 +18,15 @@ pub struct StorageBalance {
 
 #[near(serializers=[borsh])]
 pub enum AuthorizationMethod {
-    /// Signature of the sha256 of the borsh of the trade intent, by the
-    /// authorized key of the user
-    Signature(Base64VecU8),
+    /// Signature of the sha256 of the borsh of the [`TradeIntentSignaturePayload`]
+    /// of the trade intent and `nonce`, by the authorized key of the user. The
+    /// nonce can't be used again while the intent is valid
+    Signature {
+        signature: Base64VecU8,
+        nonce: Nonce,
+    },
     /// The user calls the dex directly, or sends the attached assets in a transfer
-    /// call, where the intent can't have a nonce
+    /// call
     Predecessor,
 }
 
@@ -33,7 +37,7 @@ pub struct AuthorizedTradeIntent {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TradeIntent {
     pub user_id: AccountId,
     pub asset_in: AssetId,
@@ -43,11 +47,20 @@ pub struct TradeIntent {
     pub validity: Validity,
 }
 
-#[derive(Default, PartialEq, Debug)]
+/// What the authorized key of the user signs for [`AuthorizationMethod::Signature`]
+#[near(serializers=[borsh])]
+pub struct TradeIntentSignaturePayload {
+    pub chain_id: String,
+    pub engine_contract_id: AccountId,
+    pub dex_id: DexId,
+    pub trade_intent: TradeIntent,
+    pub nonce: Nonce,
+}
+
+#[derive(Default, Clone, PartialEq, Debug)]
 #[near(serializers=[borsh])]
 pub struct Validity {
     pub expiry: Option<ExpiryCondition>,
-    pub nonce: Option<Nonce>,
     pub only_for_whitelisted_parties: Option<Vec<AccountId>>,
 }
 

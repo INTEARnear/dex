@@ -17,8 +17,8 @@ use otc_dex_types::{
     AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition,
     GetAuthorizedKeyArgs, GetBalanceArgs, IsNonceUsedArgs, MatchArgs, Nonce, OtcDexEvent,
     OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageBalance,
-    StorageBalanceOfArgs, StorageDepositArgs, TradeIntent, Validity, WithdrawAssetsArgs,
-    WithdrawRequest,
+    StorageBalanceOfArgs, StorageDepositArgs, TradeIntent, TradeIntentSignaturePayload, Validity,
+    WithdrawAssetsArgs, WithdrawRequest,
 };
 
 #[near(serializers=[borsh])]
@@ -106,7 +106,7 @@ impl Dex for OtcDex {
                     maker_trade.user_id, maker_trade.asset_out,
                 )
             });
-        self.mark_trade_intent_used(maker_trade);
+        self.mark_trade_intent_used(&maker_intent);
 
         let response = SwapResponse {
             amount_in: maker_trade.amount_out,
@@ -303,7 +303,7 @@ impl OtcDex {
                     });
             }
 
-            self.mark_trade_intent_used(&authorized_trade_intent.trade_intent);
+            self.mark_trade_intent_used(authorized_trade_intent);
         }
 
         OtcDexEvent::Trade {
@@ -580,16 +580,20 @@ impl OtcDex {
                         *alleged_sender == trade_intent.user_id,
                         "Intent not authorized: AuthorizationMethod::Predecessor cannot be used if the sender of the transfer call is not the user"
                     );
-                    expect!(
-                        trade_intent.validity.nonce.is_none(),
-                        "Intent not authorized: AuthorizationMethod::Predecessor can't use a nonce in a transfer call"
-                    );
                 }
             },
-            AuthorizationMethod::Signature(signature) => {
+            AuthorizationMethod::Signature { signature, nonce } => {
                 if let Some(expected_public_key) = self.authorized_keys.get(&trade_intent.user_id) {
-                    let data = near_sdk::borsh::to_vec(&trade_intent).unwrap();
-                    let hash = near_sdk::env::sha256_array(&data);
+                    let signature_payload = TradeIntentSignaturePayload {
+                        chain_id: near_sdk::env::chain_id(),
+                        engine_contract_id: env::engine_contract_id(),
+                        dex_id: env::dex_id(),
+                        trade_intent: trade_intent.clone(),
+                        nonce: *nonce,
+                    };
+                    let hash = near_sdk::env::sha256_array(
+                        near_sdk::borsh::to_vec(&signature_payload).unwrap(),
+                    );
                     let is_verified = match expected_public_key.curve_type() {
                         CurveType::ED25519 => near_sdk::env::ed25519_verify(
                             signature
@@ -627,7 +631,8 @@ impl OtcDex {
         }
     }
 
-    fn mark_trade_intent_used(&mut self, trade_intent: &TradeIntent) {
+    fn mark_trade_intent_used(&mut self, authorized_trade_intent: &AuthorizedTradeIntent) {
+        let trade_intent = &authorized_trade_intent.trade_intent;
         // remove up to 10 used nonces that are no longer valid
         const NONCES_TO_REMOVE_AT_ONCE: usize = 10;
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -667,15 +672,15 @@ impl OtcDex {
         }
 
         // mark nonce as used
-        if let Some(nonce) = &trade_intent.validity.nonce {
+        if let AuthorizationMethod::Signature { nonce, .. } =
+            &authorized_trade_intent.authorization_method
+        {
             expect!(
                 !self
                     .used_nonces
                     .contains(&(trade_intent.user_id.clone(), *nonce)),
                 "Intent not authorized: Nonce already used"
             );
-        }
-        if let Some(nonce) = &trade_intent.validity.nonce {
             self.used_nonces
                 .insert((trade_intent.user_id.clone(), *nonce));
             if let Some(expiry_condition) = trade_intent.validity.expiry {

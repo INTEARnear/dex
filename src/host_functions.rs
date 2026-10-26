@@ -242,6 +242,9 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, attached_deposit);
         $crate::impl_host_function!($var, predecessor_account_id);
         $crate::impl_host_function!($var, caller);
+        $crate::impl_host_function!($var, dex_id);
+        $crate::impl_host_function!($var, engine_contract_id);
+        $crate::impl_host_function!($var, chain_id);
         $crate::impl_host_function!($var, value_return);
         $crate::impl_host_function!($var, panic);
         $crate::impl_host_function!($var, panic_utf8);
@@ -381,6 +384,31 @@ pub fn caller(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<()
     let buf = near_sdk::borsh::to_vec(&trader)
         .map_err(|err| wasmi::Error::new(format!("Failed to serialize trader: {err}")))?;
     caller.data_mut().registers.insert(register_id, buf);
+    Ok(())
+}
+
+pub fn dex_id(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
+    let dex_id = near_sdk::borsh::to_vec(&caller.data().dex_id)
+        .map_err(|err| wasmi::Error::new(format!("Failed to serialize dex id: {err}")))?;
+    caller.data_mut().registers.insert(register_id, dex_id);
+    Ok(())
+}
+
+pub fn engine_contract_id(
+    mut caller: Caller<'_, RunnerData>,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
+    let engine_contract_id = near_sdk::env::current_account_id().to_string().into_bytes();
+    caller
+        .data_mut()
+        .registers
+        .insert(register_id, engine_contract_id);
+    Ok(())
+}
+
+pub fn chain_id(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
+    let chain_id = near_sdk::env::chain_id().into_bytes();
+    caller.data_mut().registers.insert(register_id, chain_id);
     Ok(())
 }
 
