@@ -1,7 +1,9 @@
 mod common;
 use common::*;
 
-use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation};
+use intear_dex_types::{
+    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount, SwapRequestAmount,
+};
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::AccountId;
 use near_sdk::serde_json::json;
@@ -2100,6 +2102,316 @@ async fn test_otc_nonces() {
             "operations": operations,
         }))
         .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+}
+
+#[tokio::test]
+async fn test_otc_swap() {
+    // Each filled intent stores its nonce until it expires, paid from this
+    let maker_otc_storage_deposit = NearToken::from_millinear(50);
+    let maker_otc_near = NearToken::from_near(5);
+    let maker_otc_ft = 500_000_000u128;
+    let trade_amount_near = NearToken::from_near(2);
+    let trade_amount_ft = 100_000_000u128;
+    let fee_fraction = 10_000; // 1%
+
+    let wasms = get_compiled_wasms().await;
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        ft1,
+        deployer: maker,
+        user1: trader,
+        user2: referrer,
+        user3: outsider,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.otc_dex_wasm.clone(),
+            init_method: None,
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: maker.id().clone(),
+        id: "dex".to_string(),
+    };
+    let ft_asset = AssetId::Nep141(ft1.id().clone());
+
+    // The maker deposits NEAR and FT into its OTC balance and authorizes a key
+    let deposit_near = |account: &Account, amount: NearToken| {
+        account
+            .call(dex_engine_contract.id(), "deposit_near")
+            .max_gas()
+            .deposit(amount)
+            .args_json(json!({}))
+            .transact()
+    };
+    let dex_call = |account: &Account,
+                    method: &str,
+                    args: Vec<u8>,
+                    attached_assets: near_sdk::serde_json::Value| {
+        account
+            .call(dex_engine_contract.id(), "dex_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "dex_id": dex_id.clone(),
+                "method": method,
+                "args": BASE64_STANDARD.encode(args),
+                "attached_assets": attached_assets,
+            }))
+            .transact()
+    };
+    assert_success(
+        &deposit_near(&maker, NearToken::from_near(10))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let result = maker
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(maker_otc_ft),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = dex_call(
+        &maker,
+        "storage_deposit",
+        near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap(),
+        json!({ "near": U128(maker_otc_storage_deposit.as_yoctonear()) }),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let result = dex_call(
+        &maker,
+        "deposit_assets",
+        near_sdk::borsh::to_vec(&DepositAssetsArgs).unwrap(),
+        json!({
+            "near": U128(maker_otc_near.as_yoctonear()),
+            format!("nep141:{}", ft1.id()): U128(maker_otc_ft),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let maker_key = SecretKey::from_random(KeyType::ED25519);
+    let result = dex_call(
+        &maker,
+        "set_authorized_key",
+        near_sdk::borsh::to_vec(&SetAuthorizedKeyArgs {
+            key: maker_key.public_key().to_string().parse().unwrap(),
+        })
+        .unwrap(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+
+    // The maker sells FT for NEAR, only to the trader, once per nonce
+    let expiry_block_height = sandbox.view_block().await.unwrap().height() + 10_000;
+    let maker_trade = |nonce: u128| TradeIntent {
+        user_id: maker.id().clone(),
+        asset_in: ft_asset.clone(),
+        asset_out: AssetId::Near,
+        amount_in: U128(trade_amount_ft),
+        amount_out: U128(trade_amount_near.as_yoctonear()),
+        validity: Validity {
+            expiry: Some(ExpiryCondition::BlockHeight(expiry_block_height)),
+            nonce: Some(U128(nonce)),
+            only_for_whitelisted_parties: Some(vec![trader.id().clone()]),
+        },
+    };
+    let signed = |trade_intent: TradeIntent| {
+        let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&trade_intent).unwrap());
+        let signature = match maker_key.sign(&hash) {
+            Signature::ED25519(sig) => sig.to_bytes().to_vec(),
+            Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
+        };
+        Base64VecU8(
+            near_sdk::borsh::to_vec(&AuthorizedTradeIntent {
+                trade_intent,
+                authorization_method: AuthorizationMethod::Signature(Base64VecU8(signature)),
+            })
+            .unwrap(),
+        )
+    };
+    let referral_fees = ReferralFees(vec![(referrer.id().clone(), fee_fraction)]);
+    let fee = referral_fees
+        .amounts_on_top_of(U128(trade_amount_near.as_yoctonear()))
+        .into_iter()
+        .map(|(_, fee)| fee.0)
+        .sum::<u128>();
+    let near_in_with_fee = trade_amount_near.as_yoctonear() + fee;
+    let swap = |trader: &Account, message: &Base64VecU8, amount_out: u128| {
+        trader
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": [Operation::SwapSimple {
+                    dex_id: dex_id.clone(),
+                    message: message.clone(),
+                    asset_in: AssetId::Near,
+                    asset_out: ft_asset.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(amount_out))),
+                    constraint: Some(U128(near_in_with_fee)),
+                }],
+                "referral_fees": referral_fees,
+            }))
+            .transact()
+    };
+    let assert_failed_with = |result: near_workspaces::result::ExecutionFinalResult,
+                              message: &str| {
+        let failures = format!("{:?}", result.failures());
+        assert!(
+            failures.contains(message),
+            "Expected {message:?}, got {failures}"
+        );
+    };
+    let inner_balance = |of: AccountOrDexId, asset_id: AssetId| {
+        let dex_engine_contract = dex_engine_contract.clone();
+        async move {
+            get_inner_asset_balance(&dex_engine_contract, of, asset_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+        }
+    };
+
+    assert_success(
+        &deposit_near(&trader, NearToken::from_near(5))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let trader_near_before =
+        inner_balance(AccountOrDexId::Account(trader.id().clone()), AssetId::Near).await;
+    let referrer_near_before = inner_balance(
+        AccountOrDexId::Account(referrer.id().clone()),
+        AssetId::Near,
+    )
+    .await;
+    let first_intent = signed(maker_trade(1));
+
+    // A simulation doesn't use up the nonce
+    let simulation = dex_engine_contract
+        .view("simulate_swap_simple")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "message": first_intent,
+            "trader": trader.id(),
+            "asset_in": AssetId::Near,
+            "asset_out": ft_asset,
+            "amount": SwapRequestAmount::ExactOut(U128(trade_amount_ft)),
+            "referral_fees": referral_fees,
+        }))
+        .await
+        .unwrap()
+        .json::<(U128, U128)>()
+        .unwrap();
+    assert_eq!(simulation, (U128(near_in_with_fee), U128(trade_amount_ft)));
+
+    // The trader pays the intent's NEAR and the fee on top, and gets the intent's FT
+    let result = swap(&trader, &first_intent, trade_amount_ft).await.unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        inner_balance(AccountOrDexId::Account(trader.id().clone()), AssetId::Near).await,
+        trader_near_before - near_in_with_fee
+    );
+    assert_eq!(
+        inner_balance(
+            AccountOrDexId::Account(trader.id().clone()),
+            ft_asset.clone()
+        )
+        .await,
+        trade_amount_ft
+    );
+    assert_eq!(
+        inner_balance(
+            AccountOrDexId::Account(referrer.id().clone()),
+            AssetId::Near
+        )
+        .await,
+        referrer_near_before + fee
+    );
+    assert_otc_inner_asset_balance(
+        &dex_engine_contract,
+        &dex_id,
+        maker.id(),
+        AssetId::Near,
+        Some(U128(
+            maker_otc_near
+                .saturating_add(trade_amount_near)
+                .as_yoctonear(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert_otc_inner_asset_balance(
+        &dex_engine_contract,
+        &dex_id,
+        maker.id(),
+        ft_asset.clone(),
+        Some(U128(maker_otc_ft - trade_amount_ft)),
+    )
+    .await
+    .unwrap();
+
+    // The same intent can't be filled twice
+    let result = swap(&trader, &first_intent, trade_amount_ft).await.unwrap();
+    assert_failed_with(result, "Nonce already used");
+
+    let second_intent = signed(maker_trade(2));
+    // Only the whitelisted trader can take it
+    assert_success(
+        &deposit_near(&outsider, NearToken::from_near(5))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let result = swap(&outsider, &second_intent, trade_amount_ft)
+        .await
+        .unwrap();
+    assert_failed_with(result, "not whitelisted");
+    // Only for exactly the intent's amounts
+    let result = swap(&trader, &second_intent, trade_amount_ft / 2)
+        .await
+        .unwrap();
+    assert_failed_with(result, "Amount out doesn't match the intent");
+    // Not by the maker itself
+    let result = swap(&maker, &second_intent, trade_amount_ft).await.unwrap();
+    assert_failed_with(result, "a trader can't swap with their own intent");
+    // And only signed
+    let unsigned_intent = Base64VecU8(
+        near_sdk::borsh::to_vec(&AuthorizedTradeIntent {
+            trade_intent: maker_trade(3),
+            authorization_method: AuthorizationMethod::Predecessor,
+        })
+        .unwrap(),
+    );
+    let result = swap(&trader, &unsigned_intent, trade_amount_ft)
+        .await
+        .unwrap();
+    assert_failed_with(result, "AuthorizationMethod::Predecessor cannot be used");
+
+    // The intent that failed to be taken can still be
+    let result = swap(&trader, &second_intent, trade_amount_ft)
         .await
         .unwrap();
     assert_success(&result).unwrap();

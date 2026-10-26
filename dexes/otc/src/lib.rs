@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crypto_bigint::{ConstChoice, I256, U256};
 use intear_dex_types::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
-    SwapResponse, env, expect,
+    SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
     AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey,
@@ -17,7 +17,8 @@ use otc_dex_types::{
     AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition,
     GetAuthorizedKeyArgs, GetBalanceArgs, IsNonceUsedArgs, MatchArgs, Nonce, OtcDexEvent,
     OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageBalance,
-    StorageBalanceOfArgs, StorageDepositArgs, WithdrawAssetsArgs, WithdrawRequest,
+    StorageBalanceOfArgs, StorageDepositArgs, TradeIntent, Validity, WithdrawAssetsArgs,
+    WithdrawRequest,
 };
 
 #[near(serializers=[borsh])]
@@ -46,13 +47,87 @@ pub struct OtcDex {
 #[near]
 impl Dex for OtcDex {
     #[result_serializer(borsh)]
-    fn swap(
-        &mut self,
-        #[allow(unused_variables)]
-        #[serializer(borsh)]
-        request: SwapRequest,
-    ) -> SwapResponse {
-        panic!("Method `swap` cannot be used for OtcDex. Use dex_call with `match` method instead.")
+    fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
+        let Ok(maker_intent) =
+            near_sdk::borsh::from_slice::<AuthorizedTradeIntent>(&request.message.0)
+        else {
+            near_sdk::env::panic_str("Invalid message: expected an AuthorizedTradeIntent");
+        };
+        let trader = env::caller();
+        let trader_id = trader.alleged_account_id().clone();
+        let maker_trade = &maker_intent.trade_intent;
+        expect!(
+            maker_trade.user_id != trader_id,
+            "Intent not authorized: a trader can't swap with their own intent"
+        );
+        expect!(
+            request.asset_in == maker_trade.asset_out && request.asset_out == maker_trade.asset_in,
+            "Swap assets don't match the intent"
+        );
+        match request.amount {
+            SwapRequestAmount::ExactIn(amount_in) => expect!(
+                amount_in == maker_trade.amount_out,
+                "Amount in doesn't match the intent"
+            ),
+            SwapRequestAmount::ExactOut(amount_out) => expect!(
+                amount_out == maker_trade.amount_in,
+                "Amount out doesn't match the intent"
+            ),
+        }
+        self.validate_authorized_trade_intent(
+            &maker_intent,
+            &[&maker_trade.user_id, &trader_id],
+            &trader,
+        );
+
+        self.balances
+            .entry((maker_trade.user_id.clone(), maker_trade.asset_in.clone()))
+            .and_modify(|b| {
+                b.0 =
+                    b.0.checked_sub(maker_trade.amount_in.0)
+                        .expect("Balance underflow")
+            })
+            .or_insert_with(|| {
+                panic!(
+                    "{} has no registered balance for asset {}",
+                    maker_trade.user_id, maker_trade.asset_in,
+                )
+            });
+        self.balances
+            .entry((maker_trade.user_id.clone(), maker_trade.asset_out.clone()))
+            .and_modify(|b| {
+                b.0 =
+                    b.0.checked_add(maker_trade.amount_out.0)
+                        .expect("Balance overflow")
+            })
+            .or_insert_with(|| {
+                panic!(
+                    "{} has no registered balance for asset {}",
+                    maker_trade.user_id, maker_trade.asset_out,
+                )
+            });
+        self.mark_trade_intent_used(maker_trade);
+
+        let response = SwapResponse {
+            amount_in: maker_trade.amount_out,
+            amount_out: maker_trade.amount_in,
+        };
+        let trader_intent = AuthorizedTradeIntent {
+            trade_intent: TradeIntent {
+                user_id: trader_id,
+                asset_in: request.asset_in,
+                asset_out: request.asset_out,
+                amount_in: response.amount_in,
+                amount_out: response.amount_out,
+                validity: Validity::default(),
+            },
+            authorization_method: AuthorizationMethod::Predecessor,
+        };
+        OtcDexEvent::Trade {
+            authorized_trade_intents: vec![maker_intent, trader_intent],
+        }
+        .emit();
+        response
     }
 }
 
@@ -228,114 +303,7 @@ impl OtcDex {
                     });
             }
 
-            // remove up to 10 used nonces that are no longer valid
-            const NONCES_TO_REMOVE_AT_ONCE: usize = 10;
-            let storage_usage_before = near_sdk::env::storage_usage();
-            if let Some(map) = self
-                .used_expirable_nonces_block_height
-                .get_mut(&authorized_trade_intent.trade_intent.user_id)
-            {
-                for (block_height, nonce) in map
-                    .keys()
-                    .take(NONCES_TO_REMOVE_AT_ONCE)
-                    .copied()
-                    .collect::<Vec<_>>()
-                {
-                    if block_height < near_sdk::env::block_height() {
-                        map.remove(&(block_height, nonce));
-                        self.used_nonces
-                            .remove(&(authorized_trade_intent.trade_intent.user_id.clone(), nonce));
-                    }
-                }
-            }
-            if let Some(map) = self
-                .used_expirable_nonces_timestamp_millis
-                .get_mut(&authorized_trade_intent.trade_intent.user_id)
-            {
-                for (timestamp_millis, nonce) in map
-                    .keys()
-                    .take(NONCES_TO_REMOVE_AT_ONCE)
-                    .copied()
-                    .collect::<Vec<_>>()
-                {
-                    if timestamp_millis.0 < near_sdk::env::block_timestamp_ms() {
-                        map.remove(&(timestamp_millis, nonce));
-                        self.used_nonces
-                            .remove(&(authorized_trade_intent.trade_intent.user_id.clone(), nonce));
-                    }
-                }
-            }
-
-            // mark nonce as used
-            if let Some(nonce) = &authorized_trade_intent.trade_intent.validity.nonce {
-                expect!(
-                    !self
-                        .used_nonces
-                        .contains(&(authorized_trade_intent.trade_intent.user_id.clone(), *nonce)),
-                    "Intent not authorized: Nonce already used"
-                );
-            }
-            if let Some(nonce) = &authorized_trade_intent.trade_intent.validity.nonce {
-                self.used_nonces
-                    .insert((authorized_trade_intent.trade_intent.user_id.clone(), *nonce));
-                if let Some(expiry_condition) = authorized_trade_intent.trade_intent.validity.expiry
-                {
-                    match expiry_condition {
-                        ExpiryCondition::BlockHeight(block_height) => {
-                            self.used_expirable_nonces_block_height
-                                .entry(authorized_trade_intent.trade_intent.user_id.clone())
-                                .or_insert_with(|| {
-                                    TreeMap::new(
-                                        StorageKey::UsedExpirableNoncesBlockHeightAccount {
-                                            account_id: authorized_trade_intent
-                                                .trade_intent
-                                                .user_id
-                                                .clone(),
-                                        },
-                                    )
-                                })
-                                .insert((block_height, *nonce), ());
-                        }
-                        ExpiryCondition::Timestamp { milliseconds } => {
-                            self.used_expirable_nonces_timestamp_millis
-                                .entry(authorized_trade_intent.trade_intent.user_id.clone())
-                                .or_insert_with(|| {
-                                    TreeMap::new(
-                                        StorageKey::UsedExpirableNoncesTimestampMillisAccount {
-                                            account_id: authorized_trade_intent
-                                                .trade_intent
-                                                .user_id
-                                                .clone(),
-                                        },
-                                    )
-                                })
-                                .insert((milliseconds, *nonce), ());
-                        }
-                    }
-                }
-            }
-
-            if let Some(map) = self
-                .used_expirable_nonces_block_height
-                .get_mut(&authorized_trade_intent.trade_intent.user_id)
-            {
-                map.flush();
-            }
-            if let Some(map) = self
-                .used_expirable_nonces_timestamp_millis
-                .get_mut(&authorized_trade_intent.trade_intent.user_id)
-            {
-                map.flush();
-            }
-            self.used_expirable_nonces_block_height.flush();
-            self.used_expirable_nonces_timestamp_millis.flush();
-
-            let storage_usage_after = near_sdk::env::storage_usage();
-            self.charge_storage_deposit(
-                storage_usage_before,
-                storage_usage_after,
-                authorized_trade_intent.trade_intent.user_id.clone(),
-            );
+            self.mark_trade_intent_used(&authorized_trade_intent.trade_intent);
         }
 
         OtcDexEvent::Trade {
@@ -657,6 +625,108 @@ impl OtcDex {
                 }
             }
         }
+    }
+
+    fn mark_trade_intent_used(&mut self, trade_intent: &TradeIntent) {
+        // remove up to 10 used nonces that are no longer valid
+        const NONCES_TO_REMOVE_AT_ONCE: usize = 10;
+        let storage_usage_before = near_sdk::env::storage_usage();
+        if let Some(map) = self
+            .used_expirable_nonces_block_height
+            .get_mut(&trade_intent.user_id)
+        {
+            for (block_height, nonce) in map
+                .keys()
+                .take(NONCES_TO_REMOVE_AT_ONCE)
+                .copied()
+                .collect::<Vec<_>>()
+            {
+                if block_height < near_sdk::env::block_height() {
+                    map.remove(&(block_height, nonce));
+                    self.used_nonces
+                        .remove(&(trade_intent.user_id.clone(), nonce));
+                }
+            }
+        }
+        if let Some(map) = self
+            .used_expirable_nonces_timestamp_millis
+            .get_mut(&trade_intent.user_id)
+        {
+            for (timestamp_millis, nonce) in map
+                .keys()
+                .take(NONCES_TO_REMOVE_AT_ONCE)
+                .copied()
+                .collect::<Vec<_>>()
+            {
+                if timestamp_millis.0 < near_sdk::env::block_timestamp_ms() {
+                    map.remove(&(timestamp_millis, nonce));
+                    self.used_nonces
+                        .remove(&(trade_intent.user_id.clone(), nonce));
+                }
+            }
+        }
+
+        // mark nonce as used
+        if let Some(nonce) = &trade_intent.validity.nonce {
+            expect!(
+                !self
+                    .used_nonces
+                    .contains(&(trade_intent.user_id.clone(), *nonce)),
+                "Intent not authorized: Nonce already used"
+            );
+        }
+        if let Some(nonce) = &trade_intent.validity.nonce {
+            self.used_nonces
+                .insert((trade_intent.user_id.clone(), *nonce));
+            if let Some(expiry_condition) = trade_intent.validity.expiry {
+                match expiry_condition {
+                    ExpiryCondition::BlockHeight(block_height) => {
+                        self.used_expirable_nonces_block_height
+                            .entry(trade_intent.user_id.clone())
+                            .or_insert_with(|| {
+                                TreeMap::new(StorageKey::UsedExpirableNoncesBlockHeightAccount {
+                                    account_id: trade_intent.user_id.clone(),
+                                })
+                            })
+                            .insert((block_height, *nonce), ());
+                    }
+                    ExpiryCondition::Timestamp { milliseconds } => {
+                        self.used_expirable_nonces_timestamp_millis
+                            .entry(trade_intent.user_id.clone())
+                            .or_insert_with(|| {
+                                TreeMap::new(
+                                    StorageKey::UsedExpirableNoncesTimestampMillisAccount {
+                                        account_id: trade_intent.user_id.clone(),
+                                    },
+                                )
+                            })
+                            .insert((milliseconds, *nonce), ());
+                    }
+                }
+            }
+        }
+
+        if let Some(map) = self
+            .used_expirable_nonces_block_height
+            .get_mut(&trade_intent.user_id)
+        {
+            map.flush();
+        }
+        if let Some(map) = self
+            .used_expirable_nonces_timestamp_millis
+            .get_mut(&trade_intent.user_id)
+        {
+            map.flush();
+        }
+        self.used_expirable_nonces_block_height.flush();
+        self.used_expirable_nonces_timestamp_millis.flush();
+
+        let storage_usage_after = near_sdk::env::storage_usage();
+        self.charge_storage_deposit(
+            storage_usage_before,
+            storage_usage_after,
+            trade_intent.user_id.clone(),
+        );
     }
 
     fn charge_storage_deposit(&mut self, before: u64, after: u64, payer: AccountId) {
