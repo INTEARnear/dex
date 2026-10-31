@@ -34,7 +34,6 @@ struct DexRun {
     response: Option<Vec<u8>>,
     dex_events: Vec<DexEventData>,
     pending_storage_updates: PendingStorageUpdates,
-    pending_logs: Vec<String>,
 }
 
 /// A swap that a dex ran without writing or logging anything, which can be made real
@@ -44,7 +43,6 @@ pub(crate) struct SimulatedSwap {
     response: SwapResponse,
     referral_fees_paid: Vec<(AccountId, U128)>,
     pending_storage_updates: PendingStorageUpdates,
-    pending_logs: Vec<String>,
     dex_events: Vec<DexEventData>,
 }
 
@@ -147,7 +145,6 @@ impl DexEngine {
                 dex_storage_usage_before_transaction: storage_usage_before,
                 referrer,
                 dex_events: Vec::new(),
-                pending_logs: Vec::new(),
             },
         );
         let mut linker = Linker::new(&engine);
@@ -177,7 +174,6 @@ impl DexEngine {
                 } => pending_storage_updates,
                 _ => HashMap::new(),
             },
-            pending_logs: runner_data.pending_logs,
         })
     }
 
@@ -228,7 +224,6 @@ impl DexEngine {
             response,
             referral_fees_paid,
             pending_storage_updates,
-            pending_logs,
             dex_events,
         } = swap;
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -242,9 +237,6 @@ impl DexEngine {
         let storage_usage_after = near_sdk::env::storage_usage();
         self.dex_storage_balances
             .charge(&dex_id, storage_usage_before, storage_usage_after);
-        for log in pending_logs {
-            near_sdk::env::log_str(&log);
-        }
         events.extend_dex_events(dex_events);
 
         let dex_trader = trader.caller();
@@ -678,7 +670,6 @@ impl DexEngine {
             request: swap_request,
             response,
             pending_storage_updates: dex_run.pending_storage_updates,
-            pending_logs: dex_run.pending_logs,
             dex_events: dex_run.dex_events,
         })
     }

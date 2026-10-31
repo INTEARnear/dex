@@ -46,6 +46,7 @@ pub struct OtcDex {
 
 #[near]
 impl Dex for OtcDex {
+    #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
         let Ok(maker_intent) =

@@ -8,7 +8,7 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey, assert_one_yocto,
+    AccountId, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -61,6 +61,7 @@ pub struct XykDex {
 
 #[near]
 impl Dex for XykDex {
+    #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
         let Ok(SwapArgs {
@@ -636,7 +637,10 @@ impl XykDex {
     #[init]
     #[payable]
     pub fn new() -> Self {
-        assert_one_yocto();
+        expect!(
+            matches!(env::caller(), Caller::Direct(_)),
+            "This method can only be called directly, not in a transfer call"
+        );
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
@@ -1897,7 +1901,10 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_one_yocto();
+        expect!(
+            matches!(env::caller(), Caller::Direct(_)),
+            "This method can only be called directly, not in a transfer call"
+        );
         let Ok(ClaimFeesArgs {
             account_id,
             asset_ids,

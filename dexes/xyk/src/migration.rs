@@ -2,7 +2,7 @@ use std::{collections::HashMap, num::NonZeroU128};
 
 use intear_dex_types::{AssetId, Caller, env, expect};
 use near_sdk::{
-    AccountId, IntoStorageKey, NearToken, PublicKey, assert_one_yocto,
+    AccountId, IntoStorageKey, NearToken, PublicKey,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -23,7 +23,6 @@ impl XykDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> Self {
-        assert_one_yocto();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"

@@ -267,7 +267,6 @@ pub struct RunnerData<'a> {
     dex_storage_usage_before_transaction: u64,
     referrer: Option<AccountId>,
     dex_events: Vec<DexEventData>,
-    pending_logs: Vec<String>,
 }
 
 #[near]

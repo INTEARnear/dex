@@ -1,8 +1,8 @@
 use wasmi::Caller;
 
 use crate::{CallType, RunnerData};
-use intear_dex_types::{DexEventData, IntearDexEvent};
-use near_sdk::{AccountId, AsNep297Event, NearToken};
+use intear_dex_types::DexEventData;
+use near_sdk::AccountId;
 
 #[macro_export]
 macro_rules! declare_unimplemented_host_functions {
@@ -239,8 +239,6 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, read_register);
         $crate::impl_host_function!($var, write_register);
         $crate::impl_host_function!($var, input);
-        $crate::impl_host_function!($var, attached_deposit);
-        $crate::impl_host_function!($var, predecessor_account_id);
         $crate::impl_host_function!($var, caller);
         $crate::impl_host_function!($var, dex_id);
         $crate::impl_host_function!($var, engine_contract_id);
@@ -265,8 +263,6 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, ripemd160);
         $crate::impl_host_function!($var, ecrecover);
         $crate::impl_host_function!($var, ed25519_verify);
-        $crate::impl_host_function!($var, log_utf8);
-        $crate::impl_host_function!($var, log_utf16);
         $crate::impl_host_function!($var, dex_event);
     };
 }
@@ -324,51 +320,6 @@ pub fn write_register(
 pub fn input(mut caller: Caller<'_, RunnerData>, register_id: u64) -> Result<(), wasmi::Error> {
     let request = caller.data().request.clone();
     caller.data_mut().registers.insert(register_id, request);
-    Ok(())
-}
-
-// 1 yocto if this is an authorized dex call, 0 otherwise
-pub fn attached_deposit(
-    mut caller: Caller<'_, RunnerData>,
-    balance_ptr: u64,
-) -> Result<(), wasmi::Error> {
-    let attached_deposit = match caller.data().call_type {
-        CallType::Call {
-            caller: intear_dex_types::Caller::Direct(_),
-            ..
-        } => NearToken::from_yoctonear(1),
-        _ => NearToken::default(),
-    };
-    let memory = caller
-        .get_export("memory")
-        .and_then(|m| m.into_memory())
-        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
-    memory
-        .write(
-            &mut caller,
-            balance_ptr as usize,
-            &attached_deposit.as_yoctonear().to_le_bytes(),
-        )
-        .map_err(|err| wasmi::Error::new(format!("Failed to write data to guest memory: {err}")))?;
-    Ok(())
-}
-
-pub fn predecessor_account_id(
-    mut caller: Caller<'_, RunnerData>,
-    register_id: u64,
-) -> Result<(), wasmi::Error> {
-    let predecessor_id = match &caller.data().call_type {
-        CallType::Call { caller: trader, .. } | CallType::Trade { trader, .. } => {
-            trader.alleged_account_id()
-        }
-        CallType::View { .. } => {
-            return Err(wasmi::Error::new(
-                "predecessor_account_id is only allowed in trades or call functions",
-            ));
-        }
-    };
-    let buf = predecessor_id.to_string().into_bytes();
-    caller.data_mut().registers.insert(register_id, buf);
     Ok(())
 }
 
@@ -833,57 +784,6 @@ pub fn ed25519_verify(
     }
 }
 
-pub fn log_utf8(
-    mut caller: Caller<'_, RunnerData>,
-    len: u64,
-    ptr: u64,
-) -> Result<(), wasmi::Error> {
-    let dex_id = caller.data().dex_id.clone();
-    let memory = caller
-        .get_export("memory")
-        .and_then(|m| m.into_memory())
-        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
-    let msg_bytes = if len == u64::MAX {
-        return Err(wasmi::Error::new(
-            "log_utf8: unterminated log strings are not supported",
-        ));
-    } else {
-        let mut buf = vec![0; len as usize];
-        memory
-            .read(&caller, ptr as usize, &mut buf)
-            .map_err(|err| {
-                wasmi::Error::new(format!(
-                    "Failed to read log_utf8 buffer from guest memory: {err}"
-                ))
-            })?;
-        buf
-    };
-    let message = String::from_utf8(msg_bytes)
-        .map_err(|err| wasmi::Error::new(format!("log_utf8 received invalid UTF-8: {err}")))?;
-    if let Some(event) = message.strip_prefix("EVENT_JSON:")
-        && let Ok(event) = near_sdk::serde_json::from_str(event)
-    {
-        let event = IntearDexEvent::DexEvent {
-            dex_id: caller.data().dex_id.clone(),
-            event,
-            referrer: caller.data().referrer.clone(),
-            user: alleged_event_user(caller.data()),
-        };
-        log(caller.data_mut(), event.to_nep297_event().to_event_log());
-        return Ok(());
-    }
-
-    log(caller.data_mut(), format!("[{dex_id}] {message}"));
-    Ok(())
-}
-
-fn log(data: &mut RunnerData, log: String) {
-    match data.call_type {
-        CallType::Trade { .. } => data.pending_logs.push(log),
-        _ => near_sdk::env::log_str(&log),
-    }
-}
-
 pub fn dex_event(
     mut caller: Caller<'_, RunnerData>,
     len: u64,
@@ -918,44 +818,4 @@ fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {
         }
         CallType::View { .. } => None,
     }
-}
-
-pub fn log_utf16(
-    mut caller: Caller<'_, RunnerData>,
-    len: u64,
-    ptr: u64,
-) -> Result<(), wasmi::Error> {
-    let dex_id = caller.data().dex_id.clone();
-    let memory = caller
-        .get_export("memory")
-        .and_then(|m| m.into_memory())
-        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
-    let utf16: Vec<u16> = if len == u64::MAX {
-        return Err(wasmi::Error::new(
-            "log_utf16: unterminated log strings are not supported",
-        ));
-    } else {
-        if !len.is_multiple_of(2) {
-            return Err(wasmi::Error::new(
-                "log_utf16 length must be even (u16 units)",
-            ));
-        }
-        let mut buf = vec![0; len as usize];
-        memory
-            .read(&caller, ptr as usize, &mut buf)
-            .map_err(|err| {
-                wasmi::Error::new(format!(
-                    "Failed to read log_utf16 buffer from guest memory: {err}"
-                ))
-            })?;
-        buf.as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| u16::from_le_bytes(*chunk))
-            .collect()
-    };
-    let message = String::from_utf16(&utf16)
-        .map_err(|err| wasmi::Error::new(format!("log_utf16 received invalid UTF-16: {err}")))?;
-    log(caller.data_mut(), format!("[{dex_id}] {message}"));
-    Ok(())
 }

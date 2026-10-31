@@ -8,8 +8,7 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, assert_one_yocto, json_types::U128,
-    near, store::LookupMap,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, json_types::U128, near, store::LookupMap,
 };
 
 #[global_allocator]
@@ -40,6 +39,7 @@ enum StorageKey {
 
 #[near]
 impl Dex for SimpleAmmDex {
+    #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
         #[near(serializers=[borsh])]
@@ -129,7 +129,10 @@ impl SimpleAmmDex {
     #[init]
     #[payable]
     pub fn new() -> Self {
-        assert_one_yocto();
+        expect!(
+            matches!(env::caller(), Caller::Direct(_)),
+            "This method can only be called directly, not in a transfer call"
+        );
         Self {
             pools: LookupMap::new(StorageKey::Pools),
             pool_counter: 0,
