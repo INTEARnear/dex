@@ -155,15 +155,6 @@ pub enum PreflightError {
         kind: &'static str,
         reason: &'static str,
     },
-    #[error("Pool #{pool_id} of {dex_id} is already of the latest version")]
-    PoolIsLatest { dex_id: DexId, pool_id: PoolId },
-    #[error("Pool #{pool_id} of {dex_id} is of an old version, which {reason}")]
-    PoolNeedsUpgrade {
-        dex_id: DexId,
-        pool_id: PoolId,
-        reason: &'static str,
-        upgrade_command: String,
-    },
     #[error("Pool #{pool_id} of {dex_id} is already locked")]
     PoolAlreadyLocked { dex_id: DexId, pool_id: PoolId },
     #[error("{owner} has no shares in pool #{pool_id} of {dex_id}")]
@@ -192,9 +183,10 @@ pub enum PreflightError {
         assets: String,
         dex_id: DexId,
     },
-    #[error("{account_id} has no community fees to withdraw on {dex_id}")]
+    #[error("{account_id} has no community fees to claim in {assets} on {dex_id}")]
     NoCommunityFees {
         account_id: AccountId,
+        assets: String,
         dex_id: DexId,
     },
     #[error(
@@ -266,11 +258,6 @@ impl PreflightError {
                 Some(format!("Sign with {CAN_MIGRATE}"))
             }
             Self::NotPoolOwner { owner_id, .. } => Some(format!("Sign with {owner_id}")),
-            Self::PoolNeedsUpgrade {
-                upgrade_command, ..
-            } => Some(format!(
-                "Upgrade it first, which anyone can:\n    {upgrade_command}"
-            )),
             Self::NoOtcBalance { .. } => {
                 Some("`otc account --assets …` shows the balances of an account".to_string())
             }
@@ -317,7 +304,6 @@ impl PreflightError {
             | Self::LaunchOfNear
             | Self::PoolLocked { .. }
             | Self::PoolKindNotSupported { .. }
-            | Self::PoolIsLatest { .. }
             | Self::PoolAlreadyLocked { .. }
             | Self::ShareTooSmall { .. }
             | Self::AmountsOfOneAsset { .. }
@@ -368,9 +354,6 @@ pub fn fee_configuration_problem(error: FeeConfigurationError) -> String {
         FeeConfigurationError::ProtocolFeeReceiverSet => format!(
             "{PROTOCOL_FEE_RECEIVER_ID} collects the protocol fee, so it can't be a fee receiver"
         ),
-        FeeConfigurationError::CommunityReceiverOutsideLaunchPool => {
-            "community: receivers are only for launch pools".to_string()
-        }
     }
 }
 

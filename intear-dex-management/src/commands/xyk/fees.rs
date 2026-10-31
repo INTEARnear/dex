@@ -24,7 +24,7 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
 const WITHDRAW_FEES_GAS: Gas = Gas::from_teragas(60);
 /// A withdrawal to the wallet calls the asset's contract, and the engine back
-const WITHDRAWAL_TO_WALLET_GAS: Gas = Gas::from_teragas(20);
+pub(super) const WITHDRAWAL_TO_WALLET_GAS: Gas = Gas::from_teragas(20);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(context = XykContext)]
@@ -49,7 +49,7 @@ pub enum FeesAction {
 }
 
 /// `all` means every asset that a pool of the dex holds
-fn selected_asset_ids(
+pub(super) fn selected_asset_ids(
     selection: &AssetSelectionArg,
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
@@ -89,7 +89,7 @@ fn pending_fees_in_order(
         .collect())
 }
 
-fn selection_label(
+pub(super) fn selection_label(
     selection: &AssetSelectionArg,
     metadata_cache: &AssetMetadataCache,
 ) -> color_eyre::eyre::Result<String> {

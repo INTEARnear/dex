@@ -14,20 +14,20 @@ use near_sdk::{
     store::{LookupMap, Vector},
 };
 use xyk_dex_types::{
-    AddLiquidityArgs, AddLiquidityResponse, AssetWithBalance, CAN_MIGRATE, CreatePoolArgs,
-    CreatePoolResponse, CurrentFees, EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfiguration,
-    FeeDiscountSignaturePayload, FeeFraction, FeeFractionFraction, FeeReceiver,
-    GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
-    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, Pool,
-    PoolId, PoolNeedsUpgradeArgs, PoolType, PoolView, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
-    RemoveLiquidityArgs, RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SignedFeeDiscount,
-    SwapArgs, SwapRoute, UpgradePoolArgs, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
-    asset_account_ids,
-    math::{
-        exact_in_amount_out, exact_out_amount_in, fee_converted_to_quote_asset, mul_div,
-        shares_to_tokens, tokens_to_shares,
-    },
+    AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
+    ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
+    EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfigurationV2, FeeDiscountSignaturePayload,
+    FeeFraction, FeeFractionFraction, FeeGrowth, FeePayoutType, FeeReceiver, GetClaimableFeesArgs,
+    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
+    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LiquidityPosition, LiquidityPositionView,
+    LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, PayoutGroup, PayoutGroups, Pool, PoolAssets, PoolId,
+    PoolType, PoolView, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
+    SignedFeeDiscount, SwapArgs, SwapRoute, WithdrawFeesArgs, XykDexEvent,
+    math::{exact_in_amount_out, exact_out_amount_in, mul_div, shares_to_tokens, tokens_to_shares},
 };
+
+mod migration;
 
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
@@ -44,7 +44,8 @@ enum StorageKey {
     PublicPoolUserShares { pool_id: PoolId },
     FeesCollectedByUsers,
     UnusedReferralSettings,
-    CommunityOwnedFees,
+    UnusedCommunityOwnedFees,
+    FeesClaimableByAnyone,
 }
 
 /// A x*y=k pool with two assets
@@ -53,8 +54,7 @@ enum StorageKey {
 pub struct XykDex {
     pools: Vector<Pool>,
     fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-    _unused_referral_settings: LookupMap<AccountId, ()>,
-    community_owned_fees: LookupMap<AccountId, NearToken>,
+    fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), U128>,
     fee_discount_signer_public_key: Option<PublicKey>,
 }
 
@@ -130,7 +130,7 @@ impl Dex for XykDex {
                 .expect("Overflow");
         }
         self.fees_collected_by_users.flush();
-        self.community_owned_fees.flush();
+        self.fees_claimable_by_anyone.flush();
         for pool_id in updated_pool_ids {
             XykDexEvent::PoolUpdated {
                 pool_id,
@@ -230,6 +230,32 @@ impl XykDex {
         discount.fee_discount
     }
 
+    /// Starts the fee balances of the account receivers of `fees`, in the assets that their
+    /// payouts take fees in and the balances that their claim modes use, and flushes every
+    /// started fee balance to storage
+    fn register_fee_receivers(&mut self, fees: &FeeConfigurationV2, assets: (&AssetId, &AssetId)) {
+        let pool_assets = PoolAssets([assets.0, assets.1]);
+        for (fee_receiver, _) in fees.receivers_at(near_sdk::env::block_timestamp()) {
+            let (account_id, fee_balances, payout_type) = match fee_receiver {
+                FeeReceiver::Account {
+                    account_id,
+                    payout_type,
+                    claim_mode: ClaimMode::OnlyOwner,
+                } => (account_id, &mut self.fees_collected_by_users, payout_type),
+                FeeReceiver::Account {
+                    account_id,
+                    payout_type,
+                    claim_mode: ClaimMode::Anyone,
+                } => (account_id, &mut self.fees_claimable_by_anyone, payout_type),
+                FeeReceiver::Pool => continue,
+                FeeReceiver::Protocol => panic!("Protocol fee receiver can't be changed"),
+            };
+            start_fee_balances(fee_balances, &account_id, pool_assets, payout_type);
+        }
+        self.fees_collected_by_users.flush();
+        self.fees_claimable_by_anyone.flush();
+    }
+
     fn swap_route(
         &mut self,
         pool_ids: &[PoolId],
@@ -318,376 +344,291 @@ impl XykDex {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
-        let launch_quote_asset_id = match pool {
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => Some(pool.asset_ids().0),
-            Pool::PrivateV1 { .. }
-            | Pool::PublicV1 { .. }
-            | Pool::PrivateV2 { .. }
-            | Pool::PublicV2 { .. } => None,
-        };
-        let should_convert_fees_to_quote_asset =
-            launch_quote_asset_id.as_ref() == Some(&&asset_out);
-        let (asset0_id, asset1_id) = {
+        let pool_asset_ids = {
             let (asset0_id, asset1_id) = pool.asset_ids();
-            (asset0_id.clone(), asset1_id.clone())
+            PoolAssets([asset0_id.clone(), asset1_id.clone()])
         };
-        let fees = pool.fee_configuration();
-        let [asset0_balance, asset1_balance] = pool.balances_mut();
+        expect!(pool_asset_ids.0.contains(&asset_in), "Invalid asset in");
+        expect!(pool_asset_ids.0.contains(&asset_out), "Invalid asset out");
+        let mut balances = PoolAssets(pool.balances());
         expect!(
-            asset0_id == asset_in || asset1_id == asset_in,
-            "Invalid asset in"
+            balances[AssetIndex::First] > 0 && balances[AssetIndex::Second] > 0,
+            "Pool is empty"
         );
-        expect!(
-            asset0_id == asset_out || asset1_id == asset_out,
-            "Invalid asset out"
-        );
-        expect!(*asset0_balance > 0 && *asset1_balance > 0, "Pool is empty");
-        let first_in = match (
-            asset0_id == asset_in && asset1_id == asset_out,
-            asset1_id == asset_in && asset0_id == asset_out,
+        let (in_index, out_index) = match (
+            pool_asset_ids[AssetIndex::First] == asset_in
+                && pool_asset_ids[AssetIndex::Second] == asset_out,
+            pool_asset_ids[AssetIndex::Second] == asset_in
+                && pool_asset_ids[AssetIndex::First] == asset_out,
         ) {
-            (true, false) => true,
-            (false, true) => false,
+            (true, false) => (AssetIndex::First, AssetIndex::Second),
+            (false, true) => (AssetIndex::Second, AssetIndex::First),
             _ => panic!("Invalid assets or pool ID"),
         };
 
-        #[derive(Clone)]
-        enum FeeBreakdownEntry {
-            Normal {
-                receiver: FeeReceiver,
-                asset_id: AssetId,
-                amount: U128,
-            },
-            DeferredForConversionToQuoteAsset {
-                receiver: AccountId,
-                amount_token: U128,
-            },
-            CommunityFeeDeferredForConversionToQuoteAsset {
-                receiver: AccountId,
-                amount_token: U128,
-            },
-        }
-
-        struct CollectFeesReturn {
-            amount_in_after_fees: u128,
-            pool_fee: u128,
-            fees_breakdown: Vec<FeeBreakdownEntry>,
-        }
-
-        fn collect_fees(
-            amount_in: u128,
-            asset_in: &AssetId,
-            fees: &CurrentFees,
-            fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
-            community_owned_fees: &mut LookupMap<AccountId, NearToken>,
-            convert_to_quote_asset: bool,
-        ) -> CollectFeesReturn {
-            let mut fees_breakdown = Vec::new();
-            let mut total_fees = 0u128;
-            let mut pool_fee = 0u128;
-            for (receiver, fee_amount) in fees.amounts(amount_in) {
-                total_fees = total_fees.checked_add(fee_amount).expect("Overflow");
-                match receiver {
-                    FeeReceiver::Account(account_id) => {
-                        if convert_to_quote_asset {
-                            fees_breakdown.push(
-                                FeeBreakdownEntry::DeferredForConversionToQuoteAsset {
-                                    receiver: account_id.clone(),
-                                    amount_token: U128(fee_amount),
-                                },
-                            );
-                        } else {
-                            fees_breakdown.push(FeeBreakdownEntry::Normal {
-                                receiver: receiver.clone(),
-                                asset_id: asset_in.clone(),
-                                amount: U128(fee_amount),
-                            });
-                            fees_collected_by_users
-                                .entry((account_id.clone(), asset_in.clone()))
-                                .and_modify(|balance| {
-                                    balance.0 = balance.0.checked_add(fee_amount).expect("Overflow")
-                                })
-                                .or_insert_with(|| {
-                                    panic!("Fee asset not registered; this is a bug")
-                                });
-                        }
-                    }
-                    FeeReceiver::Pool => {
-                        fees_breakdown.push(FeeBreakdownEntry::Normal {
-                            receiver: receiver.clone(),
-                            asset_id: asset_in.clone(),
-                            amount: U128(fee_amount),
-                        });
-                        pool_fee = pool_fee.checked_add(fee_amount).expect("Overflow");
-                    }
-                    FeeReceiver::Community(account_id) => {
-                        if convert_to_quote_asset {
-                            fees_breakdown.push(
-                                FeeBreakdownEntry::CommunityFeeDeferredForConversionToQuoteAsset {
-                                    receiver: account_id.clone(),
-                                    amount_token: U128(fee_amount),
-                                },
-                            );
-                        } else {
-                            expect!(
-                                *asset_in == AssetId::Near,
-                                "Community fees can only be collected in NEAR"
-                            );
-                            fees_breakdown.push(FeeBreakdownEntry::Normal {
-                                receiver: receiver.clone(),
-                                asset_id: asset_in.clone(),
-                                amount: U128(fee_amount),
-                            });
-                            community_owned_fees
-                                .entry(account_id.clone())
-                                .and_modify(|total_fee| {
-                                    *total_fee = total_fee
-                                        .checked_add(NearToken::from_yoctonear(fee_amount))
-                                        .expect("Overflow")
-                                })
-                                .or_insert_with(|| {
-                                    panic!("Community fee account not registered; this is a bug")
-                                });
-                        }
-                    }
-                }
-            }
-            CollectFeesReturn {
-                amount_in_after_fees: amount_in.checked_sub(total_fees).expect("Fee exceeds 100%"),
-                pool_fee,
-                fees_breakdown: fees_breakdown.clone(),
-            }
-        }
-
-        fn convert_fees_to_quote_asset(
-            quote_asset_id: &AssetId,
-            in_balance: &mut u128,
-            out_balance: &mut u128,
-            fees_breakdown: &mut Vec<FeeBreakdownEntry>,
-            fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
-            community_owned_fees: &mut LookupMap<AccountId, NearToken>,
-        ) {
-            for entry in fees_breakdown {
-                if let FeeBreakdownEntry::DeferredForConversionToQuoteAsset {
-                    receiver,
-                    amount_token,
-                } = entry
-                {
-                    // in denominator in_balance or amount can't either be zero.
-                    let fee_amount_quote_asset =
-                        fee_converted_to_quote_asset(amount_token.0, *in_balance, *out_balance);
-                    *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
-                    *out_balance = out_balance
-                        .checked_sub(fee_amount_quote_asset)
-                        .expect("Underflow");
-                    fees_collected_by_users
-                        .entry((receiver.clone(), quote_asset_id.clone()))
-                        .and_modify(|balance| {
-                            balance.0 = balance
-                                .0
-                                .checked_add(fee_amount_quote_asset)
-                                .expect("Overflow")
-                        })
-                        .or_insert_with(|| panic!("Quote fee asset not registered; this is a bug"));
-                    *entry = FeeBreakdownEntry::Normal {
-                        receiver: FeeReceiver::Account(receiver.clone()),
-                        asset_id: quote_asset_id.clone(),
-                        amount: U128(fee_amount_quote_asset),
-                    };
-                }
-                if let FeeBreakdownEntry::CommunityFeeDeferredForConversionToQuoteAsset {
-                    receiver,
-                    amount_token,
-                } = entry
-                {
-                    expect!(
-                        *quote_asset_id == AssetId::Near,
-                        "Community fees can only be collected in NEAR"
-                    );
-                    // in denominator in_balance or amount can't either be zero.
-                    let fee_amount_near =
-                        fee_converted_to_quote_asset(amount_token.0, *in_balance, *out_balance);
-                    *in_balance = in_balance.checked_add(amount_token.0).expect("Overflow");
-                    *out_balance = out_balance.checked_sub(fee_amount_near).expect("Underflow");
-                    community_owned_fees
-                        .entry(receiver.clone())
-                        .and_modify(|total_fee| {
-                            *total_fee = total_fee
-                                .checked_add(NearToken::from_yoctonear(fee_amount_near))
-                                .expect("Overflow")
-                        })
-                        .or_insert_with(|| {
-                            panic!("Community fee account not registered; this is a bug")
-                        });
-                    *entry = FeeBreakdownEntry::Normal {
-                        receiver: FeeReceiver::Community(receiver.clone()),
-                        asset_id: AssetId::Near,
-                        amount: U128(fee_amount_near),
-                    };
-                }
-            }
-        }
-
-        let fee_asset_account_ids = asset_account_ids([&asset_in, &asset_out]);
-        let pool_and_protocol_fees =
-            fees.with_protocol_fee(&fee_asset_account_ids, near_sdk::env::block_timestamp());
+        let pool_and_protocol_fees = pool
+            .fee_configuration()
+            .with_protocol_fee(&[&asset_in, &asset_out], near_sdk::env::block_timestamp());
         let current_fees = match fee_discount {
             Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
             None => pool_and_protocol_fees,
         };
 
-        let (fees_breakdown, response) = match amount {
+        let amount_in = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
                 expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
-                let (in_balance, out_balance) = if first_in {
-                    (asset0_balance, asset1_balance)
-                } else {
-                    (asset1_balance, asset0_balance)
-                };
-                let CollectFeesReturn {
-                    amount_in_after_fees,
-                    pool_fee,
-                    mut fees_breakdown,
-                } = collect_fees(
-                    exact_amount_in.0,
-                    &asset_in,
-                    &current_fees,
-                    &mut self.fees_collected_by_users,
-                    &mut self.community_owned_fees,
-                    should_convert_fees_to_quote_asset,
-                );
-                // in_balance was checked to be positive
-                let amount_out =
-                    exact_in_amount_out(amount_in_after_fees, *in_balance, *out_balance);
-                *in_balance = in_balance
-                    .checked_add(amount_in_after_fees)
-                    .expect("Overflow")
-                    .checked_add(pool_fee)
-                    .expect("Overflow");
-                *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
-                if should_convert_fees_to_quote_asset {
-                    convert_fees_to_quote_asset(
-                        &asset_out,
-                        in_balance,
-                        out_balance,
-                        &mut fees_breakdown,
-                        &mut self.fees_collected_by_users,
-                        &mut self.community_owned_fees,
-                    );
-                }
-                (
-                    fees_breakdown,
-                    SwapResponse {
-                        amount_in: exact_amount_in,
-                        amount_out: U128(amount_out),
-                    },
-                )
+                exact_amount_in.0
             }
             SwapRequestAmount::ExactOut(exact_amount_out) => {
                 expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
-                let (in_balance, out_balance) = if first_in {
-                    (asset0_balance, asset1_balance)
-                } else {
-                    (asset1_balance, asset0_balance)
-                };
                 expect!(
-                    exact_amount_out.0 < *out_balance,
+                    exact_amount_out.0 < balances[out_index],
                     "Amount must be less than out balance"
                 );
-                let amount_in = exact_out_amount_in(
+                exact_out_amount_in(
                     exact_amount_out.0,
-                    *in_balance,
-                    *out_balance,
+                    balances[in_index],
+                    balances[out_index],
                     &current_fees,
-                );
-                let CollectFeesReturn {
-                    amount_in_after_fees,
-                    pool_fee,
-                    mut fees_breakdown,
-                } = collect_fees(
-                    amount_in,
-                    &asset_in,
-                    &current_fees,
-                    &mut self.fees_collected_by_users,
-                    &mut self.community_owned_fees,
-                    should_convert_fees_to_quote_asset,
-                );
-                *in_balance = in_balance
-                    .checked_add(amount_in_after_fees)
-                    .expect("Overflow")
-                    .checked_add(pool_fee)
-                    .expect("Overflow");
-                *out_balance = out_balance
-                    .checked_sub(exact_amount_out.0)
-                    .expect("Underflow");
-                if should_convert_fees_to_quote_asset {
-                    convert_fees_to_quote_asset(
-                        &asset_out,
-                        in_balance,
-                        out_balance,
-                        &mut fees_breakdown,
-                        &mut self.fees_collected_by_users,
-                        &mut self.community_owned_fees,
-                    );
-                }
-                (
-                    fees_breakdown,
-                    SwapResponse {
-                        amount_in: U128(amount_in),
-                        amount_out: U128(exact_amount_out.0),
-                    },
                 )
             }
         };
-        match pool {
-            Pool::LaunchV1 {
-                near_amount,
-                phantom_liquidity_near,
-                ..
-            } => {
-                expect!(
-                    near_amount.0 >= phantom_liquidity_near.0,
-                    "NEAR liquidity can't go lower than the initial phantom liquidity"
-                );
+        // The parts of each receiver's fee that are paid out, and with which payout type. The rest
+        // of the pool's fee goes into its liquidity: all of it in pools without providers that
+        // take it out, and what rounding leaves in the others.
+        let receiver_fees = current_fees
+            .amounts(amount_in)
+            .map(|(receiver, fee_amount)| {
+                let paid_out_fees = match (receiver, &*pool) {
+                    (
+                        FeeReceiver::Pool,
+                        Pool::PublicV3 {
+                            payout_groups,
+                            total_shares,
+                            ..
+                        },
+                    ) => payout_groups
+                        .split_pool_fee(fee_amount, total_shares.expect("Pool has no shares"))
+                        .into_iter()
+                        .filter(|(_, paid_out_fee)| *paid_out_fee > 0)
+                        .collect(),
+                    (FeeReceiver::Pool, _) => Vec::new(),
+                    (FeeReceiver::Account { .. } | FeeReceiver::Protocol, _) => {
+                        vec![(pool.account_fee_payout_type(receiver), fee_amount)]
+                    }
+                };
+                (receiver, fee_amount, paid_out_fees)
+            })
+            .collect::<Vec<_>>();
+        let total_fees = receiver_fees
+            .iter()
+            .try_fold(0u128, |total, (_, fee_amount, _)| {
+                total.checked_add(*fee_amount)
+            })
+            .expect("Overflow");
+        let fees_added_to_liquidity = receiver_fees
+            .iter()
+            .map(|(_, fee_amount, paid_out_fees)| {
+                paid_out_fees
+                    .iter()
+                    .try_fold(*fee_amount, |rest, (_, paid_out_fee)| {
+                        rest.checked_sub(*paid_out_fee)
+                    })
+                    .expect("Paid out more than the fee")
+            })
+            .try_fold(0u128, |total, fee_added_to_liquidity| {
+                total.checked_add(fee_added_to_liquidity)
+            })
+            .expect("Overflow");
+        let amount_in_after_fees = amount_in.checked_sub(total_fees).expect("Fee exceeds 100%");
+        let amount_out = match amount {
+            // in_balance was checked to be positive
+            SwapRequestAmount::ExactIn(_) => exact_in_amount_out(
+                amount_in_after_fees,
+                balances[in_index],
+                balances[out_index],
+            ),
+            SwapRequestAmount::ExactOut(exact_amount_out) => exact_amount_out.0,
+        };
+        balances[in_index] = balances[in_index]
+            .checked_add(amount_in_after_fees)
+            .expect("Overflow")
+            .checked_add(fees_added_to_liquidity)
+            .expect("Overflow");
+        balances[out_index] = balances[out_index]
+            .checked_sub(amount_out)
+            .expect("Underflow");
+
+        let mut fees_breakdown = Vec::new();
+        for (receiver, fee_amount, paid_out_fees) in receiver_fees {
+            // What the receiver took in each asset, after converting what its payouts convert
+            let mut fees_taken = PoolAssets([0, 0]);
+            fees_taken[in_index] = fee_amount;
+            for (payout_type, paid_out_fee) in paid_out_fees {
+                let payout_asset_index = payout_type.asset_index(in_index);
+                let payout_amount = if payout_asset_index == in_index {
+                    paid_out_fee
+                } else {
+                    fees_taken[in_index] = fees_taken[in_index]
+                        .checked_sub(paid_out_fee)
+                        .expect("Underflow");
+                    // The pool swaps the fee into the other asset without fees. in_balance and
+                    // out_balance are positive after the swap.
+                    let converted_fee =
+                        exact_in_amount_out(paid_out_fee, balances[in_index], balances[out_index]);
+                    balances[in_index] = balances[in_index]
+                        .checked_add(paid_out_fee)
+                        .expect("Overflow");
+                    balances[out_index] = balances[out_index]
+                        .checked_sub(converted_fee)
+                        .expect("Underflow");
+                    fees_taken[out_index] = fees_taken[out_index]
+                        .checked_add(converted_fee)
+                        .expect("Overflow");
+                    converted_fee
+                };
+                let payout_asset_id = &pool_asset_ids[payout_asset_index];
+                let (account_id, fee_balances) = match receiver {
+                    FeeReceiver::Pool => {
+                        expect!(
+                            let Pool::PublicV3 { payout_groups, .. } = &mut *pool,
+                            "Only public pools pay out pool fees; this is a bug"
+                        );
+                        let fee_left_in_pool = payout_groups
+                            .group_mut(payout_type)
+                            .share_fee(payout_asset_index, payout_amount);
+                        balances[payout_asset_index] = balances[payout_asset_index]
+                            .checked_add(fee_left_in_pool)
+                            .expect("Overflow");
+                        continue;
+                    }
+                    FeeReceiver::Account {
+                        account_id,
+                        claim_mode: ClaimMode::OnlyOwner,
+                        ..
+                    } => (account_id.clone(), &mut self.fees_collected_by_users),
+                    FeeReceiver::Account {
+                        account_id,
+                        claim_mode: ClaimMode::Anyone,
+                        ..
+                    } => (account_id.clone(), &mut self.fees_claimable_by_anyone),
+                    FeeReceiver::Protocol => (
+                        PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+                        &mut self.fees_collected_by_users,
+                    ),
+                };
+                fees_breakdown.push((
+                    receiver.clone(),
+                    payout_asset_id.clone(),
+                    U128(payout_amount),
+                ));
+                fee_balances
+                    .entry((account_id, payout_asset_id.clone()))
+                    .and_modify(|balance| {
+                        balance.0 = balance.0.checked_add(payout_amount).expect("Overflow")
+                    })
+                    .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
             }
-            Pool::LaunchV2 {
-                quote_asset,
-                phantom_liquidity,
-                ..
-            } => {
-                expect!(
-                    quote_asset.balance.0 >= phantom_liquidity.0,
-                    "Quote asset liquidity can't go lower than the initial phantom liquidity"
-                );
+            // The pool's liquidity and providers took both what they kept of the asset in, and
+            // what they converted to the asset out
+            if let FeeReceiver::Pool = receiver {
+                fees_breakdown.push((
+                    FeeReceiver::Pool,
+                    asset_in.clone(),
+                    U128(fees_taken[in_index]),
+                ));
+                if fees_taken[out_index] > 0 {
+                    fees_breakdown.push((
+                        FeeReceiver::Pool,
+                        asset_out.clone(),
+                        U128(fees_taken[out_index]),
+                    ));
+                }
             }
-            Pool::PrivateV1 { .. }
-            | Pool::PublicV1 { .. }
-            | Pool::PrivateV2 { .. }
-            | Pool::PublicV2 { .. } => {}
+        }
+        let [balance_0, balance_1] = pool.balances_mut();
+        [*balance_0, *balance_1] = balances.0;
+
+        if let Pool::LaunchV2 {
+            quote_asset,
+            phantom_liquidity,
+            ..
+        } = pool
+        {
+            expect!(
+                quote_asset.balance.0 >= phantom_liquidity.0,
+                "Quote asset liquidity can't go lower than the initial phantom liquidity"
+            );
         }
 
         if !updated_pool_ids.contains(&pool_id) {
             updated_pool_ids.push(pool_id);
         }
+        let response = SwapResponse {
+            amount_in: U128(amount_in),
+            amount_out: U128(amount_out),
+        };
         XykDexEvent::Swap {
             pool_id,
             asset_in,
             asset_out,
             amount_in: response.amount_in,
             amount_out: response.amount_out,
-            fees_breakdown: fees_breakdown
-                .into_iter()
-                .map(|entry| {
-                    expect!(let FeeBreakdownEntry::Normal { receiver, asset_id, amount } = entry,
-                        "Fee breakdown entry is not a normal entry"
-                    );
-                    (receiver.clone(), asset_id.clone(), amount)
-                })
-                .collect(),
+            fees_breakdown,
         }
         .emit();
         response
     }
+}
+
+/// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
+/// that `payout_type` takes fees in
+fn start_fee_balances(
+    fee_balances: &mut LookupMap<(AccountId, AssetId), U128>,
+    account_id: &AccountId,
+    asset_ids: PoolAssets<&AssetId>,
+    payout_type: FeePayoutType,
+) {
+    for fee_asset_index in AssetIndex::BOTH {
+        fee_balances
+            .entry((
+                account_id.clone(),
+                asset_ids[payout_type.asset_index(fee_asset_index)].clone(),
+            ))
+            .or_default();
+    }
+}
+
+/// Adds pool fees that a liquidity provider earned to the fees it collected
+fn credit_liquidity_fees(
+    fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
+    pool_id: PoolId,
+    account_id: &AccountId,
+    asset_ids: PoolAssets<&AssetId>,
+    fees: PoolAssets<u128>,
+) {
+    if fees == PoolAssets([0, 0]) {
+        return;
+    }
+    for (asset_id, amount) in asset_ids.0.into_iter().zip(fees.0) {
+        // The provider's payout doesn't take fees in every asset, which it may not collect
+        if amount == 0 {
+            continue;
+        }
+        fees_collected_by_users
+            .entry((account_id.clone(), asset_id.clone()))
+            .and_modify(|balance| balance.0 = balance.0.checked_add(amount).expect("Overflow"))
+            .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
+    }
+    XykDexEvent::LiquidityFeesCollected {
+        pool_id,
+        account_id: account_id.clone(),
+        asset_0: asset_ids[AssetIndex::First].clone(),
+        asset_1: asset_ids[AssetIndex::Second].clone(),
+        amount_0: U128(fees[AssetIndex::First]),
+        amount_1: U128(fees[AssetIndex::Second]),
+    }
+    .emit();
 }
 
 #[near]
@@ -699,9 +640,8 @@ impl XykDex {
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
-            _unused_referral_settings: LookupMap::new(StorageKey::UnusedReferralSettings),
-            community_owned_fees: LookupMap::new(StorageKey::CommunityOwnedFees),
             fee_discount_signer_public_key: None,
+            fees_claimable_by_anyone: LookupMap::new(StorageKey::FeesClaimableByAnyone),
         }
     }
 
@@ -769,7 +709,7 @@ impl XykDex {
             "Only NEAR, NEP-141, and NEP-245 assets are supported"
         );
 
-        fees.validate(&pool_type, near_sdk::env::block_timestamp())
+        fees.validate(near_sdk::env::block_timestamp())
             .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
         expect!(self.pools.len() < u32::MAX, "Too many pools");
 
@@ -780,31 +720,7 @@ impl XykDex {
         self.fees_collected_by_users
             .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.1.clone()))
             .or_default();
-        // TODO: Register only NEAR fee asset for Launch pools
-        for (fee_receiver, _) in fees.receivers_at(near_sdk::env::block_timestamp()) {
-            match fee_receiver {
-                FeeReceiver::Account(account_id) => {
-                    expect!(
-                        account_id != PROTOCOL_FEE_RECEIVER_ID,
-                        "Protocol fee receiver can't be changed",
-                    );
-                    self.fees_collected_by_users
-                        .entry((account_id.clone(), assets.0.clone()))
-                        .or_default();
-                    self.fees_collected_by_users
-                        .entry((account_id.clone(), assets.1.clone()))
-                        .or_default();
-                }
-                FeeReceiver::Pool => {}
-                FeeReceiver::Community(account_id) => {
-                    self.community_owned_fees
-                        .entry(account_id.clone())
-                        .or_default();
-                }
-            }
-        }
-        self.fees_collected_by_users.flush();
-        self.community_owned_fees.flush();
+        self.register_fee_receivers(&fees, (&assets.0, &assets.1));
 
         let mut attached_near = NearToken::from_yoctonear(
             attached_assets
@@ -814,7 +730,10 @@ impl XykDex {
         );
 
         let is_public_pool = match pool_type {
-            PoolType::PublicLatest | PoolType::PublicV2 | PoolType::PublicV1 => true,
+            PoolType::PublicLatest
+            | PoolType::PublicV3
+            | PoolType::PublicV2
+            | PoolType::PublicV1 => true,
             PoolType::PrivateLatest
             | PoolType::PrivateV1
             | PoolType::PrivateV2
@@ -825,17 +744,7 @@ impl XykDex {
         let initial_balances = match initial_liquidity {
             Some((initial_amount_0, initial_amount_1)) => {
                 expect!(
-                    match pool_type {
-                        PoolType::PrivateLatest
-                        | PoolType::PrivateV1
-                        | PoolType::PrivateV2
-                        | PoolType::PublicLatest
-                        | PoolType::PublicV1
-                        | PoolType::PublicV2 => true,
-                        PoolType::LaunchLatest { .. }
-                        | PoolType::LaunchV1 { .. }
-                        | PoolType::LaunchV2 { .. } => false,
-                    },
+                    !pool_type.is_launch(),
                     "Launch pools take the launched asset from attached assets, not initial liquidity"
                 );
                 expect!(
@@ -868,19 +777,42 @@ impl XykDex {
         };
 
         let pool_id = self.pools.len();
-        let new_public_pool_user_shares = || {
-            let mut user_shares = LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
-            user_shares.insert(caller_id.clone(), Some(INITIAL_SHARES));
-            user_shares.flush();
-            user_shares
-        };
+        // Older pool constructors are created as their latest version
         self.pools.push(match pool_type {
-            PoolType::PublicLatest | PoolType::PublicV2 => {
+            PoolType::PublicLatest
+            | PoolType::PublicV3
+            | PoolType::PublicV2
+            | PoolType::PublicV1 => {
                 expect!(
                     attached_assets.is_empty(),
                     "No assets other than NEAR and initial liquidity should be attached"
                 );
-                Pool::PublicV2 {
+                // The creator keeps its fees until it chooses another payout
+                let payout_groups = PayoutGroups {
+                    keep_both: PayoutGroup {
+                        shares: INITIAL_SHARES.get(),
+                        fee_growth: FeeGrowth::default(),
+                    },
+                    ..Default::default()
+                };
+                let mut providers = LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
+                providers.insert(
+                    caller_id.clone(),
+                    LiquidityPosition::new(
+                        FeePayoutType::KeepBoth,
+                        INITIAL_SHARES.get(),
+                        &payout_groups.keep_both,
+                    ),
+                );
+                providers.flush();
+                start_fee_balances(
+                    &mut self.fees_collected_by_users,
+                    &caller_id,
+                    PoolAssets([&assets.0, &assets.1]),
+                    FeePayoutType::KeepBoth,
+                );
+                self.fees_collected_by_users.flush();
+                Pool::PublicV3 {
                     assets: (
                         AssetWithBalance {
                             asset_id: assets.0.clone(),
@@ -892,11 +824,12 @@ impl XykDex {
                         },
                     ),
                     fees: fees.clone(),
-                    user_shares: new_public_pool_user_shares(),
+                    providers,
                     total_shares: Some(INITIAL_SHARES),
+                    payout_groups: Box::new(payout_groups),
                 }
             }
-            PoolType::PrivateLatest | PoolType::PrivateV2 => {
+            PoolType::PrivateLatest | PoolType::PrivateV2 | PoolType::PrivateV1 => {
                 expect!(
                     attached_assets.is_empty(),
                     "No assets other than NEAR and initial liquidity should be attached"
@@ -919,21 +852,20 @@ impl XykDex {
             }
 
             PoolType::LaunchLatest { phantom_liquidity }
-            | PoolType::LaunchV2 { phantom_liquidity } => {
+            | PoolType::LaunchV2 { phantom_liquidity }
+            | PoolType::LaunchV1 {
+                phantom_liquidity_near: phantom_liquidity,
+            } => {
+                if let PoolType::LaunchV1 { .. } = pool_type {
+                    expect!(
+                        assets.0 == AssetId::Near,
+                        "First asset in Launch pools must be NEAR"
+                    );
+                }
                 expect!(
                     phantom_liquidity.0 > 0,
                     "Phantom liquidity must be greater than 0"
                 );
-                if fees
-                    .receivers_at(near_sdk::env::block_timestamp())
-                    .iter()
-                    .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)))
-                {
-                    expect!(
-                        assets.0 == AssetId::Near,
-                        "Community fee receiver is only supported in Launch pools quoted in NEAR"
-                    );
-                }
                 let attached_launched_asset = attached_assets
                     .remove(&assets.1)
                     .expect("Launched asset not found");
@@ -956,87 +888,6 @@ impl XykDex {
                     },
                     fees: fees.clone(),
                     phantom_liquidity,
-                }
-            }
-            PoolType::LaunchV1 {
-                phantom_liquidity_near,
-            } => {
-                expect!(
-                    assets.0 == AssetId::Near,
-                    "First asset in Launch pools must be NEAR"
-                );
-                expect!(
-                    phantom_liquidity_near.0 > 0,
-                    "Phantom liquidity NEAR must be greater than 0"
-                );
-                let attached_launched_asset = attached_assets
-                    .remove(&assets.1)
-                    .expect("Launched asset not found");
-                expect!(
-                    attached_launched_asset.0 > 0,
-                    "Launched asset amount must be greater than 0"
-                );
-                expect!(
-                    attached_assets.is_empty(),
-                    "No assets other than NEAR and launched asset should be attached"
-                );
-                Pool::LaunchV1 {
-                    near_amount: phantom_liquidity_near,
-                    launched_asset: AssetWithBalance {
-                        asset_id: assets.1.clone(),
-                        balance: U128(attached_launched_asset.0),
-                    },
-                    fees: fees.clone(),
-                    phantom_liquidity_near,
-                }
-            }
-            PoolType::PrivateV1 => {
-                expect!(
-                    attached_assets.is_empty(),
-                    "No assets other than NEAR and initial liquidity should be attached"
-                );
-                expect!(
-                    let FeeConfiguration::V1(fees) = fees,
-                    "Only V1 fees are supported for PrivateV1 pools"
-                );
-                Pool::PrivateV1 {
-                    assets: (
-                        AssetWithBalance {
-                            asset_id: assets.0.clone(),
-                            balance: initial_balances.0,
-                        },
-                        AssetWithBalance {
-                            asset_id: assets.1.clone(),
-                            balance: initial_balances.1,
-                        },
-                    ),
-                    fees: fees.clone(),
-                    owner_id: caller_id.clone(),
-                }
-            }
-            PoolType::PublicV1 => {
-                expect!(
-                    attached_assets.is_empty(),
-                    "No assets other than NEAR and initial liquidity should be attached"
-                );
-                expect!(
-                    let FeeConfiguration::V1(fees) = fees,
-                    "Only V1 fees are supported for PublicV1 pools"
-                );
-                Pool::PublicV1 {
-                    assets: (
-                        AssetWithBalance {
-                            asset_id: assets.0.clone(),
-                            balance: initial_balances.0,
-                        },
-                        AssetWithBalance {
-                            asset_id: assets.1.clone(),
-                            balance: initial_balances.1,
-                        },
-                    ),
-                    fees: fees.clone(),
-                    user_shares: new_public_pool_user_shares(),
-                    total_shares: Some(INITIAL_SHARES),
                 }
             }
         });
@@ -1127,10 +978,6 @@ impl XykDex {
         let Some(pool) = self.pools.get_mut(pool_id) else {
             panic!("Pool not found");
         };
-        let user_shares = match pool {
-            Pool::PublicV1 { user_shares, .. } | Pool::PublicV2 { user_shares, .. } => user_shares,
-            _ => panic!("Liquidity registration is only needed for public pools"),
-        };
         let attached_near =
             NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
         expect!(
@@ -1139,8 +986,33 @@ impl XykDex {
         );
 
         let storage_usage_before = near_sdk::env::storage_usage();
-        user_shares.entry(caller_id.clone()).or_insert(None);
-        user_shares.flush();
+        let pool_asset_ids = {
+            let (asset_0, asset_1) = pool.asset_ids();
+            PoolAssets([asset_0.clone(), asset_1.clone()])
+        };
+        expect!(
+            let Pool::PublicV3 {
+                providers,
+                payout_groups,
+                ..
+            } = pool,
+            "Liquidity registration is only needed for public pools"
+        );
+        // Providers keep their fees until they choose another payout
+        if !providers.contains_key(&caller_id) {
+            providers.insert(
+                caller_id.clone(),
+                LiquidityPosition::new(FeePayoutType::KeepBoth, 0, &payout_groups.keep_both),
+            );
+            providers.flush();
+            start_fee_balances(
+                &mut self.fees_collected_by_users,
+                &caller_id,
+                pool_asset_ids.each_ref(),
+                FeePayoutType::KeepBoth,
+            );
+            self.fees_collected_by_users.flush();
+        }
         let storage_usage_after = near_sdk::env::storage_usage();
         let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
             (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
@@ -1206,16 +1078,8 @@ impl XykDex {
             new_total_shares,
             assets,
         ) = match pool {
-            Pool::PrivateV1 {
-                assets,
-                owner_id,
-                fees: _,
-            }
-            | Pool::PrivateV2 {
-                assets,
-                owner_id,
-                fees: _,
-                locked: _,
+            Pool::PrivateV2 {
+                assets, owner_id, ..
             } => {
                 expect!(*owner_id == caller_id, "Only pool owner can add liquidity");
                 expect!(
@@ -1259,17 +1123,12 @@ impl XykDex {
                     assets,
                 )
             }
-            Pool::PublicV1 {
+            Pool::PublicV3 {
                 assets,
-                fees: _,
-                user_shares,
+                providers,
                 total_shares,
-            }
-            | Pool::PublicV2 {
-                assets,
-                fees: _,
-                user_shares,
-                total_shares,
+                payout_groups,
+                ..
             } => {
                 let attached_amount_0 = attached_assets
                     .remove(&assets.0.asset_id)
@@ -1286,147 +1145,121 @@ impl XykDex {
                     "Amounts must be greater than 0"
                 );
                 expect!(
-                    user_shares.contains_key(&caller_id),
+                    let Some(mut position) = providers.get(&caller_id).cloned(),
                     "User has not registered using register_liquidity"
                 );
                 let mut asset_withdraw_requests = Vec::new();
-                let (shares_to_mint, total_shares_after, added_amount_0, added_amount_1) =
-                    match total_shares {
-                        None => {
-                            expect!(
-                                min_shares_received.is_none(),
-                                "Min shares received must not be specified for new pools"
-                            );
-                            assets.0.balance.0 = assets
-                                .0
-                                .balance
-                                .0
-                                .checked_add(attached_amount_0.0)
-                                .expect("Overflow");
-                            assets.1.balance.0 = assets
-                                .1
-                                .balance
-                                .0
-                                .checked_add(attached_amount_1.0)
-                                .expect("Overflow");
-                            *total_shares = Some(INITIAL_SHARES);
-                            expect!(
-                                user_shares
-                                    .insert(caller_id.clone(), Some(INITIAL_SHARES))
-                                    .is_some_and(|s| s.is_none()),
-                                "User already has shares but there are no total shares"
-                            );
-                            (
-                                INITIAL_SHARES,
-                                INITIAL_SHARES,
-                                attached_amount_0.0,
-                                attached_amount_1.0,
-                            )
-                        }
-                        Some(pool_total_shares) => {
-                            expect!(
-                                let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
-                                let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
-                                "Pool is empty"
-                            );
-
-                            let shares_mintable_from_0 = NonZeroU128::new(tokens_to_shares(
-                                attached_amount_0.0.checked_sub(1).expect("Underflow"),
-                                *pool_total_shares,
-                                pool_balance_0,
-                            ))
-                            .expect("Can't mint zero shares");
-                            let shares_mintable_from_1 = NonZeroU128::new(tokens_to_shares(
-                                attached_amount_1.0.checked_sub(1).expect("Underflow"),
-                                *pool_total_shares,
-                                pool_balance_1,
-                            ))
-                            .expect("Can't mint zero shares");
-                            let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
-                            if let Some(min_shares_received) = min_shares_received {
-                                expect!(shares_to_mint >= min_shares_received, "Slippage error");
-                            }
-
-                            let deposited_amount_0 = shares_to_tokens(
-                                shares_to_mint,
-                                *pool_total_shares,
-                                pool_balance_0,
-                            )
-                            .checked_add(1)
+                let (shares_to_mint, added_amount_0, added_amount_1) = match total_shares {
+                    None => {
+                        expect!(
+                            min_shares_received.is_none(),
+                            "Min shares received must not be specified for new pools"
+                        );
+                        expect!(
+                            position.shares == 0,
+                            "User already has shares but there are no total shares"
+                        );
+                        assets.0.balance.0 = assets
+                            .0
+                            .balance
+                            .0
+                            .checked_add(attached_amount_0.0)
                             .expect("Overflow");
-                            let deposited_amount_1 = shares_to_tokens(
-                                shares_to_mint,
-                                *pool_total_shares,
-                                pool_balance_1,
-                            )
-                            .checked_add(1)
+                        assets.1.balance.0 = assets
+                            .1
+                            .balance
+                            .0
+                            .checked_add(attached_amount_1.0)
+                            .expect("Overflow");
+                        (INITIAL_SHARES, attached_amount_0.0, attached_amount_1.0)
+                    }
+                    Some(pool_total_shares) => {
+                        expect!(
+                            let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
+                            let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
+                            "Pool is empty"
+                        );
+
+                        let shares_mintable_from_0 = NonZeroU128::new(tokens_to_shares(
+                            attached_amount_0.0.checked_sub(1).expect("Underflow"),
+                            *pool_total_shares,
+                            pool_balance_0,
+                        ))
+                        .expect("Can't mint zero shares");
+                        let shares_mintable_from_1 = NonZeroU128::new(tokens_to_shares(
+                            attached_amount_1.0.checked_sub(1).expect("Underflow"),
+                            *pool_total_shares,
+                            pool_balance_1,
+                        ))
+                        .expect("Can't mint zero shares");
+                        let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
+                        if let Some(min_shares_received) = min_shares_received {
+                            expect!(shares_to_mint >= min_shares_received, "Slippage error");
+                        }
+
+                        let deposited_amount_0 =
+                            shares_to_tokens(shares_to_mint, *pool_total_shares, pool_balance_0)
+                                .checked_add(1)
+                                .expect("Overflow");
+                        let deposited_amount_1 =
+                            shares_to_tokens(shares_to_mint, *pool_total_shares, pool_balance_1)
+                                .checked_add(1)
+                                .expect("Overflow");
+
+                        assets.0.balance.0 = assets
+                            .0
+                            .balance
+                            .0
+                            .checked_add(deposited_amount_0)
+                            .expect("Overflow");
+                        assets.1.balance.0 = assets
+                            .1
+                            .balance
+                            .0
+                            .checked_add(deposited_amount_1)
                             .expect("Overflow");
 
-                            assets.0.balance.0 = assets
-                                .0
-                                .balance
-                                .0
-                                .checked_add(deposited_amount_0)
-                                .expect("Overflow");
-                            assets.1.balance.0 = assets
-                                .1
-                                .balance
-                                .0
-                                .checked_add(deposited_amount_1)
-                                .expect("Overflow");
-
-                            *pool_total_shares = pool_total_shares
-                                .checked_add(shares_to_mint.get())
-                                .expect("Overflow");
-                            user_shares
-                                .entry(caller_id.clone())
-                                .and_modify(|shares| match shares {
-                                    Some(shares) => {
-                                        *shares = shares
-                                            .checked_add(shares_to_mint.get())
-                                            .expect("Overflow");
-                                    }
-                                    None => {
-                                        *shares = Some(shares_to_mint);
-                                    }
-                                })
-                                .or_insert(Some(shares_to_mint));
-
-                            let refund_amount_0 =
-                                attached_amount_0.0.checked_sub(deposited_amount_0);
-                            if let Some(refund_amount_0) = refund_amount_0 {
-                                asset_withdraw_requests.push(AssetWithdrawRequest {
-                                    asset_id: assets.0.asset_id.clone(),
-                                    amount: U128(refund_amount_0),
-                                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                                        caller_id.clone(),
-                                    ),
-                                });
-                            }
-                            let refund_amount_1 =
-                                attached_amount_1.0.checked_sub(deposited_amount_1);
-                            if let Some(refund_amount_1) = refund_amount_1 {
-                                asset_withdraw_requests.push(AssetWithdrawRequest {
-                                    asset_id: assets.1.asset_id.clone(),
-                                    amount: U128(refund_amount_1),
-                                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                                        caller_id.clone(),
-                                    ),
-                                });
-                            }
-                            (
-                                shares_to_mint,
-                                *pool_total_shares,
-                                deposited_amount_0,
-                                deposited_amount_1,
-                            )
+                        let refund_amount_0 = attached_amount_0.0.checked_sub(deposited_amount_0);
+                        if let Some(refund_amount_0) = refund_amount_0 {
+                            asset_withdraw_requests.push(AssetWithdrawRequest {
+                                asset_id: assets.0.asset_id.clone(),
+                                amount: U128(refund_amount_0),
+                                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                                    caller_id.clone(),
+                                ),
+                            });
                         }
-                    };
-                let new_owned_shares = user_shares
-                    .get(&caller_id)
-                    .copied()
-                    .flatten()
+                        let refund_amount_1 = attached_amount_1.0.checked_sub(deposited_amount_1);
+                        if let Some(refund_amount_1) = refund_amount_1 {
+                            asset_withdraw_requests.push(AssetWithdrawRequest {
+                                asset_id: assets.1.asset_id.clone(),
+                                amount: U128(refund_amount_1),
+                                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                                    caller_id.clone(),
+                                ),
+                            });
+                        }
+                        (shares_to_mint, deposited_amount_0, deposited_amount_1)
+                    }
+                };
+                let collected_fees = payout_groups.add_shares(&mut position, shares_to_mint.get());
+                let total_shares_after = match total_shares {
+                    Some(pool_total_shares) => pool_total_shares
+                        .checked_add(shares_to_mint.get())
+                        .expect("Overflow"),
+                    None => shares_to_mint,
+                };
+                *total_shares = Some(total_shares_after);
+                credit_liquidity_fees(
+                    &mut self.fees_collected_by_users,
+                    pool_id,
+                    &caller_id,
+                    PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
+                    collected_fees,
+                );
+                let new_owned_shares = NonZeroU128::new(position.shares)
                     .expect("User has no shares after adding liquidity");
+                providers.insert(caller_id.clone(), position);
                 let new_owned_asset_0 = shares_to_tokens(
                     new_owned_shares,
                     total_shares_after,
@@ -1451,7 +1284,7 @@ impl XykDex {
                     assets,
                 )
             }
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
+            Pool::LaunchV2 { .. } => {
                 panic!("Launch pools don't support adding liquidity after creation");
             }
         };
@@ -1512,13 +1345,10 @@ impl XykDex {
             panic!("Pool not found");
         };
 
-        let is_locked = match pool {
-            Pool::PrivateV1 { .. } => false,
-            Pool::PrivateV2 { locked, .. } => *locked,
-            Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => false,
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => false,
-        };
-        expect!(!is_locked, "Pool is locked and liquidity cannot be removed");
+        expect!(
+            !matches!(pool, Pool::PrivateV2 { locked: true, .. }),
+            "Pool is locked and liquidity cannot be removed"
+        );
 
         let (
             withdraw_to,
@@ -1532,16 +1362,8 @@ impl XykDex {
             new_total_asset_1,
             new_total_shares,
         ) = match pool {
-            Pool::PrivateV1 {
-                assets,
-                owner_id,
-                fees: _,
-            }
-            | Pool::PrivateV2 {
-                assets,
-                owner_id,
-                fees: _,
-                locked: _,
+            Pool::PrivateV2 {
+                assets, owner_id, ..
             } => {
                 expect!(
                     *owner_id == caller_id,
@@ -1552,10 +1374,8 @@ impl XykDex {
                     shares_to_remove.get() <= INITIAL_SHARES.get(),
                     "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
-                // INITIAL_SHARES is not 0
                 let withdrawn_amount_0 =
                     mul_div(assets.0.balance.0, shares_to_remove.get(), INITIAL_SHARES);
-                // INITIAL_SHARES is not 0
                 let withdrawn_amount_1 =
                     mul_div(assets.1.balance.0, shares_to_remove.get(), INITIAL_SHARES);
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
@@ -1590,31 +1410,27 @@ impl XykDex {
                     0,
                 )
             }
-            Pool::PublicV1 {
+            Pool::PublicV3 {
                 assets,
-                fees: _,
-                user_shares,
+                providers,
                 total_shares,
-            }
-            | Pool::PublicV2 {
-                assets,
-                fees: _,
-                user_shares,
-                total_shares,
+                payout_groups,
+                ..
             } => {
-                let user_shares_before = user_shares
+                let mut position = providers
                     .get(&caller_id)
-                    .copied()
-                    .flatten()
+                    .cloned()
                     .expect("User has no shares");
+                let user_shares_before =
+                    NonZeroU128::new(position.shares).expect("User has no shares");
                 let shares_to_remove = shares_to_remove.unwrap_or(user_shares_before);
                 expect!(
                     shares_to_remove <= user_shares_before,
                     "Not enough shares to remove"
                 );
-                expect!(let Some(pool_total_shares) = total_shares, "Pool has no shares");
+                expect!(let Some(pool_total_shares) = *total_shares, "Pool has no shares");
                 let (withdrawn_amount_0, withdrawn_amount_1) =
-                    if shares_to_remove == *pool_total_shares {
+                    if shares_to_remove == pool_total_shares {
                         let withdrawn_amount_0 = assets.0.balance.0;
                         let withdrawn_amount_1 = assets.1.balance.0;
                         assets.0.balance.0 = 0;
@@ -1623,12 +1439,12 @@ impl XykDex {
                     } else {
                         let withdrawn_amount_0 = NonZeroU128::new(assets.0.balance.0)
                             .map(|balance| {
-                                shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                                shares_to_tokens(shares_to_remove, pool_total_shares, balance)
                             })
                             .unwrap_or_default();
                         let withdrawn_amount_1 = NonZeroU128::new(assets.1.balance.0)
                             .map(|balance| {
-                                shares_to_tokens(shares_to_remove, *pool_total_shares, balance)
+                                shares_to_tokens(shares_to_remove, pool_total_shares, balance)
                             })
                             .unwrap_or_default();
                         assets.0.balance.0 = assets
@@ -1652,19 +1468,23 @@ impl XykDex {
                         "Slippage error"
                     );
                 }
+                let collected_fees =
+                    payout_groups.remove_shares(&mut position, shares_to_remove.get());
                 *total_shares = NonZeroU128::new(
                     pool_total_shares
                         .get()
                         .checked_sub(shares_to_remove.get())
                         .expect("Underflow"),
                 );
-                let user_shares_after = NonZeroU128::new(
-                    user_shares_before
-                        .get()
-                        .checked_sub(shares_to_remove.get())
-                        .expect("Underflow"),
+                credit_liquidity_fees(
+                    &mut self.fees_collected_by_users,
+                    pool_id,
+                    &caller_id,
+                    PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
+                    collected_fees,
                 );
-                user_shares.insert(caller_id.clone(), user_shares_after);
+                let user_shares_after = NonZeroU128::new(position.shares);
+                providers.insert(caller_id.clone(), position);
                 let total_shares_after = total_shares.map(|s| s.get()).unwrap_or_default();
                 let (new_owned_asset_0, new_owned_asset_1) = match (
                     user_shares_after,
@@ -1691,7 +1511,7 @@ impl XykDex {
                     total_shares_after,
                 )
             }
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
+            Pool::LaunchV2 { .. } => {
                 panic!("Launch pools don't support removing liquidity after creation");
             }
         };
@@ -1743,6 +1563,153 @@ impl XykDex {
 
     #[payable]
     #[result_serializer(borsh)]
+    pub fn set_liquidity_fee_payout(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
+        let Ok(SetLiquidityFeePayoutArgs {
+            pool_id,
+            payout_type,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let attached_near =
+            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        expect!(
+            attached_assets.is_empty(),
+            "No assets other than NEAR should be attached"
+        );
+        let Some(pool) = self.pools.get_mut(pool_id) else {
+            panic!("Pool not found");
+        };
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let pool_asset_ids = {
+            let (asset_0, asset_1) = pool.asset_ids();
+            PoolAssets([asset_0.clone(), asset_1.clone()])
+        };
+        expect!(
+            let Pool::PublicV3 {
+                providers,
+                payout_groups,
+                ..
+            } = pool,
+            "Only public pools have liquidity providers"
+        );
+        expect!(
+            let Some(mut position) = providers.get(&caller_id).cloned(),
+            "User has not registered using register_liquidity"
+        );
+        expect!(
+            position.payout_type != payout_type,
+            "Liquidity fees are already taken this way"
+        );
+        let collected_fees = payout_groups.change_payout_type(&mut position, payout_type);
+        providers.insert(caller_id.clone(), position);
+        providers.flush();
+        credit_liquidity_fees(
+            &mut self.fees_collected_by_users,
+            pool_id,
+            &caller_id,
+            pool_asset_ids.each_ref(),
+            collected_fees,
+        );
+        start_fee_balances(
+            &mut self.fees_collected_by_users,
+            &caller_id,
+            pool_asset_ids.each_ref(),
+            payout_type,
+        );
+        self.fees_collected_by_users.flush();
+        self.pools.flush();
+
+        XykDexEvent::LiquidityFeePayoutSet {
+            pool_id,
+            account_id: caller_id.clone(),
+            payout_type,
+        }
+        .emit();
+
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+        expect!(
+            let Some(leftover) = attached_near.checked_sub(storage_cost),
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        DexCallResponse {
+            asset_withdraw_requests: if !leftover.is_zero() {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: U128(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        caller_id.clone(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn collect_liquidity_fees(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
+        let Ok(CollectLiquidityFeesArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        let Some(pool) = self.pools.get_mut(pool_id) else {
+            panic!("Pool not found");
+        };
+        let pool_asset_ids = {
+            let (asset_0, asset_1) = pool.asset_ids();
+            PoolAssets([asset_0.clone(), asset_1.clone()])
+        };
+        expect!(
+            let Pool::PublicV3 {
+                providers,
+                payout_groups,
+                ..
+            } = pool,
+            "Only public pools have liquidity providers"
+        );
+        expect!(
+            let Some(mut position) = providers.get(&caller_id).cloned(),
+            "User has not registered using register_liquidity"
+        );
+        let collected_fees = position.collect(payout_groups.group(position.payout_type));
+        providers.insert(caller_id.clone(), position);
+        credit_liquidity_fees(
+            &mut self.fees_collected_by_users,
+            pool_id,
+            &caller_id,
+            pool_asset_ids.each_ref(),
+            collected_fees,
+        );
+        DexCallResponse::default()
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
     pub fn edit_fees(
         &mut self,
         #[serializer(borsh)]
@@ -1761,20 +1728,14 @@ impl XykDex {
             panic!("Pool not found");
         };
 
-        fees.validate(&PoolType::from(&*pool), near_sdk::env::block_timestamp())
+        fees.validate(near_sdk::env::block_timestamp())
             .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
 
         let assets = match pool {
-            Pool::PrivateV1 {
-                assets, owner_id, ..
-            } => {
-                expect!(*owner_id == caller_id, "Only pool owner can edit fees");
-                assets
-            }
-            Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
+            Pool::PublicV3 { .. } => {
                 panic!("Fees cannot be edited for public pools");
             }
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
+            Pool::LaunchV2 { .. } => {
                 panic!("Fees cannot be edited for launch pools");
             }
             Pool::PrivateV2 {
@@ -1788,54 +1749,20 @@ impl XykDex {
                 assets
             }
         };
+        let assets = (assets.0.asset_id.clone(), assets.1.asset_id.clone());
 
-        // TODO: Register only NEAR fee asset for Launch pools
         let storage_usage_before = near_sdk::env::storage_usage();
-        for (fee_receiver, _) in fees.receivers_at(near_sdk::env::block_timestamp()) {
-            match fee_receiver {
-                FeeReceiver::Account(account_id) => {
-                    expect!(
-                        account_id != PROTOCOL_FEE_RECEIVER_ID,
-                        "Protocol fee receiver can't be changed",
-                    );
-                    self.fees_collected_by_users
-                        .entry((account_id.clone(), assets.0.asset_id.clone()))
-                        .or_default();
-                    self.fees_collected_by_users
-                        .entry((account_id.clone(), assets.1.asset_id.clone()))
-                        .or_default();
-                }
-                FeeReceiver::Pool => {}
-                FeeReceiver::Community(_) => unreachable!(),
-            }
-        }
-        self.fees_collected_by_users.flush();
-
-        match pool {
-            Pool::PrivateV1 {
-                fees: current_fees, ..
-            } => match fees {
-                FeeConfiguration::V1(simple_fees) => {
-                    *current_fees = simple_fees;
-                }
-                _ => {
-                    panic!(
-                        "This private pool is too old and doesn't support advanced fee configuration"
-                    );
-                }
-            },
-            Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
-                panic!("Fees cannot be edited for public pools");
-            }
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
-                panic!("Fees cannot be edited for launch pools");
-            }
-            Pool::PrivateV2 {
-                fees: current_fees, ..
-            } => {
-                *current_fees = fees.clone();
-            }
-        }
+        self.register_fee_receivers(&fees, (&assets.0, &assets.1));
+        let Some(pool) = self.pools.get_mut(pool_id) else {
+            panic!("Pool not found");
+        };
+        let Pool::PrivateV2 {
+            fees: current_fees, ..
+        } = pool
+        else {
+            unreachable!("Checked that the pool is private");
+        };
+        *current_fees = fees;
 
         XykDexEvent::PoolUpdated {
             pool_id,
@@ -1923,102 +1850,6 @@ impl XykDex {
 
     #[payable]
     #[result_serializer(borsh)]
-    pub fn upgrade_pool(
-        &mut self,
-        #[allow(unused_mut)]
-        #[serializer(borsh)]
-        mut attached_assets: HashMap<AssetId, U128>,
-        #[serializer(borsh)] args: Vec<u8>,
-    ) -> DexCallResponse {
-        expect!(
-            let Caller::Direct(caller_id) = env::caller(),
-            "This method can only be called directly, not in a transfer call"
-        );
-        let Ok(UpgradePoolArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
-            near_sdk::env::panic_str("Invalid args");
-        };
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
-        expect!(attached_assets.is_empty(), "No assets should be attached");
-        let Some(pool) = self.pools.get_mut(pool_id) else {
-            panic!("Pool {pool_id} not found");
-        };
-        // Anyone can upgrade any pool, even not owned by them
-        let storage_usage_before = near_sdk::env::storage_usage();
-        let new_pool = match pool {
-            Pool::PrivateV1 {
-                assets,
-                owner_id,
-                fees,
-            } => Pool::PrivateV2 {
-                assets: assets.clone(),
-                owner_id: owner_id.clone(),
-                fees: FeeConfiguration::V1(fees.clone()),
-                locked: false,
-            },
-            Pool::PublicV1 {
-                assets,
-                fees,
-                user_shares: _,
-                total_shares,
-            } => Pool::PublicV2 {
-                assets: assets.clone(),
-                fees: FeeConfiguration::V1(fees.clone()),
-                user_shares: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                total_shares: *total_shares,
-            },
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                fees,
-                phantom_liquidity_near,
-            } => Pool::LaunchV2 {
-                quote_asset: AssetWithBalance {
-                    asset_id: AssetId::Near,
-                    balance: *near_amount,
-                },
-                launched_asset: launched_asset.clone(),
-                fees: fees.clone(),
-                phantom_liquidity: *phantom_liquidity_near,
-            },
-            Pool::LaunchV2 { .. } | Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } => {
-                panic!("This pool is of the latest version");
-            }
-        };
-        *pool = new_pool;
-        XykDexEvent::PoolUpdated {
-            pool_id,
-            pool: pool.view(near_sdk::env::block_timestamp()),
-        }
-        .emit();
-        self.pools.flush();
-        let storage_usage_after = near_sdk::env::storage_usage();
-        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
-            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
-        );
-        expect!(
-            let Some(leftover) = attached_near.checked_sub(storage_cost),
-            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
-        );
-        DexCallResponse {
-            asset_withdraw_requests: if !leftover.is_zero() {
-                vec![AssetWithdrawRequest {
-                    asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                        caller_id.clone(),
-                    ),
-                }]
-            } else {
-                vec![]
-            },
-            add_storage_deposit: storage_cost,
-            ..Default::default()
-        }
-    }
-
-    #[payable]
-    #[result_serializer(borsh)]
     pub fn lock_pool(
         &mut self,
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
@@ -2036,19 +1867,16 @@ impl XykDex {
             panic!("Pool {pool_id} not found");
         };
         match pool {
-            Pool::PrivateV1 { .. } => {
-                panic!("Old private pool cannot be locked");
-            }
             Pool::PrivateV2 {
                 owner_id, locked, ..
             } => {
                 expect!(*owner_id == caller_id, "Only pool owner can lock the pool");
                 *locked = true;
             }
-            Pool::PublicV1 { .. } | Pool::PublicV2 { .. } => {
+            Pool::PublicV3 { .. } => {
                 panic!("Public pools cannot be locked");
             }
-            Pool::LaunchV1 { .. } | Pool::LaunchV2 { .. } => {
+            Pool::LaunchV2 { .. } => {
                 panic!("Launch pools are locked by default");
             }
         }
@@ -2117,31 +1945,41 @@ impl XykDex {
 
     #[payable]
     #[result_serializer(borsh)]
-    pub fn withdraw_community_fee(
+    pub fn claim_fees_anyone(
         &mut self,
         #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         assert_one_yocto();
-        let Ok(WithdrawCommunityFeeArgs { account_id }) = near_sdk::borsh::from_slice(&args) else {
+        let Ok(ClaimFeesArgs {
+            account_id,
+            asset_ids,
+        }) = near_sdk::borsh::from_slice(&args)
+        else {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
 
-        expect!(
-            self.community_owned_fees.contains_key(&account_id),
-            "Account does not have a registered community fee"
-        );
-        let amount = self
-            .community_owned_fees
-            .insert(account_id.clone(), NearToken::ZERO)
-            .expect("Just checked that the account has a registered community fee");
+        let mut asset_withdraw_requests = Vec::new();
+        for asset_id in asset_ids {
+            expect!(
+                let Some(balance) = self
+                    .fees_claimable_by_anyone
+                    .insert((account_id.clone(), asset_id.clone()), U128(0)),
+                "{account_id} has no fees in {asset_id} that anyone can claim"
+            );
+            if balance.0 > 0 {
+                asset_withdraw_requests.push(AssetWithdrawRequest {
+                    asset_id,
+                    amount: balance,
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        account_id.clone(),
+                    ),
+                });
+            }
+        }
         DexCallResponse {
-            asset_withdraw_requests: vec![AssetWithdrawRequest {
-                asset_id: AssetId::Near,
-                amount: U128(amount.as_yoctonear()),
-                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(account_id),
-            }],
+            asset_withdraw_requests,
             ..Default::default()
         }
     }
@@ -2177,23 +2015,43 @@ impl XykDex {
         pool_ids
             .into_iter()
             .map(|pool_id| {
-                let pool = self
-                    .pools
+                self.pools
                     .get(pool_id)
-                    .unwrap_or_else(|| panic!("Pool {pool_id} not found"));
-                match pool {
-                    Pool::PublicV1 { user_shares, .. } | Pool::PublicV2 { user_shares, .. } => {
-                        user_shares.get(&account_id).map(|shares| {
-                            shares.map(|shares| U128(shares.get())).unwrap_or_default()
-                        })
-                    }
-                    Pool::PrivateV1 { .. }
-                    | Pool::LaunchV1 { .. }
-                    | Pool::LaunchV2 { .. }
-                    | Pool::PrivateV2 { .. } => None,
-                }
+                    .unwrap_or_else(|| panic!("Pool {pool_id} not found"))
+                    .liquidity_shares(&account_id)
+                    .map(U128)
             })
             .collect()
+    }
+
+    #[result_serializer(borsh)]
+    pub fn get_liquidity_position(
+        &self,
+        #[serializer(borsh)] args: GetLiquidityPositionArgs,
+    ) -> Option<LiquidityPositionView> {
+        let GetLiquidityPositionArgs {
+            pool_id,
+            account_id,
+        } = args;
+        let Some(pool) = self.pools.get(pool_id) else {
+            panic!("Pool {pool_id} not found");
+        };
+        match pool {
+            Pool::PublicV3 {
+                providers,
+                payout_groups,
+                ..
+            } => providers.get(&account_id).map(|position| {
+                let PoolAssets([uncollected_fee_0, uncollected_fee_1]) = payout_groups
+                    .group(position.payout_type)
+                    .uncollected_fees(position);
+                LiquidityPositionView {
+                    payout_type: position.payout_type,
+                    uncollected_fees: (U128(uncollected_fee_0), U128(uncollected_fee_1)),
+                }
+            }),
+            Pool::PrivateV2 { .. } | Pool::LaunchV2 { .. } => None,
+        }
     }
 
     #[result_serializer(borsh)]
@@ -2217,6 +2075,26 @@ impl XykDex {
     }
 
     #[result_serializer(borsh)]
+    pub fn get_claimable_fees(
+        &self,
+        #[serializer(borsh)] args: GetClaimableFeesArgs,
+    ) -> HashMap<AssetId, U128> {
+        let GetClaimableFeesArgs {
+            account_id,
+            asset_ids,
+        } = args;
+        asset_ids
+            .into_iter()
+            .filter_map(|asset_id| {
+                self.fees_claimable_by_anyone
+                    .get(&(account_id.clone(), asset_id.clone()))
+                    .cloned()
+                    .map(|balance| (asset_id, balance))
+            })
+            .collect()
+    }
+
+    #[result_serializer(borsh)]
     pub fn get_fee_discount_signer(&self) -> Option<PublicKey> {
         self.fee_discount_signer_public_key.clone()
     }
@@ -2224,29 +2102,5 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn get_pool_count(&self) -> PoolId {
         self.pools.len()
-    }
-
-    #[result_serializer(borsh)]
-    pub fn pool_needs_upgrade(&self, #[serializer(borsh)] args: PoolNeedsUpgradeArgs) -> bool {
-        let PoolNeedsUpgradeArgs { pool_id } = args;
-        let Some(pool) = self.pools.get(pool_id) else {
-            panic!("Pool {pool_id} not found");
-        };
-        match pool {
-            Pool::PrivateV1 { .. } | Pool::PublicV1 { .. } | Pool::LaunchV1 { .. } => true,
-            Pool::PrivateV2 { .. } | Pool::PublicV2 { .. } | Pool::LaunchV2 { .. } => false,
-        }
-    }
-
-    #[result_serializer(borsh)]
-    pub fn get_community_owned_fees(
-        &self,
-        #[serializer(borsh)] args: GetCommunityOwnedFeesArgs,
-    ) -> NearToken {
-        let GetCommunityOwnedFeesArgs { account_id } = args;
-        self.community_owned_fees
-            .get(&account_id)
-            .cloned()
-            .unwrap_or_default()
     }
 }

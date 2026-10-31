@@ -121,10 +121,3 @@ pub fn exact_out_amount_in(
         NonZeroU128::from(fee_denominator),
     )
 }
-
-/// What a launch pool gives of its quote asset for a fee of `fee_amount` of the launched asset,
-/// which it swaps into itself after the trade that collected it, when it has `in_balance` of the
-/// launched asset and `out_balance` of the quote asset. Neither balance is left zero by a trade.
-pub fn fee_converted_to_quote_asset(fee_amount: u128, in_balance: u128, out_balance: u128) -> u128 {
-    mul_div_sum(fee_amount, out_balance, in_balance, fee_amount)
-}

@@ -12,9 +12,132 @@ use near_workspaces::network::{Mainnet, Sandbox};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::sync::OnceCell;
 
-pub use intear_dex_test_support::get_compiled_wasms;
+pub struct CompiledWasms {
+    pub contract_wasm: Vec<u8>,
+    pub simple_amm_dex_wasm: Vec<u8>,
+    pub minimal_dex_wasm: Vec<u8>,
+    pub otc_dex_wasm: Vec<u8>,
+    pub xyk_dex_wasm: Vec<u8>,
+    pub ft_wasm: Vec<u8>,
+}
+
+static COMPILED_WASMS: OnceCell<CompiledWasms> = OnceCell::const_new();
+
+pub async fn get_compiled_wasms() -> &'static CompiledWasms {
+    COMPILED_WASMS
+        .get_or_init(|| async {
+            let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+            let cargo_metadata_output = Command::new("cargo")
+                .current_dir(workspace_root)
+                .args(["metadata", "--format-version=1", "--no-deps"])
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                cargo_metadata_output.status.success(),
+                "cargo metadata failed: {}",
+                String::from_utf8_lossy(&cargo_metadata_output.stderr)
+            );
+            let cargo_metadata: near_sdk::serde_json::Value =
+                near_sdk::serde_json::from_slice(&cargo_metadata_output.stdout).unwrap();
+            let target_directory =
+                PathBuf::from(cargo_metadata["target_directory"].as_str().unwrap());
+
+            let contract_wasm = match prebuilt_wasm("INTEAR_DEX_ENGINE_WASM") {
+                Some(wasm) => wasm,
+                None => {
+                    println!("Compiling intear-dex");
+                    assert!(
+                        Command::new("cargo")
+                            .current_dir(workspace_root)
+                            .args(["near", "build", "non-reproducible-wasm",])
+                            .status()
+                            .await
+                            .unwrap()
+                            .success()
+                    );
+                    std::fs::read(target_directory.join("near/intear_dex.wasm")).unwrap()
+                }
+            };
+
+            let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
+
+            let simple_amm_dex_wasm =
+                compile_dex(workspace_root, &release_wasm_directory, "simple-amm-dex").await;
+            let minimal_dex_wasm =
+                compile_dex(workspace_root, &release_wasm_directory, "minimal-dex").await;
+            let otc_dex_wasm =
+                compile_dex(workspace_root, &release_wasm_directory, "otc-dex").await;
+            let xyk_dex_wasm = match prebuilt_wasm("INTEAR_DEX_XYK_WASM") {
+                Some(wasm) => wasm,
+                None => compile_dex(workspace_root, &release_wasm_directory, "xyk-dex").await,
+            };
+
+            println!("Compilation complete");
+
+            CompiledWasms {
+                contract_wasm,
+                simple_amm_dex_wasm,
+                minimal_dex_wasm,
+                otc_dex_wasm,
+                xyk_dex_wasm,
+                ft_wasm: include_bytes!("../assets/ft.wasm").to_vec(),
+            }
+        })
+        .await
+}
+
+/// A wasm to test instead of compiling it, from the file that `env_var` names. Lets one test
+/// binary measure several builds, such as gas before and after a change.
+fn prebuilt_wasm(env_var: &str) -> Option<Vec<u8>> {
+    let path = std::env::var_os(env_var)?;
+    println!("Using {} from {}", env_var, path.to_string_lossy());
+    Some(std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("Failed to read {}: {e}", path.to_string_lossy());
+    }))
+}
+
+async fn compile_dex(
+    workspace_root: &Path,
+    release_wasm_directory: &Path,
+    package: &str,
+) -> Vec<u8> {
+    println!("Compiling {package}");
+    assert!(
+        Command::new("cargo")
+            .current_dir(workspace_root)
+            .args([
+                "build",
+                &format!("--package={package}"),
+                "--release",
+                "--target",
+                "wasm32-unknown-unknown",
+            ])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    let wasm_path = release_wasm_directory.join(format!("{}.wasm", package.replace('-', "_")));
+    assert!(
+        Command::new("wasm-opt")
+            .arg("-O")
+            .arg(&wasm_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    std::fs::read(&wasm_path).unwrap()
+}
 
 /// Track tokens burnt from a transaction result and add to total_near_burnt.
 pub fn track_tokens_burnt(result: &ExecutionFinalResult, total_near_burnt: &mut NearToken) {
@@ -286,9 +409,8 @@ pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> Test
 /// Set up the test environment around dex.intear.near with its mainnet state.
 pub async fn setup_test_environment_with_mainnet_engine(config: TestSetupConfig) -> TestContext {
     let sandbox = near_workspaces::sandbox().await.unwrap();
-    let dex_engine_contract = import_mainnet_engine(&sandbox).await;
-    // The dexes of this repo need its engine, so upgrade the mainnet engine first, as a
-    // deployment does: its new code, then its migration of the mainnet state
+    let (dex_engine_contract, _) = import_mainnet_engine(&sandbox).await;
+    // The dexes of this repo need its engine, which reads the mainnet state as it is
     let dex_engine_contract = dex_engine_contract
         .as_account()
         .deploy(&get_compiled_wasms().await.contract_wasm)
@@ -296,13 +418,6 @@ pub async fn setup_test_environment_with_mainnet_engine(config: TestSetupConfig)
         .unwrap()
         .into_result()
         .unwrap();
-    let result = dex_engine_contract
-        .call("migrate")
-        .max_gas()
-        .transact()
-        .await
-        .unwrap();
-    assert!(result.is_success(), "Engine migration failed: {result:#?}");
 
     let deployer_id: AccountId = xyk_dex_types::CAN_MIGRATE.to_owned();
     let deployer_key =
@@ -565,8 +680,10 @@ pub async fn mainnet() -> Worker<Mainnet> {
 }
 
 /// Import dex.intear.near into the sandbox with its code and all of its
-/// state on mainnet, as of the latest block
-pub async fn import_mainnet_engine(sandbox: &Worker<Sandbox>) -> Contract {
+/// state on mainnet, as of the latest block, which it returns too
+pub async fn import_mainnet_engine(
+    sandbox: &Worker<Sandbox>,
+) -> (Contract, HashMap<Vec<u8>, Vec<u8>>) {
     let dex_engine_id: AccountId = "dex.intear.near".parse().unwrap();
     let mainnet = mainnet().await;
     let block_height = mainnet.view_block().await.unwrap().height();
@@ -603,7 +720,7 @@ pub async fn import_mainnet_engine(sandbox: &Worker<Sandbox>) -> Contract {
             .await
             .unwrap();
     }
-    dex_engine_contract
+    (dex_engine_contract, mainnet_state)
 }
 
 /// Create `pause.slimedragon.near`, which is allowed to pause the dex engine.

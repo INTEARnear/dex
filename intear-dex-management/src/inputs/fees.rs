@@ -1,13 +1,15 @@
 use std::str::FromStr;
 
+use intear_dex_types::AssetId;
 use near_primitives::types::AccountId;
 use xyk_dex_types::{
-    CurrentFees, FeeAmount, FeeConfiguration, FeeReceiver, ScheduledFeeCurve, V2FeeConfiguration,
+    ClaimMode, FeeAmount, FeeConfigurationV2, FeePayoutType, FeeReceiver, ScheduledFeeCurve,
 };
 
 use super::percent::PercentArg;
 
 const FEES_FORMAT: &str = "<RECEIVER>=<FEE>, comma-separated, where RECEIVER is pool, an account or community:<account>, and FEE is a percentage like 0.25% or a linear schedule like 1%..0.25%@now..now+7d; or none";
+const PAYOUTS_FORMAT: &str = "<RECEIVER>=<PAYOUT>, comma-separated, where RECEIVER is an account or community:<account> of the fees, and PAYOUT is keep or the pool asset to convert its fees to, like near";
 const TIME_FORMAT: &str = "now, now+<N><s|m|h|d|w> or an RFC 3339 time like 2026-01-01T00:00:00Z";
 
 /// A point in time for a fee schedule. `now` is the time of the block the
@@ -127,22 +129,51 @@ impl std::fmt::Display for FeeAmountArg {
     }
 }
 
+/// A fee receiver as `--fees` and `--payouts` name it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeeReceiverArg {
+    /// An account that collects its fees itself
+    Account(AccountId),
+    /// An account whose fees anyone can claim for it
+    Community(AccountId),
+    Pool,
+}
+
 /// Who gets which part of every swap's input
 #[derive(Clone, PartialEq)]
-pub struct FeesArg(pub Vec<(FeeReceiver, FeeAmountArg)>);
+pub struct FeesArg(pub Vec<(FeeReceiverArg, FeeAmountArg)>);
 
-// FeeReceiver is Debug only in debug builds
+// As the command line writes it
 impl std::fmt::Debug for FeesArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
     }
 }
 
-fn fee_receiver_text(receiver: &FeeReceiver) -> String {
+fn parse_fee_receiver(receiver: &str) -> Result<FeeReceiverArg, String> {
     match receiver {
-        FeeReceiver::Account(account_id) => account_id.to_string(),
-        FeeReceiver::Pool => "pool".to_string(),
-        FeeReceiver::Community(account_id) => format!("community:{account_id}"),
+        "pool" => Ok(FeeReceiverArg::Pool),
+        _ => match receiver.strip_prefix("community:") {
+            Some(account_id) => Ok(FeeReceiverArg::Community(
+                AccountId::from_str(account_id)
+                    .map_err(|error| format!("Invalid account id {account_id}: {error}"))?,
+            )),
+            None => Ok(FeeReceiverArg::Account(AccountId::from_str(receiver).map_err(
+                |error| {
+                    format!(
+                        "Invalid fee receiver {receiver}: {error}. Expected pool, an account or community:<account>"
+                    )
+                },
+            )?)),
+        },
+    }
+}
+
+fn fee_receiver_text(receiver: &FeeReceiverArg) -> String {
+    match receiver {
+        FeeReceiverArg::Account(account_id) => account_id.to_string(),
+        FeeReceiverArg::Community(account_id) => format!("community:{account_id}"),
+        FeeReceiverArg::Pool => "pool".to_string(),
     }
 }
 
@@ -167,25 +198,13 @@ impl FromStr for FeesArg {
         if s.trim() == "none" {
             return Ok(Self(Vec::new()));
         }
-        let mut receivers: Vec<(FeeReceiver, FeeAmountArg)> = Vec::new();
+        let mut receivers: Vec<(FeeReceiverArg, FeeAmountArg)> = Vec::new();
         for receiver_fee in s.split(',') {
             let (receiver, amount) = receiver_fee
                 .trim()
                 .split_once('=')
                 .ok_or_else(|| format!("Invalid fee '{receiver_fee}'. Expected {FEES_FORMAT}"))?;
-            let receiver = match receiver {
-                "pool" => FeeReceiver::Pool,
-                _ => match receiver.strip_prefix("community:") {
-                    Some(account_id) => FeeReceiver::Community(
-                        AccountId::from_str(account_id)
-                            .map_err(|error| format!("Invalid account id {account_id}: {error}"))?,
-                    ),
-                    None => FeeReceiver::Account(
-                        AccountId::from_str(receiver)
-                            .map_err(|error| format!("Invalid fee receiver {receiver}: {error}. Expected pool, an account or community:<account>"))?,
-                    ),
-                },
-            };
+            let receiver = parse_fee_receiver(receiver)?;
             if receivers
                 .iter()
                 .any(|(listed_receiver, _)| *listed_receiver == receiver)
@@ -222,28 +241,139 @@ impl interactive_clap::ToCli for FeesArg {
     type CliVariant = FeesArg;
 }
 
-impl FeesArg {
-    /// Fixed fees only make the first version of fee configurations, which
-    /// pools of every version take; a schedule needs the second
-    pub fn fee_configuration(&self, now_nanoseconds: u64) -> Result<FeeConfiguration, String> {
-        let is_every_fee_fixed = self
+/// How the account and community receivers of fees take them
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayoutArg {
+    Keep,
+    ConvertTo(AssetId),
+}
+
+impl std::fmt::Display for PayoutArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => write!(f, "keep"),
+            Self::ConvertTo(asset_id) => write!(f, "{asset_id}"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PayoutsArg(pub Vec<(FeeReceiverArg, PayoutArg)>);
+
+// As the command line writes it
+impl std::fmt::Debug for PayoutsArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl std::fmt::Display for PayoutsArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let payouts = self
             .0
             .iter()
-            .all(|(_, amount)| matches!(amount, FeeAmountArg::Fixed(_)));
-        if is_every_fee_fixed {
-            return Ok(FeeConfiguration::V1(CurrentFees {
-                receivers: self
-                    .0
-                    .iter()
-                    .filter_map(|(receiver, amount)| match amount {
-                        FeeAmountArg::Fixed(PercentArg(fee)) => Some((receiver.clone(), *fee)),
-                        FeeAmountArg::Scheduled { .. } => None,
-                    })
-                    .collect(),
-            }));
+            .map(|(receiver, payout)| format!("{}={payout}", fee_receiver_text(receiver)))
+            .collect::<Vec<_>>();
+        write!(f, "{}", payouts.join(","))
+    }
+}
+
+impl FromStr for PayoutsArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut payouts: Vec<(FeeReceiverArg, PayoutArg)> = Vec::new();
+        for receiver_payout in s.split(',') {
+            let (receiver, payout_type) =
+                receiver_payout.trim().split_once('=').ok_or_else(|| {
+                    format!("Invalid payout '{receiver_payout}'. Expected {PAYOUTS_FORMAT}")
+                })?;
+            let receiver = parse_fee_receiver(receiver)?;
+            if receiver == FeeReceiverArg::Pool {
+                return Err(
+                    "The pool's liquidity providers choose how they take its fees".to_string(),
+                );
+            }
+            if payouts
+                .iter()
+                .any(|(listed_receiver, _)| *listed_receiver == receiver)
+            {
+                return Err(format!("{} is listed twice", fee_receiver_text(&receiver)));
+            }
+            let payout_type = match payout_type {
+                "keep" => PayoutArg::Keep,
+                _ => PayoutArg::ConvertTo(
+                    AssetId::from_str(payout_type)
+                        .map_err(|error| format!("{error}. Expected {PAYOUTS_FORMAT}"))?,
+                ),
+            };
+            payouts.push((receiver, payout_type));
+        }
+        Ok(Self(payouts))
+    }
+}
+
+impl interactive_clap::ToCli for PayoutsArg {
+    type CliVariant = PayoutsArg;
+}
+
+impl FeesArg {
+    /// Every account and community receiver becomes an account with a payout_type:
+    /// the one in `payouts`, or `default_payout_type`. Anyone can claim the fees of
+    /// a community, in any pool and asset.
+    pub fn fee_configuration(
+        &self,
+        now_nanoseconds: u64,
+        payouts: Option<&PayoutsArg>,
+        pool_assets: [&AssetId; 2],
+        default_payout_type: FeePayoutType,
+    ) -> Result<FeeConfigurationV2, String> {
+        let payouts = payouts.map_or(&[][..], |PayoutsArg(payouts)| payouts.as_slice());
+        if let Some((receiver, _)) = payouts.iter().find(|(receiver, _)| {
+            !self
+                .0
+                .iter()
+                .any(|(fee_receiver, _)| fee_receiver == receiver)
+        }) {
+            return Err(format!(
+                "{} has a payout but no fee",
+                fee_receiver_text(receiver)
+            ));
         }
         let mut receivers = Vec::new();
         for (receiver, amount) in &self.0 {
+            let payout_type = match payouts
+                .iter()
+                .find(|(payout_receiver, _)| payout_receiver == receiver)
+            {
+                None => default_payout_type,
+                Some((_, PayoutArg::Keep)) => FeePayoutType::KeepBoth,
+                Some((_, PayoutArg::ConvertTo(asset_id))) if asset_id == pool_assets[0] => {
+                    FeePayoutType::ConvertToFirstAsset
+                }
+                Some((_, PayoutArg::ConvertTo(asset_id))) if asset_id == pool_assets[1] => {
+                    FeePayoutType::ConvertToSecondAsset
+                }
+                Some((_, PayoutArg::ConvertTo(asset_id))) => {
+                    return Err(format!(
+                        "{} can't convert its fees to {asset_id}, which the pool doesn't hold",
+                        fee_receiver_text(receiver)
+                    ));
+                }
+            };
+            let receiver = match receiver {
+                FeeReceiverArg::Account(account_id) => FeeReceiver::Account {
+                    account_id: account_id.clone(),
+                    payout_type,
+                    claim_mode: ClaimMode::OnlyOwner,
+                },
+                FeeReceiverArg::Community(account_id) => FeeReceiver::Account {
+                    account_id: account_id.clone(),
+                    payout_type,
+                    claim_mode: ClaimMode::Anyone,
+                },
+                FeeReceiverArg::Pool => FeeReceiver::Pool,
+            };
             let fee_amount = match amount {
                 FeeAmountArg::Fixed(PercentArg(fee)) => FeeAmount::Fixed(*fee),
                 FeeAmountArg::Scheduled {
@@ -257,9 +387,9 @@ impl FeesArg {
                     curve: ScheduledFeeCurve::Linear,
                 },
             };
-            receivers.push((receiver.clone(), fee_amount));
+            receivers.push((receiver, fee_amount));
         }
-        Ok(FeeConfiguration::V2(V2FeeConfiguration { receivers }))
+        Ok(FeeConfigurationV2 { receivers })
     }
 }
 
@@ -268,18 +398,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_fees_make_the_first_configuration_version() {
+    fn receivers_without_payouts_take_the_default() {
         let fees: FeesArg = "alice.near=0.25%,pool=0.05%".parse().unwrap();
         assert_eq!(fees.to_string(), "alice.near=0.25%,pool=0.05%");
-        let FeeConfiguration::V1(CurrentFees { receivers }) = fees.fee_configuration(0).unwrap()
-        else {
-            panic!("fixed fees should be V1");
-        };
+        let token = AssetId::Nep141("token.near".parse().unwrap());
+        let FeeConfigurationV2 { receivers } = fees
+            .fee_configuration(0, None, [&token, &AssetId::Near], FeePayoutType::KeepBoth)
+            .unwrap();
         assert_eq!(
             receivers,
             vec![
-                (FeeReceiver::Account("alice.near".parse().unwrap()), 2_500),
-                (FeeReceiver::Pool, 500)
+                (
+                    FeeReceiver::Account {
+                        account_id: "alice.near".parse().unwrap(),
+                        payout_type: FeePayoutType::KeepBoth,
+                        claim_mode: ClaimMode::OnlyOwner,
+                    },
+                    FeeAmount::Fixed(2_500)
+                ),
+                (FeeReceiver::Pool, FeeAmount::Fixed(500))
             ]
         );
         assert_eq!("none".parse::<FeesArg>().unwrap().0, Vec::new());
@@ -294,11 +431,15 @@ mod tests {
             fees.to_string(),
             "community:dao.near=1%..0.3%@now..now+7d,pool=0.1%"
         );
-        let FeeConfiguration::V2(V2FeeConfiguration { receivers }) =
-            fees.fee_configuration(1_000).unwrap()
-        else {
-            panic!("a schedule should be V2");
-        };
+        let token = AssetId::Nep141("token.near".parse().unwrap());
+        let FeeConfigurationV2 { receivers } = fees
+            .fee_configuration(
+                1_000,
+                None,
+                [&token, &AssetId::Near],
+                FeePayoutType::KeepBoth,
+            )
+            .unwrap();
         let FeeAmount::Scheduled { start, end, .. } = receivers[0].1 else {
             panic!("the first fee should be scheduled");
         };
@@ -311,6 +452,58 @@ mod tests {
             absolute.to_string(),
             "alice.near=2%..1%@2025-01-01T00:00:00Z..2025-07-01T00:00:00Z"
         );
+    }
+
+    #[test]
+    fn payouts_choose_the_asset_of_receivers() {
+        let fees: FeesArg = "alice.near=0.25%,community:dao.near=1%,pool=0.05%"
+            .parse()
+            .unwrap();
+        let payouts: PayoutsArg = "community:dao.near=near".parse().unwrap();
+        assert_eq!(payouts.to_string(), "community:dao.near=near");
+        let token = AssetId::Nep141("token.near".parse().unwrap());
+        let FeeConfigurationV2 { receivers } = fees
+            .fee_configuration(
+                0,
+                Some(&payouts),
+                [&token, &AssetId::Near],
+                FeePayoutType::KeepBoth,
+            )
+            .unwrap();
+        assert_eq!(
+            receivers,
+            vec![
+                (
+                    FeeReceiver::Account {
+                        account_id: "alice.near".parse().unwrap(),
+                        payout_type: FeePayoutType::KeepBoth,
+                        claim_mode: ClaimMode::OnlyOwner,
+                    },
+                    FeeAmount::Fixed(2_500)
+                ),
+                (
+                    FeeReceiver::Account {
+                        account_id: "dao.near".parse().unwrap(),
+                        payout_type: FeePayoutType::ConvertToSecondAsset,
+                        claim_mode: ClaimMode::Anyone,
+                    },
+                    FeeAmount::Fixed(10_000)
+                ),
+                (FeeReceiver::Pool, FeeAmount::Fixed(500)),
+            ]
+        );
+        let usdt = AssetId::Nep141("usdt.tether-token.near".parse().unwrap());
+        let foreign_payout_type: PayoutsArg = format!("alice.near={usdt}").parse().unwrap();
+        assert!(
+            fees.fee_configuration(
+                0,
+                Some(&foreign_payout_type),
+                [&token, &AssetId::Near],
+                FeePayoutType::KeepBoth
+            )
+            .is_err()
+        );
+        assert!("pool=keep".parse::<PayoutsArg>().is_err());
     }
 
     #[test]

@@ -11,20 +11,24 @@ use near_sdk::serde_json::json;
 use near_sdk::{
     NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
+    borsh::BorshDeserialize,
     json_types::{Base64VecU8, U128},
 };
-use near_workspaces::network::Sandbox;
+use near_workspaces::network::{Sandbox, ValidatorKey};
+use near_workspaces::operations::Function;
 use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::types::Gas;
 use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use xyk_dex_types::{
-    AddLiquidityArgs, CAN_MIGRATE, CreatePoolArgs, CurrentFees, FULL_FEE_FRACTION,
-    FULL_SPLIT_FRACTION, FeeAmount, FeeConfiguration, FeeDiscount, FeeDiscountSignaturePayload,
-    FeeReceiver, GetCommunityOwnedFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    LockPoolArgs, MAX_FEE_RECEIVERS, PROTOCOL_FEE, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType,
-    PoolView, RegisterLiquidityArgs, RemoveLiquidityArgs, ScheduledFeeCurve,
-    SetFeeDiscountSignerArgs, SignedFeeDiscount, SplitFraction, SwapArgs, SwapRoute,
-    UpgradePoolArgs, V2FeeConfiguration, WithdrawCommunityFeeArgs, WithdrawFeesArgs, XykDexEvent,
+    AddLiquidityArgs, AssetWithBalance, CAN_MIGRATE, ClaimFeesArgs, ClaimMode, CreatePoolArgs,
+    CurrentFees, FULL_FEE_FRACTION, FULL_SPLIT_FRACTION, FeeAmount, FeeConfigurationV2,
+    FeeDiscount, FeeDiscountSignaturePayload, FeePayoutType, FeeReceiver, GetClaimableFeesArgs,
+    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    LiquidityPositionView, LockPoolArgs, MAX_FEE_RECEIVERS, MigrateArgs, PROTOCOL_FEE,
+    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs, SignedFeeDiscount,
+    SplitFraction, SwapArgs, SwapRoute, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -111,18 +115,20 @@ async fn get_pending_fees(
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
 }
 
-async fn get_community_owned_fees(
+async fn get_claimable_fees(
     dex_engine_contract: &Contract,
     dex_id: &DexId,
     account_id: &AccountId,
-) -> NearToken {
+    asset_ids: Vec<AssetId>,
+) -> HashMap<AssetId, U128> {
     let result = dex_engine_contract
         .view("dex_view")
         .args_json(json!({
             "dex_id": dex_id,
-            "method": "get_community_owned_fees",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetCommunityOwnedFeesArgs {
+            "method": "get_claimable_fees",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetClaimableFeesArgs {
                 account_id: account_id.clone(),
+                asset_ids,
             }).unwrap()),
         }))
         .await
@@ -141,6 +147,181 @@ async fn get_pool_count(dex_engine_contract: &Contract, dex_id: &DexId) -> PoolI
         .await
         .unwrap();
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+}
+
+async fn get_liquidity_position(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+    pool_id: PoolId,
+    account_id: &AccountId,
+) -> Option<LiquidityPositionView> {
+    let result = dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_liquidity_position",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetLiquidityPositionArgs {
+                pool_id,
+                account_id: account_id.clone(),
+            }).unwrap()),
+        }))
+        .await
+        .unwrap();
+    near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
+}
+
+/// The pool without the fees of a swap at the time of the view, which fee schedules change
+fn without_fees_now(mut pool: PoolView) -> PoolView {
+    let (PoolView::Private { fees, .. }
+    | PoolView::Public { fees, .. }
+    | PoolView::Launch { fees, .. }) = &mut pool;
+    *fees = CurrentFees { receivers: vec![] };
+    pool
+}
+
+/// The fee configurations of the dex before the migration
+#[derive(BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+enum FeeConfigurationBeforeMigration {
+    V1(CurrentFees),
+    V2(FeeConfigurationV2),
+}
+
+/// The pool views of the dex before the migration
+#[derive(BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+enum PoolViewBeforeMigration {
+    Private {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: CurrentFees,
+        fee_configuration: FeeConfigurationBeforeMigration,
+        owner_id: AccountId,
+        locked: bool,
+    },
+    Public {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: CurrentFees,
+        fee_configuration: FeeConfigurationBeforeMigration,
+        total_shares: Option<U128>,
+    },
+    Launch {
+        near_amount: U128,
+        launched_asset: AssetWithBalance,
+        fees: CurrentFees,
+        fee_configuration: FeeConfigurationBeforeMigration,
+        phantom_liquidity_near: U128,
+    },
+    LaunchV2 {
+        quote_asset: AssetWithBalance,
+        launched_asset: AssetWithBalance,
+        fees: CurrentFees,
+        fee_configuration: FeeConfigurationBeforeMigration,
+        phantom_liquidity: U128,
+    },
+}
+
+/// A pool of the dex before the migration, as the migration leaves it: its fixed fees are
+/// FeeConfigurationV2, a launch pool of the first version is quoted in NEAR, and the account and
+/// community receivers, which read as accounts that keep both assets, take the legacy payout of
+/// the pool's type
+async fn get_pool_as_migrated(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+    pool_id: PoolId,
+) -> PoolView {
+    let result = dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_pool",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetPoolArgs { pool_id }).unwrap()),
+        }))
+        .await
+        .unwrap();
+    let pool: Option<PoolViewBeforeMigration> =
+        near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap();
+    let fee_configuration_v2 = |fee_configuration| match fee_configuration {
+        FeeConfigurationBeforeMigration::V1(fees) => FeeConfigurationV2 {
+            receivers: fees
+                .receivers
+                .into_iter()
+                .map(|(receiver, fee_fraction)| (receiver, FeeAmount::Fixed(fee_fraction)))
+                .collect(),
+        },
+        FeeConfigurationBeforeMigration::V2(fees) => fees,
+    };
+    let mut pool = match pool.unwrap() {
+        PoolViewBeforeMigration::Private {
+            assets,
+            fees,
+            fee_configuration,
+            owner_id,
+            locked,
+        } => PoolView::Private {
+            assets,
+            fees,
+            fee_configuration: fee_configuration_v2(fee_configuration),
+            owner_id,
+            locked,
+        },
+        PoolViewBeforeMigration::Public {
+            assets,
+            fees,
+            fee_configuration,
+            total_shares,
+        } => PoolView::Public {
+            assets,
+            fees,
+            fee_configuration: fee_configuration_v2(fee_configuration),
+            total_shares,
+        },
+        PoolViewBeforeMigration::Launch {
+            near_amount,
+            launched_asset,
+            fees,
+            fee_configuration,
+            phantom_liquidity_near,
+        } => PoolView::Launch {
+            quote_asset: AssetWithBalance {
+                asset_id: AssetId::Near,
+                balance: near_amount,
+            },
+            launched_asset,
+            fees,
+            fee_configuration: fee_configuration_v2(fee_configuration),
+            phantom_liquidity: phantom_liquidity_near,
+        },
+        PoolViewBeforeMigration::LaunchV2 {
+            quote_asset,
+            launched_asset,
+            fees,
+            fee_configuration,
+            phantom_liquidity,
+        } => PoolView::Launch {
+            quote_asset,
+            launched_asset,
+            fees,
+            fee_configuration: fee_configuration_v2(fee_configuration),
+            phantom_liquidity,
+        },
+    };
+    let (legacy_payout_type, fee_configuration) = match &mut pool {
+        PoolView::Private {
+            fee_configuration, ..
+        }
+        | PoolView::Public {
+            fee_configuration, ..
+        } => (FeePayoutType::KeepBoth, fee_configuration),
+        PoolView::Launch {
+            fee_configuration, ..
+        } => (FeePayoutType::ConvertToFirstAsset, fee_configuration),
+    };
+    for (receiver, _) in &mut fee_configuration.receivers {
+        if let FeeReceiver::Account { payout_type, .. } = receiver {
+            *payout_type = legacy_payout_type;
+        }
+    }
+    pool
 }
 
 /// The fee discount signed by `signer` for the xyk dex `dex_id`
@@ -167,18 +348,6 @@ fn sign_fee_discount(
         discount,
         signature,
     }
-}
-
-async fn get_ft_balance(token: &Contract, account_id: &AccountId) -> U128 {
-    token
-        .view("ft_balance_of")
-        .args_json(json!({
-            "account_id": account_id,
-        }))
-        .await
-        .unwrap()
-        .json::<U128>()
-        .unwrap()
 }
 
 async fn run_xyk_private_flow(pool_type: PoolType) {
@@ -266,9 +435,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type,
                             initial_liquidity: None,
                         })
@@ -532,9 +699,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type,
                             initial_liquidity: Some((
                                 U128(add_liquidity_ft1_deployer),
@@ -896,42 +1061,291 @@ async fn test_xyk_public_flow_v2() {
 }
 
 #[tokio::test]
-async fn test_xyk_upgrade_private_v1() {
-    let initial_near_deposit = NearToken::from_near(20);
-    let storage_deposit_for_pool = NearToken::from_millinear(50);
-    let add_liquidity_ft1 = 1_000_000_000u128;
-    let add_liquidity_ft2 = 2_000_000_000u128;
-    let ft1_initial_deposit = 2_000_000_000u128;
-    let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u32;
-    let storage_deposit_for_upgrade = NearToken::from_millinear(5);
+async fn test_xyk_migration_of_mainnet_state() {
+    let initial_near_deposit = NearToken::from_near(10);
+    let dex_storage_deposit = NearToken::from_near(5);
+    let swap_amount_near = NearToken::from_millinear(10);
 
     let wasms = get_compiled_wasms().await;
-
-    let TestContext {
-        dex_engine_contract,
-        ft1,
-        ft2,
-        deployer,
-        user1,
-        ..
-    } = setup_test_environment_with_config(TestSetupConfig {
-        dex: Some(DexSetupConfig {
-            id: "dex".to_string(),
-            code: wasms.xyk_dex_wasm.clone(),
-            init_method: Some(("new".to_string(), vec![])),
-        }),
-        register_assets_for_all: true,
-        ft_storage_deposit_for_all: true,
-    })
-    .await;
-
+    // The node lets view_state read accounts of up to 50 KB of state by default, and the engine
+    // has more, so it runs with a configuration of its own
+    let sandbox_node =
+        near_sandbox::Sandbox::start_sandbox_with_config(near_sandbox::SandboxConfig {
+            additional_config: Some(json!({ "trie_viewer_state_size_limit": u64::MAX })),
+            // near-workspaces adds it to the sandboxes it runs, and creates top-level accounts with it
+            additional_accounts: vec![near_sandbox::GenesisAccount::default_with_name(
+                "registrar".parse().unwrap(),
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sandbox = near_workspaces::sandbox()
+        .rpc_addr(&sandbox_node.rpc_addr)
+        .validator_key(ValidatorKey::HomeDir(
+            sandbox_node.home_dir.path().to_path_buf(),
+        ))
+        .await
+        .unwrap();
+    let (dex_engine_contract, mainnet_state) = import_mainnet_engine(&sandbox).await;
+    // The account that can migrate deployed Plach, so it can deploy the new code and migrate
+    let owner = create_migrator(&sandbox, &dex_engine_contract).await;
     let dex_id = DexId {
-        deployer: deployer.id().clone(),
-        id: "dex".to_string(),
+        deployer: owner.id().clone(),
+        id: "xyk".to_string(),
     };
 
-    let result = deployer
+    let dex_storage_prefix = [vec![1], near_sdk::borsh::to_vec(&dex_id).unwrap()].concat();
+    let mut providers: BTreeMap<PoolId, Vec<AccountId>> = BTreeMap::new();
+    // The NEAR that each community collected, with its key in the engine's state
+    let mut community_fees_before_migration: BTreeMap<AccountId, (Vec<u8>, NearToken)> =
+        BTreeMap::new();
+    for (key, value) in &mainnet_state {
+        if let Some(dex_key) = key.strip_prefix(dex_storage_prefix.as_slice()) {
+            let dex_key: Vec<u8> = near_sdk::borsh::from_slice(dex_key).unwrap();
+            match dex_key[0] {
+                // StorageKey::PublicPoolUserShares
+                1 => {
+                    let (_, pool_id, account_id): (u8, PoolId, AccountId) =
+                        near_sdk::borsh::from_slice(&dex_key).unwrap();
+                    providers.entry(pool_id).or_default().push(account_id);
+                }
+                // StorageKey::CommunityOwnedFees
+                4 => {
+                    let (_, account_id): (u8, AccountId) =
+                        near_sdk::borsh::from_slice(&dex_key).unwrap();
+                    let value: Vec<u8> = near_sdk::borsh::from_slice(value).unwrap();
+                    let community_fees: NearToken = near_sdk::borsh::from_slice(&value).unwrap();
+                    community_fees_before_migration
+                        .insert(account_id, (key.clone(), community_fees));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let pool_count = get_pool_count(&dex_engine_contract, &dex_id).await;
+    let mut migrated_pools = Vec::new();
+    for pool_id in 0..pool_count {
+        migrated_pools.push(get_pool_as_migrated(&dex_engine_contract, &dex_id, pool_id).await);
+    }
+    // The accounts that anyone can claim the fees of were communities before the migration
+    let mut community_receivers: BTreeSet<AccountId> = BTreeSet::new();
+    for pool in &migrated_pools {
+        let (PoolView::Private {
+            fee_configuration, ..
+        }
+        | PoolView::Public {
+            fee_configuration, ..
+        }
+        | PoolView::Launch {
+            fee_configuration, ..
+        }) = pool;
+        for (receiver, _) in &fee_configuration.receivers {
+            if let FeeReceiver::Account {
+                account_id,
+                claim_mode: ClaimMode::Anyone,
+                ..
+            } = receiver
+            {
+                community_receivers.insert(account_id.clone());
+            }
+        }
+    }
+    // The migration finds the NEAR of the communities through the receivers of the pools, so it
+    // would leave behind the NEAR of an account that isn't one
+    assert!(
+        community_fees_before_migration
+            .keys()
+            .all(|account_id| community_receivers.contains(account_id))
+    );
+    let mut shares_before_migration = Vec::new();
+    for (pool_id, account_ids) in &providers {
+        for account_id in account_ids {
+            let shares = get_pool_shares(&dex_engine_contract, &dex_id, *pool_id, account_id)
+                .await
+                .unwrap();
+            shares_before_migration.push((*pool_id, account_id.clone(), shares));
+        }
+    }
+
+    // What the CLI does: it pauses the engine, reads the providers from its state, and then
+    // unpauses it, tops up the dex's storage, deploys and migrates in one transaction
+    let result = owner
+        .call(dex_engine_contract.id(), "pause")
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let deploy_and_migrate = |providers: Vec<(PoolId, Vec<AccountId>)>| {
+        owner
+            .batch(dex_engine_contract.id())
+            .call(
+                Function::new("unpause")
+                    .args_json(json!({}))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(10)),
+            )
+            .call(
+                Function::new("dex_storage_deposit")
+                    .args_json(json!({ "dex_id": dex_id }))
+                    .deposit(dex_storage_deposit)
+                    .gas(Gas::from_tgas(10)),
+            )
+            .call(
+                Function::new("deploy_dex_code")
+                    .args_json(json!({
+                        "last_part_of_id": dex_id.id,
+                        "code_base64": BASE64_STANDARD.encode(&wasms.xyk_dex_wasm),
+                    }))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(100)),
+            )
+            .call(
+                Function::new("dex_call")
+                    .args_json(json!({
+                        "dex_id": dex_id,
+                        "method": "migrate",
+                        "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&MigrateArgs { providers }).unwrap()),
+                        "attached_assets": {},
+                    }))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(880)),
+            )
+            .transact()
+    };
+
+    // A provider with shares can't be left out, and the failed migration leaves the old code,
+    // whose views only the layout from before the migration reads, and the engine paused
+    let (left_out_pool_id, left_out_account_id, _) = shares_before_migration
+        .iter()
+        .find(|(_, _, shares)| shares.0 > 0)
+        .unwrap();
+    let mut providers_but_one = providers.clone();
+    providers_but_one
+        .get_mut(left_out_pool_id)
+        .unwrap()
+        .retain(|account_id| account_id != left_out_account_id);
+    let result = deploy_and_migrate(providers_but_one.into_iter().collect())
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+    assert!(is_paused(&dex_engine_contract).await.unwrap());
+    assert_eq!(
+        without_fees_now(get_pool_as_migrated(&dex_engine_contract, &dex_id, 0).await),
+        without_fees_now(migrated_pools[0].clone())
+    );
+
+    let result = deploy_and_migrate(providers.clone().into_iter().collect())
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+    println!(
+        "GAS {:<40} {:>8.3} TGas",
+        "unpause, top up, deploy and migrate",
+        result.total_gas_burnt.as_gas() as f64 / 1e12
+    );
+
+    // The pools look the same, except the launch pools of the first version, which name NEAR as
+    // their quote asset now, and the fees, which are FeeConfigurationV2 whose account receivers
+    // take the legacy payout of their pool's type
+    assert_eq!(
+        get_pool_count(&dex_engine_contract, &dex_id).await,
+        pool_count
+    );
+    for (pool_id, migrated_pool) in (0..).zip(migrated_pools.clone()) {
+        assert_eq!(
+            without_fees_now(
+                get_pool(&dex_engine_contract, &dex_id, pool_id)
+                    .await
+                    .unwrap()
+            ),
+            without_fees_now(migrated_pool)
+        );
+    }
+
+    // The NEAR that the communities collected moved to their balances that anyone can claim, in
+    // NEAR, which their launch pools convert their fees to
+    for account_id in &community_receivers {
+        let community_fees = community_fees_before_migration
+            .get(account_id)
+            .map_or(0, |(_, community_fees)| community_fees.as_yoctonear());
+        assert_eq!(
+            get_claimable_fees(
+                &dex_engine_contract,
+                &dex_id,
+                account_id,
+                vec![AssetId::Near]
+            )
+            .await,
+            HashMap::from([(AssetId::Near, U128(community_fees))])
+        );
+    }
+    for (key, _) in community_fees_before_migration.values() {
+        assert!(
+            sandbox
+                .view_state(dex_engine_contract.id())
+                .prefix(key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Every provider has the shares it had, in a position that keeps its fees
+    for (pool_id, account_id, shares) in &shares_before_migration {
+        assert_eq!(
+            get_pool_shares(&dex_engine_contract, &dex_id, *pool_id, account_id).await,
+            Some(*shares)
+        );
+        assert_eq!(
+            get_liquidity_position(&dex_engine_contract, &dex_id, *pool_id, account_id).await,
+            Some(LiquidityPositionView {
+                payout_type: FeePayoutType::KeepBoth,
+                uncollected_fees: (U128(0), U128(0)),
+            })
+        );
+    }
+
+    // The owner swaps in a public pool quoted in NEAR that it has shares of, and whose pool fee
+    // its providers take, then removes its liquidity, which collects its part of the fee
+    let (pool_id, token_asset_id) = shares_before_migration
+        .iter()
+        .find_map(
+            |(pool_id, account_id, shares)| match &migrated_pools[*pool_id as usize] {
+                PoolView::Public { assets, fees, .. }
+                    if account_id == owner.id()
+                        && shares.0 > 0
+                        && assets.0.asset_id == AssetId::Near
+                        && fees
+                            .receivers
+                            .iter()
+                            .any(|(receiver, fee)| *receiver == FeeReceiver::Pool && *fee > 0) =>
+                {
+                    Some((*pool_id, assets.1.asset_id.clone()))
+                }
+                _ => None,
+            },
+        )
+        .unwrap();
+
+    let result = owner
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Near, token_asset_id.clone()],
+            "for": AccountOrDexId::Account(owner.id().clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = owner
         .call(dex_engine_contract.id(), "deposit_near")
         .max_gas()
         .deposit(initial_near_deposit)
@@ -941,68 +1355,19 @@ async fn test_xyk_upgrade_private_v1() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let result = deployer
-        .call(ft1.id(), "ft_transfer_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "receiver_id": dex_engine_contract.id(),
-            "amount": U128(ft1_initial_deposit),
-            "msg": "",
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(ft2.id(), "ft_transfer_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "receiver_id": dex_engine_contract.id(),
-            "amount": U128(ft2_initial_deposit),
-            "msg": "",
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
+    let result = owner
         .call(dex_engine_contract.id(), "execute_operations")
         .max_gas()
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "operations": vec![
-                Operation::DexCall {
+                Operation::SwapSimple {
                     dex_id: dex_id.clone(),
-                    method: "create_pool".to_string(),
-                    args: Base64VecU8(
-                        near_sdk::borsh::to_vec(&CreatePoolArgs {
-                            assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
-                            pool_type: PoolType::PrivateV1,
-                            initial_liquidity: None,
-                        })
-                        .unwrap(),
-                    ),
-                    attached_assets: HashMap::from_iter([(
-                        AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
-                    )]),
-                },
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "add_liquidity".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs {
-                        pool_id: first_pool_id,
-                        min_shares_received: None,
-                    }).unwrap()),
-                    attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
-                    ]),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
+                    asset_in: AssetId::Near,
+                    asset_out: token_asset_id.clone(),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_near.as_yoctonear()))),
+                    constraint: None,
                 },
             ],
         }))
@@ -1011,260 +1376,24 @@ async fn test_xyk_upgrade_private_v1() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let upgrade_result = user1
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(storage_deposit_for_upgrade)
-        .args_json(json!({
-            "operations": vec![
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "upgrade_pool".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&UpgradePoolArgs {
-                        pool_id: first_pool_id,
-                    }).unwrap()),
-                    attached_assets: HashMap::from_iter([(
-                        AssetId::Near,
-                        U128(storage_deposit_for_upgrade.as_yoctonear()),
-                    )]),
-                },
-            ],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&upgrade_result).unwrap();
-
-    let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
-        .await
-        .unwrap();
-    match &pool {
-        PoolView::Private { assets, locked, .. } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1);
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2);
-            assert!(!locked);
-        }
-        _ => panic!("Expected private pool"),
-    }
-
-    let deployer_ft1_before_remove = get_ft_balance(&ft1, deployer.id()).await.0;
-    let deployer_ft2_before_remove = get_ft_balance(&ft2, deployer.id()).await.0;
-    let upgrader_ft1_before_remove = get_ft_balance(&ft1, user1.id()).await.0;
-    let upgrader_ft2_before_remove = get_ft_balance(&ft2, user1.id()).await.0;
-
-    let remove_result = deployer
-        .call(dex_engine_contract.id(), "dex_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "dex_id": dex_id.clone(),
-            "method": "remove_liquidity",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
-                pool_id: first_pool_id,
-                shares_to_remove: None,
-                min_assets_received: None,
-            }).unwrap()),
-            "attached_assets": {},
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&remove_result).unwrap();
-
-    let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
-        .await
-        .unwrap();
-    match &pool {
-        PoolView::Private { assets, .. } => {
-            assert_eq!(assets.0.balance.0, 0);
-            assert_eq!(assets.1.balance.0, 0);
-        }
-        _ => panic!("Expected private pool"),
-    }
-
-    assert_inner_asset_balance(
+    let Some(LiquidityPositionView {
+        payout_type: FeePayoutType::KeepBoth,
+        uncollected_fees: (uncollected_fee_near, uncollected_fee_token),
+    }) = get_liquidity_position(&dex_engine_contract, &dex_id, pool_id, owner.id()).await
+    else {
+        panic!("Expected a position that keeps its fees");
+    };
+    assert!(uncollected_fee_near.0 > 0);
+    assert_eq!(uncollected_fee_token, U128(0));
+    let owner_fees_before_removal = get_pending_fees(
         &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Nep141(ft1.id().clone()),
-        Some(U128(ft1_initial_deposit - add_liquidity_ft1)),
+        &dex_id,
+        owner.id(),
+        vec![AssetId::Near],
     )
-    .await
-    .unwrap();
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Nep141(ft2.id().clone()),
-        Some(U128(ft2_initial_deposit - add_liquidity_ft2)),
-    )
-    .await
-    .unwrap();
-
-    let deployer_ft1_after_remove = get_ft_balance(&ft1, deployer.id()).await.0;
-    let deployer_ft2_after_remove = get_ft_balance(&ft2, deployer.id()).await.0;
-    assert_eq!(
-        deployer_ft1_after_remove,
-        deployer_ft1_before_remove + add_liquidity_ft1
-    );
-    assert_eq!(
-        deployer_ft2_after_remove,
-        deployer_ft2_before_remove + add_liquidity_ft2
-    );
-
-    let upgrader_ft1_after_remove = get_ft_balance(&ft1, user1.id()).await.0;
-    let upgrader_ft2_after_remove = get_ft_balance(&ft2, user1.id()).await.0;
-    assert_eq!(upgrader_ft1_after_remove, upgrader_ft1_before_remove);
-    assert_eq!(upgrader_ft2_after_remove, upgrader_ft2_before_remove);
-}
-
-#[tokio::test]
-async fn test_xyk_upgrade_public_v1() {
-    let initial_near_deposit = NearToken::from_near(20);
-    let storage_deposit_for_pool = NearToken::from_millinear(50);
-    let add_liquidity_ft1_deployer = 1_000_000_000u128;
-    let add_liquidity_ft2_deployer = 2_000_000_000u128;
-    let ft1_initial_deposit = 2_000_000_000u128;
-    let ft2_initial_deposit = 4_000_000_000u128;
-    let first_pool_id = 0u32;
-    let storage_deposit_for_upgrade = NearToken::from_millinear(5);
-
-    let wasms = get_compiled_wasms().await;
-
-    let TestContext {
-        dex_engine_contract,
-        ft1,
-        ft2,
-        deployer,
-        user2,
-        ..
-    } = setup_test_environment_with_config(TestSetupConfig {
-        dex: Some(DexSetupConfig {
-            id: "dex".to_string(),
-            code: wasms.xyk_dex_wasm.clone(),
-            init_method: Some(("new".to_string(), vec![])),
-        }),
-        register_assets_for_all: true,
-        ft_storage_deposit_for_all: true,
-    })
     .await;
 
-    let dex_id = DexId {
-        deployer: deployer.id().clone(),
-        id: "dex".to_string(),
-    };
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "deposit_near")
-        .max_gas()
-        .deposit(initial_near_deposit)
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(ft1.id(), "ft_transfer_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "receiver_id": dex_engine_contract.id(),
-            "amount": U128(ft1_initial_deposit),
-            "msg": "",
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(ft2.id(), "ft_transfer_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "receiver_id": dex_engine_contract.id(),
-            "amount": U128(ft2_initial_deposit),
-            "msg": "",
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let result = deployer
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": vec![
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "create_pool".to_string(),
-                    args: Base64VecU8(
-                        near_sdk::borsh::to_vec(&CreatePoolArgs {
-                            assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
-                            pool_type: PoolType::PublicV1,
-                            initial_liquidity: Some((
-                                U128(add_liquidity_ft1_deployer),
-                                U128(add_liquidity_ft2_deployer),
-                            )),
-                        })
-                        .unwrap(),
-                    ),
-                    attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1_deployer)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2_deployer)),
-                    ]),
-                },
-            ],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    let deployer_shares_before =
-        get_pool_shares(&dex_engine_contract, &dex_id, first_pool_id, deployer.id())
-            .await
-            .unwrap();
-
-    let upgrade_result = user2
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(storage_deposit_for_upgrade)
-        .args_json(json!({
-            "operations": vec![
-                Operation::DexCall {
-                    dex_id: dex_id.clone(),
-                    method: "upgrade_pool".to_string(),
-                    args: Base64VecU8(near_sdk::borsh::to_vec(&UpgradePoolArgs {
-                        pool_id: first_pool_id,
-                    }).unwrap()),
-                    attached_assets: HashMap::from_iter([(
-                        AssetId::Near,
-                        U128(storage_deposit_for_upgrade.as_yoctonear()),
-                    )]),
-                },
-            ],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&upgrade_result).unwrap();
-
-    let deployer_shares_after =
-        get_pool_shares(&dex_engine_contract, &dex_id, first_pool_id, deployer.id())
-            .await
-            .unwrap();
-    assert_eq!(deployer_shares_after, deployer_shares_before);
-
-    let deployer_ft1_before_remove = get_ft_balance(&ft1, deployer.id()).await.0;
-    let deployer_ft2_before_remove = get_ft_balance(&ft2, deployer.id()).await.0;
-    let upgrader_ft1_before_remove = get_ft_balance(&ft1, user2.id()).await.0;
-    let upgrader_ft2_before_remove = get_ft_balance(&ft2, user2.id()).await.0;
-
-    let remove_result = deployer
+    let result = owner
         .call(dex_engine_contract.id(), "dex_call")
         .max_gas()
         .deposit(NearToken::from_yoctonear(1))
@@ -1272,7 +1401,7 @@ async fn test_xyk_upgrade_public_v1() {
             "dex_id": dex_id.clone(),
             "method": "remove_liquidity",
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
-                pool_id: first_pool_id,
+                pool_id,
                 shares_to_remove: None,
                 min_assets_received: None,
             }).unwrap()),
@@ -1281,50 +1410,25 @@ async fn test_xyk_upgrade_public_v1() {
         .transact()
         .await
         .unwrap();
-    assert_success(&remove_result).unwrap();
+    assert_success(&result).unwrap();
 
-    let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
-        .await
-        .unwrap();
-    match &pool {
-        PoolView::Public { total_shares, .. } => {
-            assert!(total_shares.is_none());
-        }
-        _ => panic!("Expected public pool"),
-    }
-
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Nep141(ft1.id().clone()),
-        Some(U128(ft1_initial_deposit - add_liquidity_ft1_deployer)),
-    )
-    .await
-    .unwrap();
-    assert_inner_asset_balance(
-        &dex_engine_contract,
-        AccountOrDexId::Account(deployer.id().clone()),
-        AssetId::Nep141(ft2.id().clone()),
-        Some(U128(ft2_initial_deposit - add_liquidity_ft2_deployer)),
-    )
-    .await
-    .unwrap();
-
-    let deployer_ft1_after_remove = get_ft_balance(&ft1, deployer.id()).await.0;
-    let deployer_ft2_after_remove = get_ft_balance(&ft2, deployer.id()).await.0;
     assert_eq!(
-        deployer_ft1_after_remove,
-        deployer_ft1_before_remove + add_liquidity_ft1_deployer
+        get_pool_shares(&dex_engine_contract, &dex_id, pool_id, owner.id()).await,
+        Some(U128(0))
     );
+    let owner_fees_after_removal = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        owner.id(),
+        vec![AssetId::Near],
+    )
+    .await;
     assert_eq!(
-        deployer_ft2_after_remove,
-        deployer_ft2_before_remove + add_liquidity_ft2_deployer
+        owner_fees_after_removal.get(&AssetId::Near),
+        Some(&U128(
+            owner_fees_before_removal[&AssetId::Near].0 + uncollected_fee_near.0
+        ))
     );
-
-    let upgrader_ft1_after_remove = get_ft_balance(&ft1, user2.id()).await.0;
-    let upgrader_ft2_after_remove = get_ft_balance(&ft2, user2.id()).await.0;
-    assert_eq!(upgrader_ft1_after_remove, upgrader_ft1_before_remove);
-    assert_eq!(upgrader_ft2_after_remove, upgrader_ft2_before_remove);
 }
 
 #[tokio::test]
@@ -1411,7 +1515,7 @@ async fn test_xyk_lock_pool() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -1624,7 +1728,7 @@ async fn test_xyk_multi_user_liquidity() {
                             AssetId::Nep141(ft1.id().clone()),
                             AssetId::Nep141(ft2.id().clone()),
                         ),
-                        fees: FeeConfiguration::V1(CurrentFees { receivers: vec![] }),
+                        fees: FeeConfigurationV2 { receivers: vec![] },
                         pool_type: PoolType::PublicLatest,
                         initial_liquidity: Some((U128(ft1_amount), U128(ft2_amount))),
                     })
@@ -1828,9 +1932,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                         args: Base64VecU8(
                             near_sdk::borsh::to_vec(&CreatePoolArgs {
                                 assets: (AssetId::Near, AssetId::Nep141(ft1.id().clone())),
-                                fees: FeeConfiguration::V1(CurrentFees {
-                                    receivers: vec![(FeeReceiver::Pool, 3_000)],
-                                }),
+                                fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(3_000))] },
                                 pool_type: PoolType::PublicLatest,
                                 initial_liquidity,
                             })
@@ -2016,12 +2118,7 @@ async fn test_xyk_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(
-                                    FeeReceiver::Account(user2.id().clone()),
-                                    fee_fraction,
-                                )],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -2239,16 +2336,16 @@ async fn test_xyk_scheduled_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V2(V2FeeConfiguration {
+                            fees: FeeConfigurationV2 {
                                 receivers: vec![(
-                                    FeeReceiver::Account(user2.id().clone()),
+                                    FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner },
                                     FeeAmount::Scheduled {
                                         start: (scheduled_start_timestamp, scheduled_fee_start),
                                         end: (scheduled_end_timestamp, scheduled_fee_end),
                                         curve: ScheduledFeeCurve::Linear,
                                     },
                                 )],
-                            }),
+                            },
                             pool_type: PoolType::PrivateV2,
                             initial_liquidity: None,
                         })
@@ -2498,9 +2595,7 @@ async fn test_xyk_exact_output() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -2718,12 +2813,7 @@ async fn test_xyk_pool_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(
-                                    FeeReceiver::Pool,
-                                    fee_fraction,
-                                )],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(fee_fraction))] },
                             pool_type: PoolType::PublicLatest,
                             initial_liquidity: Some((U128(add_liquidity_ft1), U128(add_liquidity_ft2))),
                         })
@@ -2793,8 +2883,11 @@ async fn test_xyk_pool_fees() {
     // out = (98_900_000 * 2_000_000_000) / (1_000_000_000 + 98_900_000) = 179_998_179
     let expected_ft2_out = 179_998_179u128;
     let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
+    // The providers take the pool's fee out of the pool, and keep it by default
+    let pool_fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
 
-    let pool_ft1_after_swap = add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount;
+    let pool_ft1_after_swap =
+        add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount - pool_fee_amount;
     let pool_ft2_after_swap = add_liquidity_ft2 - expected_ft2_out;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
@@ -2812,7 +2905,7 @@ async fn test_xyk_pool_fees() {
         .await
         .unwrap();
 
-    // Deployer removes liquidity (should get 100% of pool including fees)
+    // The deployer, the only provider, removes all of the liquidity, which pays it the fee too
     let result = deployer
         .call(dex_engine_contract.id(), "dex_call")
         .max_gas()
@@ -2866,9 +2959,23 @@ async fn test_xyk_pool_fees() {
     .await
     .unwrap();
 
+    let deployer_fees = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        deployer.id(),
+        vec![
+            AssetId::Nep141(ft1.id().clone()),
+            AssetId::Nep141(ft2.id().clone()),
+        ],
+    )
+    .await;
     assert_eq!(
-        pool_ft1_after_swap,
-        add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount
+        deployer_fees.get(&AssetId::Nep141(ft1.id().clone())),
+        Some(&U128(pool_fee_amount))
+    );
+    assert_eq!(
+        deployer_fees.get(&AssetId::Nep141(ft2.id().clone())),
+        Some(&U128(0))
     );
 }
 
@@ -2941,9 +3048,7 @@ async fn test_xyk_launch_pool_flow() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -2973,7 +3078,7 @@ async fn test_xyk_launch_pool_flow() {
         .await
         .unwrap();
     match &pool {
-        PoolView::LaunchV2 {
+        PoolView::Launch {
             quote_asset,
             launched_asset,
             phantom_liquidity: pool_phantom_liquidity_near,
@@ -3038,7 +3143,7 @@ async fn test_xyk_launch_pool_flow() {
         .await
         .unwrap();
     match &pool {
-        PoolView::LaunchV2 {
+        PoolView::Launch {
             quote_asset,
             launched_asset,
             ..
@@ -3133,7 +3238,11 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                 .parse()
                 .unwrap();
             (
-                FeeReceiver::Account(account_id),
+                FeeReceiver::Account {
+                    account_id,
+                    payout_type: FeePayoutType::ConvertToFirstAsset,
+                    claim_mode: ClaimMode::OnlyOwner,
+                },
                 FeeAmount::Scheduled {
                     start: (1, 20_000),
                     end: (u64::MAX / 2, 10_000),
@@ -3165,7 +3274,7 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V2(V2FeeConfiguration { receivers }),
+                            fees: FeeConfigurationV2 { receivers },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -3299,9 +3408,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -3354,7 +3461,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
         .await
         .unwrap();
     match &pool {
-        PoolView::LaunchV2 {
+        PoolView::Launch {
             quote_asset,
             launched_asset,
             ..
@@ -3446,12 +3553,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(
-                                    FeeReceiver::Account(user2.id().clone()),
-                                    fee_fraction,
-                                )],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::ConvertToFirstAsset, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -3610,22 +3712,18 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
     )
     .await;
 
+    // The receiver converts its fees to the quote asset, so it has no balance in the launched
+    // asset
     assert_eq!(
         user2_fees_before.get(&AssetId::Near).cloned(),
         Some(U128(expected_user2_near_before))
     );
-    assert_eq!(
-        user2_fees_before.get(&launched_asset_id).cloned(),
-        Some(U128(0))
-    );
+    assert_eq!(user2_fees_before.get(&launched_asset_id).cloned(), None);
     assert_eq!(
         user2_fees_after.get(&AssetId::Near).cloned(),
         Some(U128(expected_user2_near_after))
     );
-    assert_eq!(
-        user2_fees_after.get(&launched_asset_id).cloned(),
-        Some(U128(0))
-    );
+    assert_eq!(user2_fees_after.get(&launched_asset_id).cloned(), None);
 
     assert_eq!(
         protocol_fees_before.get(&AssetId::Near).cloned(),
@@ -3723,9 +3821,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                         args: Base64VecU8(
                             near_sdk::borsh::to_vec(&CreatePoolArgs {
                                 assets: (quote_asset_id.clone(), launched_asset_id.clone()),
-                                fees: FeeConfiguration::V1(CurrentFees {
-                                    receivers: vec![(fee_receiver, fee_fraction)],
-                                }),
+                                fees: FeeConfigurationV2 { receivers: vec![(fee_receiver, FeeAmount::Fixed(fee_fraction))] },
                                 pool_type: PoolType::LaunchLatest {
                                     phantom_liquidity: U128(phantom_liquidity_ft1),
                                 },
@@ -3746,25 +3842,20 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
             .transact()
     };
 
-    // Community fees are kept in NEAR, so they can't come from another quote asset
-    let result = create_launch_pool(FeeReceiver::Community(user2.id().clone()))
-        .await
-        .unwrap();
-    assert!(
-        format!("{result:?}")
-            .contains("Community fee receiver is only supported in Launch pools quoted in NEAR")
-    );
-
-    let result = create_launch_pool(FeeReceiver::Account(user2.id().clone()))
-        .await
-        .unwrap();
+    let result = create_launch_pool(FeeReceiver::Account {
+        account_id: user2.id().clone(),
+        payout_type: FeePayoutType::ConvertToFirstAsset,
+        claim_mode: ClaimMode::OnlyOwner,
+    })
+    .await
+    .unwrap();
     assert_success(&result).unwrap();
 
     match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap()
     {
-        PoolView::LaunchV2 {
+        PoolView::Launch {
             quote_asset,
             launched_asset,
             phantom_liquidity,
@@ -3849,10 +3940,6 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
     let quote_reserve_post_swap = quote_reserve_after_buy - sell_trader_ft1_out;
     let sell_user_fee_ft1 = sell_user_fee_token * quote_reserve_post_swap
         / (token_reserve_post_swap + sell_user_fee_token);
-    let token_reserve_after_user_fee = token_reserve_post_swap + sell_user_fee_token;
-    let quote_reserve_after_user_fee = quote_reserve_post_swap - sell_user_fee_ft1;
-    let sell_protocol_fee_ft1 = sell_protocol_fee_token * quote_reserve_after_user_fee
-        / (token_reserve_after_user_fee + sell_protocol_fee_token);
 
     let result = user1
         .call(ft2.id(), "ft_transfer_call")
@@ -3905,14 +3992,18 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
         user2_fees.get(&quote_asset_id).cloned(),
         Some(U128(buy_user_fee_ft1 + sell_user_fee_ft1))
     );
-    assert_eq!(user2_fees.get(&launched_asset_id).cloned(), Some(U128(0)));
+    // The receiver converts its fees to the quote asset, so it has no balance in the launched
+    // asset
+    assert_eq!(user2_fees.get(&launched_asset_id).cloned(), None);
+    // The quote token is neither NEAR nor stable, so the protocol keeps its fees in the asset
+    // each swap pays them in
     assert_eq!(
         protocol_fees.get(&quote_asset_id).cloned(),
-        Some(U128(buy_protocol_fee_ft1 + sell_protocol_fee_ft1))
+        Some(U128(buy_protocol_fee_ft1))
     );
     assert_eq!(
         protocol_fees.get(&launched_asset_id).cloned(),
-        Some(U128(0))
+        Some(U128(sell_protocol_fee_token))
     );
 }
 
@@ -3984,9 +4075,7 @@ async fn test_xyk_launch_pool_restrictions() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -4110,6 +4199,13 @@ async fn test_xyk_launch_pool_community_fees() {
     };
     let community_balance_before = community_account.view_account().await.unwrap().balance;
     let community_account_id = community_account.id().clone();
+    // A community is an account whose fees anyone can claim, which takes them in NEAR, the quote
+    // asset, like launch pools did
+    let community_receiver = FeeReceiver::Account {
+        account_id: community_account_id.clone(),
+        payout_type: FeePayoutType::ConvertToFirstAsset,
+        claim_mode: ClaimMode::Anyone,
+    };
 
     let result = deployer
         .call(dex_engine_contract.id(), "deposit_near")
@@ -4147,12 +4243,7 @@ async fn test_xyk_launch_pool_community_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(
-                                    FeeReceiver::Community(community_account_id.clone()),
-                                    fee_fraction,
-                                )],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(community_receiver.clone(), FeeAmount::Fixed(fee_fraction))] },
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: U128(phantom_liquidity_near),
                             },
@@ -4189,35 +4280,39 @@ async fn test_xyk_launch_pool_community_fees() {
     for pool in &updated_pools {
         assert!(matches!(
             pool,
-            PoolView::LaunchV2 {
-                fee_configuration: FeeConfiguration::V1(CurrentFees { receivers }),
+            PoolView::Launch {
+                fee_configuration: FeeConfigurationV2 { receivers },
                 ..
-            } if matches!(
-                &receivers[0].0,
-                FeeReceiver::Community(account_id) if *account_id == community_account_id
-            )
+            } if receivers[0].0 == community_receiver
         ));
     }
     match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap()
     {
-        PoolView::LaunchV2 {
-            fee_configuration: FeeConfiguration::V1(CurrentFees { receivers }),
+        PoolView::Launch {
+            fee_configuration: FeeConfigurationV2 { receivers },
             ..
         } => {
-            assert!(matches!(
-                &receivers[..],
-                [(FeeReceiver::Community(account_id), fraction)]
-                    if *account_id == community_account_id && *fraction == fee_fraction
-            ));
+            assert_eq!(
+                receivers,
+                vec![(community_receiver.clone(), FeeAmount::Fixed(fee_fraction))]
+            );
         }
-        _ => panic!("Expected launch pool with V1 fee configuration"),
+        _ => panic!("Expected launch pool"),
     }
 
+    let claimable_community_fees = || {
+        get_claimable_fees(
+            &dex_engine_contract,
+            &dex_id,
+            &community_account_id,
+            vec![AssetId::Near, AssetId::Nep141(ft2.id().clone())],
+        )
+    };
     assert_eq!(
-        get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
-        NearToken::from_yoctonear(0)
+        claimable_community_fees().await,
+        HashMap::from([(AssetId::Near, U128(0))])
     );
 
     let result = user1
@@ -4278,14 +4373,14 @@ async fn test_xyk_launch_pool_community_fees() {
         .collect::<Vec<_>>();
     assert_eq!(swap_fees.len(), 1);
     assert!(swap_fees[0].contains(&(
-        FeeReceiver::Community(community_account_id.clone()),
+        community_receiver.clone(),
         AssetId::Near,
         U128(buy_community_fee_near),
     )));
 
     assert_eq!(
-        get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
-        NearToken::from_yoctonear(buy_community_fee_near)
+        claimable_community_fees().await,
+        HashMap::from([(AssetId::Near, U128(buy_community_fee_near))])
     );
 
     let sell_community_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
@@ -4333,8 +4428,8 @@ async fn test_xyk_launch_pool_community_fees() {
     assert_success(&result).unwrap();
 
     assert_eq!(
-        get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
-        NearToken::from_yoctonear(expected_community_fee_near)
+        claimable_community_fees().await,
+        HashMap::from([(AssetId::Near, U128(expected_community_fee_near))])
     );
     // Community fees are not tracked as regular user fees
     let community_account_pending_fees = get_pending_fees(
@@ -4355,22 +4450,24 @@ async fn test_xyk_launch_pool_community_fees() {
         None
     );
 
-    // Anyone can trigger the withdrawal, and it goes to the community account
-    let result = user3
-        .call(dex_engine_contract.id(), "dex_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "dex_id": dex_id.clone(),
-            "method": "withdraw_community_fee",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&WithdrawCommunityFeeArgs {
-                account_id: community_account_id.clone(),
-            }).unwrap()),
-            "attached_assets": {},
-        }))
-        .transact()
-        .await
-        .unwrap();
+    // Anyone can claim the fees, which go to the community account
+    let claim_community_fees = || {
+        user3
+            .call(dex_engine_contract.id(), "dex_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "dex_id": dex_id.clone(),
+                "method": "claim_fees_anyone",
+                "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&ClaimFeesArgs {
+                    account_id: community_account_id.clone(),
+                    asset_ids: vec![AssetId::Near],
+                }).unwrap()),
+                "attached_assets": {},
+            }))
+            .transact()
+    };
+    let result = claim_community_fees().await.unwrap();
     assert_success(&result).unwrap();
 
     assert_near_balance(
@@ -4390,26 +4487,12 @@ async fn test_xyk_launch_pool_community_fees() {
     .await
     .unwrap();
     assert_eq!(
-        get_community_owned_fees(&dex_engine_contract, &dex_id, &community_account_id).await,
-        NearToken::from_yoctonear(0)
+        claimable_community_fees().await,
+        HashMap::from([(AssetId::Near, U128(0))])
     );
 
     // Claiming again doesn't pay out anything more
-    let result = user3
-        .call(dex_engine_contract.id(), "dex_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "dex_id": dex_id.clone(),
-            "method": "withdraw_community_fee",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&WithdrawCommunityFeeArgs {
-                account_id: community_account_id.clone(),
-            }).unwrap()),
-            "attached_assets": {},
-        }))
-        .transact()
-        .await
-        .unwrap();
+    let result = claim_community_fees().await.unwrap();
     assert_success(&result).unwrap();
 
     assert_near_balance(
@@ -4430,11 +4513,13 @@ async fn test_xyk_launch_pool_community_fees() {
     .unwrap();
 }
 
+/// Outside launch pools too, a community is an account whose fees anyone can claim
 #[tokio::test]
-async fn test_xyk_community_fee_restrictions() {
+async fn test_xyk_community_receiver_outside_launch_pools() {
     let initial_near_deposit = NearToken::from_near(20);
     let storage_deposit_for_pool = NearToken::from_millinear(50);
     let fee_fraction = 10_000u32; // 1%
+    let first_pool_id = 0u32;
 
     let wasms = get_compiled_wasms().await;
 
@@ -4472,64 +4557,93 @@ async fn test_xyk_community_fee_restrictions() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    for pool_type in [PoolType::PrivateLatest, PoolType::PublicLatest] {
-        let create_pool_result = deployer
-            .call(dex_engine_contract.id(), "execute_operations")
-            .max_gas()
-            .deposit(NearToken::from_yoctonear(1))
-            .args_json(json!({
-                "operations": vec![
-                    Operation::DexCall {
-                        dex_id: dex_id.clone(),
-                        method: "create_pool".to_string(),
-                        args: Base64VecU8(
-                            near_sdk::borsh::to_vec(&CreatePoolArgs {
-                                assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                                fees: FeeConfiguration::V1(CurrentFees {
-                                    receivers: vec![(
-                                        FeeReceiver::Community(user2.id().clone()),
-                                        fee_fraction,
-                                    )],
-                                }),
-                                pool_type,
-                                initial_liquidity: None,
-                            })
-                            .unwrap(),
-                        ),
-                        attached_assets: HashMap::from_iter([(
-                            AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
-                        )]),
-                    },
-                ],
-            }))
-            .transact()
-            .await
-            .unwrap();
-        assert!(!create_pool_result.is_success());
-    }
+    let result = deployer
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::Anyone }, FeeAmount::Fixed(fee_fraction))] },
+                            pool_type: PoolType::PrivateLatest,
+                            initial_liquidity: None,
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        U128(storage_deposit_for_pool.as_yoctonear()),
+                    )]),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
 
-    let withdraw_unregistered_result = user1
+    match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
+        .await
+        .unwrap()
+    {
+        PoolView::Private {
+            fee_configuration: FeeConfigurationV2 { receivers },
+            ..
+        } => {
+            assert_eq!(
+                receivers,
+                vec![(
+                    FeeReceiver::Account {
+                        account_id: user2.id().clone(),
+                        payout_type: FeePayoutType::KeepBoth,
+                        claim_mode: ClaimMode::Anyone,
+                    },
+                    FeeAmount::Fixed(fee_fraction)
+                )]
+            );
+        }
+        _ => panic!("Expected private pool with V1 fee configuration"),
+    }
+    assert_eq!(
+        get_claimable_fees(
+            &dex_engine_contract,
+            &dex_id,
+            user2.id(),
+            vec![
+                AssetId::Nep141(ft1.id().clone()),
+                AssetId::Nep141(ft2.id().clone())
+            ],
+        )
+        .await,
+        HashMap::from([
+            (AssetId::Nep141(ft1.id().clone()), U128(0)),
+            (AssetId::Nep141(ft2.id().clone()), U128(0)),
+        ])
+    );
+
+    // The pool has no NEAR, so the account has no NEAR fees to claim
+    let claim_unregistered_result = user1
         .call(dex_engine_contract.id(), "dex_call")
         .max_gas()
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "method": "withdraw_community_fee",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&WithdrawCommunityFeeArgs {
+            "method": "claim_fees_anyone",
+            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&ClaimFeesArgs {
                 account_id: user2.id().clone(),
+                asset_ids: vec![AssetId::Near],
             }).unwrap()),
             "attached_assets": {},
         }))
         .transact()
         .await
         .unwrap();
-    assert!(!withdraw_unregistered_result.is_success());
-
-    assert_eq!(
-        get_community_owned_fees(&dex_engine_contract, &dex_id, user2.id()).await,
-        NearToken::from_yoctonear(0)
-    );
+    assert!(!claim_unregistered_result.is_success());
 }
 
 async fn create_migrator(sandbox: &Worker<Sandbox>, dex_engine_contract: &Contract) -> Account {
@@ -4828,12 +4942,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (ft1_asset_id.clone(), ft2_asset_id.clone()),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(
-                                    FeeReceiver::Account(user2.id().clone()),
-                                    fee_fraction,
-                                )],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -5403,9 +5512,7 @@ async fn test_xyk_route_fee_discount() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: assets.clone(),
-                            fees: FeeConfiguration::V1(CurrentFees {
-                                receivers: vec![(FeeReceiver::Account(user2.id().clone()), 10_000)],
-                            }),
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(10_000))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: Some((U128(liquidity), U128(liquidity))),
                         })

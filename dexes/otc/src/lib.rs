@@ -647,20 +647,22 @@ impl OtcDex {
             .used_expirable_nonces_block_height
             .get_mut(&trade_intent.user_id)
             && let Some((block_height, nonce)) = map.keys().next().copied()
-                && block_height < near_sdk::env::block_height() {
-                    map.remove(&(block_height, nonce));
-                    self.used_nonces
-                        .remove(&(trade_intent.user_id.clone(), nonce));
-                }
+            && block_height < near_sdk::env::block_height()
+        {
+            map.remove(&(block_height, nonce));
+            self.used_nonces
+                .remove(&(trade_intent.user_id.clone(), nonce));
+        }
         if let Some(map) = self
             .used_expirable_nonces_timestamp_millis
             .get_mut(&trade_intent.user_id)
             && let Some((timestamp_millis, nonce)) = map.keys().next().copied()
-                && timestamp_millis.0 < near_sdk::env::block_timestamp_ms() {
-                    map.remove(&(timestamp_millis, nonce));
-                    self.used_nonces
-                        .remove(&(trade_intent.user_id.clone(), nonce));
-                }
+            && timestamp_millis.0 < near_sdk::env::block_timestamp_ms()
+        {
+            map.remove(&(timestamp_millis, nonce));
+            self.used_nonces
+                .remove(&(trade_intent.user_id.clone(), nonce));
+        }
 
         // mark nonce as used
         if let AuthorizationMethod::Signature { nonce, .. } =

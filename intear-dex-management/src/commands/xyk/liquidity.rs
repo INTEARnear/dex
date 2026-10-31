@@ -172,10 +172,7 @@ fn positions(
                     });
                 }
             }
-            PoolView::Private { .. }
-            | PoolView::Public { .. }
-            | PoolView::Launch { .. }
-            | PoolView::LaunchV2 { .. } => {}
+            PoolView::Private { .. } | PoolView::Public { .. } | PoolView::Launch { .. } => {}
         }
     }
     Ok(positions)
@@ -409,7 +406,7 @@ impl AddMaxSlippageContext {
                 let mut operations = Vec::new();
                 let mut storage_near = near_sdk::NearToken::from_yoctonear(0);
                 match &pool.pool {
-                    PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => {
+                    PoolView::Launch { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,
@@ -456,12 +453,26 @@ impl AddMaxSlippageContext {
                         .flatten()
                         .is_some();
                         if !is_registered {
+                            // Providers that take their fees out start keeping
+                            // them, in fee balances of both assets
+                            let [(asset_id_0, _), (asset_id_1, _)] = &pool.assets;
+                            let registration_bytes = xyk_storage::liquidity_registration_bytes(
+                                &dex_id,
+                                &signer_id,
+                                preflight.protocol_limits.extra_bytes_per_record,
+                            )?
+                            .checked_add(super::new_fee_balances_bytes(
+                                preflight,
+                                &dex_id,
+                                &[super::FeeBalances {
+                                    kind: super::FeeBalanceKind::CollectedByOwner,
+                                    account_id: signer_id.clone(),
+                                    asset_ids: vec![asset_id_0.clone(), asset_id_1.clone()],
+                                }],
+                            )?)
+                            .ok_or_else(|| color_eyre::eyre::eyre!("Storage size overflow"))?;
                             storage_near = storage::storage_cost(
-                                xyk_storage::liquidity_registration_bytes(
-                                    &dex_id,
-                                    &signer_id,
-                                    preflight.protocol_limits.extra_bytes_per_record,
-                                )?,
+                                registration_bytes,
                                 preflight.protocol_limits.storage_byte_cost,
                             )?;
                             let registration_calls = preflight.registration_calls(
@@ -687,7 +698,7 @@ impl RemoveMaxSlippageContext {
                 let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
                 let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
                 let (shares, removal_label, removed) = match &pool.pool {
-                    PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => {
+                    PoolView::Launch { .. } => {
                         return Err(PreflightError::PoolKindNotSupported {
                             dex_id: dex_id.clone(),
                             pool_id,

@@ -2306,11 +2306,11 @@ dependencies = [
 name = "intear-dex"
 version = "0.1.0"
 dependencies = [
- "intear-dex-test-support",
  "intear-dex-types",
  "lz4_flex",
  "near-contract-standards",
  "near-crypto 0.34.7",
+ "near-sandbox",
  "near-sdk",
  "near-workspaces",
  "otc-dex-types",
@@ -2348,15 +2348,6 @@ dependencies = [
  "tracing",
  "tracing-indicatif",
  "xyk-dex-types",
-]
-
-[[package]]
-name = "intear-dex-test-support"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

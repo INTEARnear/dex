@@ -5,7 +5,9 @@ use near_primitives::types::AccountId;
 use near_sdk::NearToken;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
-use xyk_dex_types::{PoolId, PoolView};
+use xyk_dex_types::{
+    AssetIndex, ClaimMode, FeeConfigurationV2, FeeReceiver, PoolAssets, PoolId, PoolView,
+};
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::deployment::{DEFAULT_XYK_DEX_DEPLOYER, DEFAULT_XYK_DEX_NAME};
@@ -75,9 +77,9 @@ pub enum XykAction {
     /// List or count pools
     Pools(self::pools::PoolsCommands),
     #[strum_discriminants(strum(
-        message = "pool            - One pool in detail, or change it: upgrade, lock, edit-fees"
+        message = "pool            - One pool in detail, or change it: lock, edit-fees"
     ))]
-    /// One pool in detail, or change it: upgrade, lock, edit-fees
+    /// One pool in detail, or change it: lock, edit-fees
     Pool(self::pool::PoolCommands),
     #[strum_discriminants(strum(message = "liquidity       - Show, add or remove liquidity"))]
     /// Show, add or remove liquidity
@@ -88,9 +90,9 @@ pub enum XykAction {
     /// Fees an account collected: pending or withdraw
     Fees(self::fees::FeesCommands),
     #[strum_discriminants(strum(
-        message = "community-fees  - NEAR that launch pools collected for community accounts"
+        message = "community-fees  - Fees that anyone can claim for community accounts"
     ))]
-    /// NEAR that launch pools collected for community accounts
+    /// Fees that anyone can claim for community accounts
     CommunityFees(self::community_fees::CommunityFeesCommands),
     #[strum_discriminants(strum(
         message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"
@@ -246,24 +248,96 @@ pub fn all_pool_asset_ids(
     Ok(asset_ids)
 }
 
-/// What starting fee balances in a pool's two assets stores for the
-/// accounts among `account_ids` that have none yet
+/// Who can move the fees of an account's balances out of the dex
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FeeBalanceKind {
+    /// Fees that only the account withdraws
+    CollectedByOwner,
+    /// Fees that anyone can claim for the account
+    ClaimableByAnyone,
+}
+
+/// The fee balances that an account starts in some assets
+pub struct FeeBalances {
+    pub kind: FeeBalanceKind,
+    pub account_id: AccountId,
+    pub asset_ids: Vec<AssetId>,
+}
+
+/// The account receivers of `fees`, each with the assets of the pool that
+/// its payout takes fees in, which the pool starts fee balances in
+pub fn receiver_fee_balances(
+    fees: &FeeConfigurationV2,
+    now_nanoseconds: u64,
+    pool_asset_ids: PoolAssets<&AssetId>,
+) -> Vec<FeeBalances> {
+    let mut fee_balances: Vec<FeeBalances> = Vec::new();
+    for (receiver, _) in fees.receivers_at(now_nanoseconds) {
+        let (kind, account_id, payout_type) = match receiver {
+            FeeReceiver::Account {
+                account_id,
+                payout_type,
+                claim_mode: ClaimMode::OnlyOwner,
+            } => (FeeBalanceKind::CollectedByOwner, account_id, payout_type),
+            FeeReceiver::Account {
+                account_id,
+                payout_type,
+                claim_mode: ClaimMode::Anyone,
+            } => (FeeBalanceKind::ClaimableByAnyone, account_id, payout_type),
+            // The protocol starts fee balances in both assets of every pool
+            FeeReceiver::Pool | FeeReceiver::Protocol => continue,
+        };
+        if fee_balances.iter().any(|listed_fee_balances| {
+            listed_fee_balances.kind == kind && listed_fee_balances.account_id == account_id
+        }) {
+            continue;
+        }
+        let mut asset_ids: Vec<AssetId> = Vec::new();
+        for fee_asset_index in AssetIndex::BOTH {
+            let asset_id = pool_asset_ids[payout_type.asset_index(fee_asset_index)];
+            if !asset_ids.contains(asset_id) {
+                asset_ids.push(asset_id.clone());
+            }
+        }
+        fee_balances.push(FeeBalances {
+            kind,
+            account_id,
+            asset_ids,
+        });
+    }
+    fee_balances
+}
+
+/// What starting `fee_balances` stores for the ones that don't exist yet
 pub fn new_fee_balances_bytes(
     preflight: &Preflight,
     dex_id: &DexId,
-    account_ids: &[AccountId],
-    asset_ids: (&AssetId, &AssetId),
+    fee_balances: &[FeeBalances],
 ) -> color_eyre::eyre::Result<u64> {
     let mut total_bytes = 0u64;
-    for account_id in account_ids {
-        let existing_fee_balances = crate::chain::xyk::pending_fees(
-            &preflight.network_config,
-            &preflight.block_reference,
-            dex_id,
-            account_id,
-            vec![asset_ids.0.clone(), asset_ids.1.clone()],
-        )?;
-        for asset_id in [asset_ids.0, asset_ids.1] {
+    for FeeBalances {
+        kind,
+        account_id,
+        asset_ids,
+    } in fee_balances
+    {
+        let existing_fee_balances = match kind {
+            FeeBalanceKind::CollectedByOwner => crate::chain::xyk::pending_fees(
+                &preflight.network_config,
+                &preflight.block_reference,
+                dex_id,
+                account_id,
+                asset_ids.clone(),
+            )?,
+            FeeBalanceKind::ClaimableByAnyone => crate::chain::xyk::claimable_fees(
+                &preflight.network_config,
+                &preflight.block_reference,
+                dex_id,
+                account_id,
+                asset_ids.clone(),
+            )?,
+        };
+        for asset_id in asset_ids {
             if !existing_fee_balances.contains_key(asset_id) {
                 total_bytes = total_bytes
                     .checked_add(xyk_storage::fee_balance_bytes(

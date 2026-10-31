@@ -1,6 +1,6 @@
 use color_eyre::Section;
 use color_eyre::eyre::eyre;
-use intear_dex_types::DexId;
+use intear_dex_types::{CAN_PAUSE, DexId};
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
@@ -14,12 +14,11 @@ use super::XykContext;
 use crate::chain::engine;
 use crate::chain::xyk::{self, XykState};
 use crate::commands::dex_code;
+use crate::commands::engine::pause;
 use crate::deployment::{DEFAULT_XYK_DEX_NAME, ENGINE_ACCOUNT_ID};
 use crate::errors::PreflightError;
 use crate::outcome::{ExpectedDeployment, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
-
-const MIGRATE_GAS: Gas = Gas::from_teragas(50);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = XykContext)]
@@ -187,7 +186,6 @@ pub struct DeployContext {
     global_context: crate::GlobalContext,
     dex_id: DexId,
     migrates: bool,
-    migrate_args: Vec<u8>,
 }
 
 impl DeployContext {
@@ -200,16 +198,10 @@ impl DeployContext {
             &scope.signer_account_id,
             scope.name.as_deref(),
         )?;
-        let migrate_args = if scope.migrate {
-            near_sdk::borsh::to_vec(&MigrateArgs)?
-        } else {
-            Vec::new()
-        };
         Ok(Self {
             global_context: previous_context.global_context,
             dex_id,
             migrates: scope.migrate,
-            migrate_args,
         })
     }
 }
@@ -306,19 +298,23 @@ fn deploy_action_context(
         global_context,
         dex_id,
         migrates,
-        migrate_args,
     } = deploy_context;
     let signer_id: AccountId = dex_id.deployer.clone();
     planning::write_action_context(&global_context, signer_id, move |preflight| {
-        preflight.ensure_engine_not_paused()?;
-        // Initializing stores the state, and migrating drops the map of
-        // referral settings from it, so it only frees storage
+        // A migration needs the engine paused, so that the state it's planned from doesn't
+        // change before it runs
+        if !migrates {
+            preflight.ensure_engine_not_paused()?;
+        }
+        // Initializing tops up for the state itself, and an upgrade tops up for
+        // all of the new code while the old code's storage gets freed, which
+        // covers what the migration adds: under 100 KB for mainnet's dex
         let dex_code::CodeDeployment {
             is_upgrade,
             code_hash,
             code_label,
-            mut steps,
-            mut function_calls,
+            steps: deployment_steps,
+            function_calls: deployment_calls,
         } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0)?;
         let init_command = shell_words::join([
             "near",
@@ -331,9 +327,35 @@ fn deploy_action_context(
             "network-config",
             &preflight.connection_name,
         ]);
+        let migrating_deploy_command = {
+            let mut command = vec![
+                "near".to_string(),
+                "intear-dex-management".to_string(),
+                "xyk".to_string(),
+                "deploy".to_string(),
+                preflight.signer_id.to_string(),
+                "--name".to_string(),
+                dex_id.id.clone(),
+                "--migrate".to_string(),
+            ];
+            command.extend(code_source_args.iter().cloned());
+            command.extend([
+                "network-config".to_string(),
+                preflight.connection_name.clone(),
+            ]);
+            shell_words::join(command)
+        };
+        let mut steps = Vec::new();
+        let mut function_calls = Vec::new();
         if migrates {
             if preflight.signer_id != CAN_MIGRATE {
                 return Err(PreflightError::NotAllowedToMigrate {
+                    signer_id: preflight.signer_id.clone(),
+                }
+                .into_report());
+            }
+            if !CAN_PAUSE.contains(&preflight.signer_id.as_str()) {
+                return Err(PreflightError::NotAllowedToPause {
                     signer_id: preflight.signer_id.clone(),
                 }
                 .into_report());
@@ -354,20 +376,65 @@ fn deploy_action_context(
                 }
                 .into_report());
             }
+            if !preflight.engine_paused {
+                return Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps: vec![format!(
+                        "Pause {ENGINE_ACCOUNT_ID}, so that the state of {dex_id} doesn't change between the next run, which reads it, and the migration it plans: deposits, withdrawals, swaps and dex calls stop until then"
+                    )],
+                    function_calls: vec![pause::pause_function_call(true)],
+                    expected_outcome: ExpectedOutcome {
+                        action_name: "pause",
+                        success_message: format!(
+                            "Paused {ENGINE_ACCOUNT_ID}. Next, deploy and migrate, which unpauses it in the same receipt: {migrating_deploy_command}"
+                        ),
+                        transfer_call: None,
+                        dex_id: None,
+                        deployment: None,
+                    },
+                });
+            }
             steps.push(format!(
-                "Migrate the state of {dex_id} to the new code's layout in the same receipt; if the migration fails, the deploy is reverted too"
+                "Unpause {ENGINE_ACCOUNT_ID} in the same receipt as the migration, so that nothing changes the state of {dex_id} before it; if the migration fails, it stays paused"
             ));
+            function_calls.push(pause::pause_function_call(false));
+        }
+        steps.extend(deployment_steps);
+        function_calls.extend(deployment_calls);
+        if migrates {
+            let providers = xyk::providers_from_before_migration(
+                &preflight.network_config,
+                &preflight.block_reference,
+                &dex_id,
+            )?;
+            let provider_count: usize = providers.values().map(Vec::len).sum();
+            steps.push(format!(
+                "Migrate the state of {dex_id} to the new code's layout in the same receipt, with the gas the rest of the transaction leaves: upgrade every pool, and give positions to the {provider_count} liquidity providers of {} public pools; if the migration fails, the deploy is reverted too",
+                providers.len()
+            ));
+            let other_calls_gas = function_calls
+                .iter()
+                .try_fold(Gas::from_gas(0), |total, call: &FunctionCall| {
+                    total.checked_add(call.gas)
+                })
+                .ok_or_else(|| eyre!("Gas overflow"))?;
             function_calls.push(FunctionCall {
                 method_name: "dex_call",
                 args: json!({
                     "dex_id": dex_id,
                     "method": "migrate",
-                    "args": Base64VecU8(migrate_args.clone()),
+                    "args": Base64VecU8(near_sdk::borsh::to_vec(&MigrateArgs {
+                        providers: providers.into_iter().collect(),
+                    })?),
                     "attached_assets": {},
                     "referrer": null,
                 }),
                 deposit: ONE_YOCTO_NEAR,
-                gas: MIGRATE_GAS,
+                gas: preflight
+                    .protocol_limits
+                    .max_prepaid_gas
+                    .checked_sub(other_calls_gas)
+                    .ok_or_else(|| eyre!("The deploy takes all of a transaction's gas"))?,
             });
         } else if is_upgrade {
             steps.push(
@@ -375,24 +442,6 @@ fn deploy_action_context(
                     .to_string(),
             );
         }
-        let migrating_redeploy_command = (is_upgrade && !migrates).then(|| {
-            let mut command = vec![
-                "near".to_string(),
-                "intear-dex-management".to_string(),
-                "xyk".to_string(),
-                "deploy".to_string(),
-                preflight.signer_id.to_string(),
-                "--name".to_string(),
-                dex_id.id.clone(),
-                "--migrate".to_string(),
-            ];
-            command.extend(code_source_args.iter().cloned());
-            command.extend([
-                "network-config".to_string(),
-                preflight.connection_name.clone(),
-            ]);
-            shell_words::join(command)
-        });
         Ok(TransactionPlan {
             receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
             steps,
@@ -400,7 +449,9 @@ fn deploy_action_context(
             expected_outcome: ExpectedOutcome {
                 action_name: "deploy",
                 success_message: if migrates {
-                    format!("Deployed {code_label} to {dex_id} and migrated its state")
+                    format!(
+                        "Deployed {code_label} to {dex_id}, migrated its state, and unpaused {ENGINE_ACCOUNT_ID}"
+                    )
                 } else {
                     format!("Deployed {code_label} to {dex_id}")
                 },
@@ -411,7 +462,8 @@ fn deploy_action_context(
                     code_hash,
                     next_step: (!is_upgrade)
                         .then(|| format!("Next, initialize it: {init_command}")),
-                    migrating_redeploy_command,
+                    migrating_redeploy_command: (is_upgrade && !migrates)
+                        .then_some(migrating_deploy_command),
                 }),
             },
         })

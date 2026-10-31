@@ -6,17 +6,20 @@ use near_sdk::NearToken;
 use near_sdk::json_types::U128;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
-use xyk_dex_types::{CreatePoolArgs, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolType};
+use xyk_dex_types::{
+    CreatePoolArgs, FeePayoutType, PROTOCOL_FEE_RECEIVER_ID, PoolAssets, PoolType,
+};
 
 use super::XykContext;
 use super::presentation::format_fee_configuration;
+use super::{FeeBalanceKind, FeeBalances};
 use crate::chain::asset_metadata::AssetMetadataCache;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display;
 use crate::errors::{self, PreflightError};
 use crate::inputs::amount::AmountArg;
 use crate::inputs::asset_ids::AssetIdArg;
-use crate::inputs::fees::FeesArg;
+use crate::inputs::fees::{FeesArg, PayoutsArg};
 use crate::outcome::ExpectedOutcome;
 use crate::planning::xyk_storage::{self, NewPoolKind};
 use crate::planning::{self, FunctionCall, TransactionPlan, format_near, storage};
@@ -374,6 +377,10 @@ pub struct PoolFees {
     #[interactive_clap(skip_default_input_arg)]
     /// The fees, e.g. 'alice.near=0.25%,pool=0.05%', a schedule like 'community:dao.near=1%..0.3%@now..now+7d', or none
     fees: FeesArg,
+    #[interactive_clap(long)]
+    #[interactive_clap(skip_interactive_input)]
+    /// How fee receivers take their fees, e.g. 'alice.near=keep,community:dao.near=near' (default: keep, or the quote asset in launch pools)
+    payouts: Option<PayoutsArg>,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
@@ -412,6 +419,7 @@ impl PoolFeesContext {
             new_pool,
         } = previous_context;
         let fees = scope.fees.clone();
+        let payouts = scope.payouts.clone();
         Ok(Self(planning::write_action_context(
             &global_context,
             signer_id,
@@ -536,16 +544,19 @@ impl PoolFeesContext {
                 );
                 let now = preflight.block_timestamp_nanoseconds;
                 let fee_configuration = fees
-                    .fee_configuration(now)
+                    .fee_configuration(
+                        now,
+                        payouts.as_ref(),
+                        [&assets.0, &assets.1],
+                        FeePayoutType::KeepBoth,
+                    )
                     .map_err(|problem| PreflightError::FeesNotAllowed { problem }.into_report())?;
-                fee_configuration
-                    .validate(&pool_type, now)
-                    .map_err(|error| {
-                        PreflightError::FeesNotAllowed {
-                            problem: errors::fee_configuration_problem(error),
-                        }
-                        .into_report()
-                    })?;
+                fee_configuration.validate(now).map_err(|error| {
+                    PreflightError::FeesNotAllowed {
+                        problem: errors::fee_configuration_problem(error),
+                    }
+                    .into_report()
+                })?;
 
                 let extra_bytes_per_record = preflight.protocol_limits.extra_bytes_per_record;
                 let mut storage_bytes = vec![xyk_storage::new_pool_bytes(
@@ -556,25 +567,26 @@ impl PoolFeesContext {
                     extra_bytes_per_record,
                 )?];
                 // The pool starts a fee balance in both assets for the
-                // protocol and every account receiver that has none yet
-                let mut fee_accounts = vec![PROTOCOL_FEE_RECEIVER_ID.to_owned()];
-                let mut community_accounts: Vec<AccountId> = Vec::new();
-                for (receiver, _) in fee_configuration.receivers_at(now) {
-                    match receiver {
-                        FeeReceiver::Account(account_id) => {
-                            if !fee_accounts.contains(&account_id) {
-                                fee_accounts.push(account_id);
-                            }
-                        }
-                        // Whether a community account has a balance can't
-                        // be read, so it's counted as new
-                        FeeReceiver::Community(account_id) => {
-                            if !community_accounts.contains(&account_id) {
-                                community_accounts.push(account_id);
-                            }
-                        }
-                        FeeReceiver::Pool => {}
-                    }
+                // protocol, and in the assets that their payouts take fees in
+                // for every account receiver that has none yet
+                let mut fee_balances = vec![FeeBalances {
+                    kind: FeeBalanceKind::CollectedByOwner,
+                    account_id: PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+                    asset_ids: vec![assets.0.clone(), assets.1.clone()],
+                }];
+                fee_balances.extend(super::receiver_fee_balances(
+                    &fee_configuration,
+                    now,
+                    PoolAssets([&assets.0, &assets.1]),
+                ));
+                // The creator of a public pool takes its part of the pool
+                // fees out, and keeps them until it chooses another payout
+                if matches!(pool_type, PoolType::PublicLatest) {
+                    fee_balances.push(FeeBalances {
+                        kind: FeeBalanceKind::CollectedByOwner,
+                        account_id: signer_id.clone(),
+                        asset_ids: vec![assets.0.clone(), assets.1.clone()],
+                    });
                 }
                 if initial_liquidity.is_some() && matches!(pool_type, PoolType::PublicLatest) {
                     storage_bytes.push(xyk_storage::first_liquidity_shares_bytes(
@@ -586,16 +598,8 @@ impl PoolFeesContext {
                 storage_bytes.push(super::new_fee_balances_bytes(
                     preflight,
                     &dex_id,
-                    &fee_accounts,
-                    (&assets.0, &assets.1),
+                    &fee_balances,
                 )?);
-                for account_id in &community_accounts {
-                    storage_bytes.push(xyk_storage::community_fee_balance_bytes(
-                        &dex_id,
-                        account_id,
-                        extra_bytes_per_record,
-                    )?);
-                }
                 let total_storage_bytes = storage_bytes
                     .iter()
                     .try_fold(0u64, |total, bytes| total.checked_add(*bytes))
@@ -630,7 +634,7 @@ impl PoolFeesContext {
                 let mut function_calls = registration_calls.function_calls;
                 steps.push(format!(
                     "Create a {kind_label} {pair} pool on {dex_id} with fees {}, plus the protocol fee",
-                    format_fee_configuration(&fee_configuration)
+                    format_fee_configuration(&fee_configuration, [&assets.0, &assets.1])
                 ));
                 steps.extend(extra_steps);
                 steps.push(format!(

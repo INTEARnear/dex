@@ -136,12 +136,7 @@ fn pause_action_context(
         Ok(TransactionPlan {
             receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
             steps: vec![step],
-            function_calls: vec![FunctionCall {
-                method_name,
-                args: json!({}),
-                deposit: ONE_YOCTO_NEAR,
-                gas: PAUSE_GAS,
-            }],
+            function_calls: vec![pause_function_call(pause)],
             expected_outcome: ExpectedOutcome {
                 action_name: method_name,
                 success_message,
@@ -151,4 +146,14 @@ fn pause_action_context(
             },
         })
     })
+}
+
+/// The call that pauses or unpauses the engine
+pub fn pause_function_call(pause: bool) -> FunctionCall {
+    FunctionCall {
+        method_name: if pause { "pause" } else { "unpause" },
+        args: json!({}),
+        deposit: ONE_YOCTO_NEAR,
+        gas: PAUSE_GAS,
+    }
 }

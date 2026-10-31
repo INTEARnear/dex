@@ -1,6 +1,10 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-use std::{fmt, num::NonZeroU128};
+use std::{
+    fmt,
+    num::NonZeroU128,
+    ops::{Index, IndexMut},
+};
 
 use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount};
 use near_sdk::{
@@ -14,9 +18,13 @@ use near_sdk::{
     serde::Deserialize,
 };
 
+mod liquidity_fees;
 pub mod math;
 mod pool;
 
+pub use liquidity_fees::{
+    FEE_GROWTH_SCALE, FeeGrowth, LiquidityPosition, PayoutGroup, PayoutGroups,
+};
 pub use pool::Pool;
 
 pub type PoolId = u32;
@@ -36,17 +44,13 @@ pub type FeeFractionFraction = u32;
 pub const FULL_FEE_FRACTION_FRACTION: FeeFractionFraction = 1000000;
 
 pub type SharesBalance = NonZeroU128;
+/// Shares of a public pool's liquidity, like a [`SharesBalance`], but can be zero
+pub type Shares = u128;
 pub const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
 
-pub const NEAR_ACCOUNT_ID: &AccountIdRef = AccountIdRef::new_or_panic("near");
-pub const PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS: &[&AccountIdRef] = &[
-    AccountIdRef::new_or_panic("omft.near"),
-    AccountIdRef::new_or_panic("omni.hot.tg"),
-];
-pub const PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS: &[&AccountIdRef] = &[
+pub const PROTOCOL_FEE_REDUCE_ASSETS_NEP141: &[&AccountIdRef] = &[
     AccountIdRef::new_or_panic("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"),
     AccountIdRef::new_or_panic("usdt.tether-token.near"),
-    NEAR_ACCOUNT_ID,
 ];
 pub const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 const _: () = assert!(
@@ -170,7 +174,11 @@ pub struct FeeDiscountSignaturePayload {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct MigrateArgs;
+pub struct MigrateArgs {
+    /// Every liquidity provider of the public pools, which stored only their shares and can't
+    /// be listed, by pool, in order of pool id
+    pub providers: Vec<(PoolId, Vec<AccountId>)>,
+}
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -183,7 +191,7 @@ pub struct SetFeeDiscountSignerArgs {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
-    pub fees: FeeConfiguration,
+    pub fees: FeeConfigurationV2,
     pub pool_type: PoolType,
     /// Amounts of `assets` to deposit as the first liquidity, taken from the
     /// attached assets. Required for public pools, so nobody else can set their
@@ -231,19 +239,13 @@ pub struct RemoveLiquidityResponse;
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct EditFeesArgs {
     pub pool_id: PoolId,
-    pub fees: FeeConfiguration,
+    pub fees: FeeConfigurationV2,
 }
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct WithdrawFeesArgs {
     pub assets: Vec<AssetId>,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct UpgradePoolArgs {
-    pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
@@ -260,8 +262,22 @@ pub struct RegisterFeeAssetsArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct WithdrawCommunityFeeArgs {
+pub struct ClaimFeesArgs {
     pub account_id: AccountId,
+    pub asset_ids: Vec<AssetId>,
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SetLiquidityFeePayoutArgs {
+    pub pool_id: PoolId,
+    pub payout_type: FeePayoutType,
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct CollectLiquidityFeesArgs {
+    pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
@@ -293,14 +309,24 @@ pub struct GetPendingFeesArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct PoolNeedsUpgradeArgs {
-    pub pool_id: PoolId,
+pub struct GetClaimableFeesArgs {
+    pub account_id: AccountId,
+    pub asset_ids: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct GetCommunityOwnedFeesArgs {
+pub struct GetLiquidityPositionArgs {
+    pub pool_id: PoolId,
     pub account_id: AccountId,
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct LiquidityPositionView {
+    pub payout_type: FeePayoutType,
+    pub uncollected_fees: (U128, U128),
 }
 
 #[near(serializers=[borsh])]
@@ -308,20 +334,31 @@ pub struct GetCommunityOwnedFeesArgs {
 pub enum PoolType {
     PrivateLatest,
     PublicLatest,
-    LaunchLatest {
-        phantom_liquidity: U128,
-    },
-    LaunchV1 {
-        phantom_liquidity_near: U128,
-    },
+    LaunchLatest { phantom_liquidity: U128 },
+    LaunchV1 { phantom_liquidity_near: U128 },
     PrivateV1,
     PublicV1,
     PrivateV2,
     PublicV2,
-    /// The first asset is the quote asset, which the phantom liquidity is in
-    LaunchV2 {
-        phantom_liquidity: U128,
-    },
+    LaunchV2 { phantom_liquidity: U128 },
+    PublicV3,
+}
+
+impl PoolType {
+    pub fn is_launch(&self) -> bool {
+        match self {
+            PoolType::LaunchLatest { .. }
+            | PoolType::LaunchV1 { .. }
+            | PoolType::LaunchV2 { .. } => true,
+            PoolType::PrivateLatest
+            | PoolType::PublicLatest
+            | PoolType::PrivateV1
+            | PoolType::PublicV1
+            | PoolType::PrivateV2
+            | PoolType::PublicV2
+            | PoolType::PublicV3 => false,
+        }
+    }
 }
 
 #[near(serializers=[borsh, json])]
@@ -331,28 +368,21 @@ pub enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
+        fee_configuration: FeeConfigurationV2,
         owner_id: AccountId,
         locked: bool,
     },
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
+        fee_configuration: FeeConfigurationV2,
         total_shares: Option<U128>,
     },
     Launch {
-        near_amount: U128,
-        launched_asset: AssetWithBalance,
-        fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
-        phantom_liquidity_near: U128,
-    },
-    LaunchV2 {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
-        fee_configuration: FeeConfiguration,
+        fee_configuration: FeeConfigurationV2,
         phantom_liquidity: U128,
     },
 }
@@ -368,15 +398,6 @@ pub struct AssetWithBalance {
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[serde(untagged)]
-pub enum FeeConfiguration {
-    V1(CurrentFees),
-    V2(V2FeeConfiguration),
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CurrentFees {
     pub receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
@@ -384,8 +405,94 @@ pub struct CurrentFees {
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct V2FeeConfiguration {
+pub struct FeeConfigurationV2 {
     pub receivers: Vec<(FeeReceiver, FeeAmount)>,
+}
+
+/// Who can claim an account's fees to the account
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum ClaimMode {
+    /// The account, which withdraws them to its balance on the engine with `withdraw_fees`
+    OnlyOwner,
+    /// Anyone, who sends them to the account's wallet with `claim_fees`. For accounts that
+    /// don't call the dex themselves, like a community's treasury, or fees that a smart
+    /// contract receives and distributes to holders. It doesn't check for storage
+    /// registrations and other prerequisites to receiving a transfer. Not recomended for
+    /// normal LP providers.
+    Anyone,
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum FeePayoutType {
+    KeepBoth,
+    ConvertToFirstAsset,
+    ConvertToSecondAsset,
+}
+
+impl FeePayoutType {
+    pub const ALL: [FeePayoutType; 3] = [
+        FeePayoutType::KeepBoth,
+        FeePayoutType::ConvertToFirstAsset,
+        FeePayoutType::ConvertToSecondAsset,
+    ];
+
+    /// Which asset of the pool the payout takes a fee paid in `fee_asset_index` in
+    pub fn asset_index(self, fee_asset_index: AssetIndex) -> AssetIndex {
+        match self {
+            FeePayoutType::KeepBoth => fee_asset_index,
+            FeePayoutType::ConvertToFirstAsset => AssetIndex::First,
+            FeePayoutType::ConvertToSecondAsset => AssetIndex::Second,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum AssetIndex {
+    First,
+    Second,
+}
+
+impl AssetIndex {
+    pub const BOTH: [AssetIndex; 2] = [AssetIndex::First, AssetIndex::Second];
+}
+
+/// Something of each asset of a pool, in the order of its assets
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct PoolAssets<T>(pub [T; 2]);
+
+impl<T> PoolAssets<T> {
+    pub fn each_ref(&self) -> PoolAssets<&T> {
+        PoolAssets(self.0.each_ref())
+    }
+}
+
+impl<T> Index<AssetIndex> for PoolAssets<T> {
+    type Output = T;
+
+    fn index(&self, asset_index: AssetIndex) -> &T {
+        let [first, second] = &self.0;
+        match asset_index {
+            AssetIndex::First => first,
+            AssetIndex::Second => second,
+        }
+    }
+}
+
+impl<T> IndexMut<AssetIndex> for PoolAssets<T> {
+    fn index_mut(&mut self, asset_index: AssetIndex) -> &mut T {
+        let [first, second] = &mut self.0;
+        match asset_index {
+            AssetIndex::First => first,
+            AssetIndex::Second => second,
+        }
+    }
 }
 
 #[near(serializers=[borsh, json])]
@@ -411,13 +518,140 @@ pub enum ScheduledFeeCurve {
     Linear,
 }
 
-#[near(serializers=[borsh, json])]
-#[derive(PartialEq, Eq, Clone)]
+#[near(serializers=[json])]
+#[serde(try_from = "JsonFeeReceiver")]
+#[derive(PartialEq, Eq, Clone, BorshSerialize)]
+#[borsh(crate = "near_sdk::borsh")]
+#[borsh(use_discriminant = true)]
 #[cfg_attr(debug_assertions, derive(Debug))]
+#[repr(u8)]
 pub enum FeeReceiver {
-    Account(AccountId),
+    Pool = 1,
+    Account {
+        account_id: AccountId,
+        payout_type: FeePayoutType,
+        claim_mode: ClaimMode,
+    } = 3,
+    /// Only in the fees of a swap, never in a fee configuration
+    Protocol = 4,
+}
+
+#[derive(BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+enum BorshFeeReceiver {
+    AccountV1(AccountId),
+    Pool,
+    CommunityV1(AccountId),
+    AccountV2 {
+        account_id: AccountId,
+        payout_type: FeePayoutType,
+        claim_mode: ClaimMode,
+    },
+    Protocol,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+enum JsonFeeReceiver {
+    Account(JsonAccount),
     Pool,
     Community(AccountId),
+    Protocol,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "near_sdk::serde", untagged)]
+enum JsonAccount {
+    V1(AccountId),
+    V2 {
+        account_id: AccountId,
+        payout_type: FeePayoutType,
+        claim_mode: ClaimMode,
+    },
+}
+
+impl TryFrom<BorshFeeReceiver> for FeeReceiver {
+    type Error = &'static str;
+
+    fn try_from(receiver: BorshFeeReceiver) -> Result<Self, Self::Error> {
+        Ok(match receiver {
+            BorshFeeReceiver::AccountV1(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID => {
+                FeeReceiver::Protocol
+            }
+            BorshFeeReceiver::AccountV1(account_id) => FeeReceiver::Account {
+                account_id,
+                payout_type: FeePayoutType::KeepBoth,
+                claim_mode: ClaimMode::OnlyOwner,
+            },
+            BorshFeeReceiver::CommunityV1(account_id) => FeeReceiver::Account {
+                account_id,
+                payout_type: FeePayoutType::KeepBoth,
+                claim_mode: ClaimMode::Anyone,
+            },
+            BorshFeeReceiver::AccountV2 { account_id, .. }
+                if account_id == PROTOCOL_FEE_RECEIVER_ID =>
+            {
+                return Err("The protocol fee receiver is FeeReceiver::Protocol, not an account");
+            }
+            BorshFeeReceiver::AccountV2 {
+                account_id,
+                payout_type,
+                claim_mode,
+            } => FeeReceiver::Account {
+                account_id,
+                payout_type,
+                claim_mode,
+            },
+            BorshFeeReceiver::Pool => FeeReceiver::Pool,
+            BorshFeeReceiver::Protocol => FeeReceiver::Protocol,
+        })
+    }
+}
+
+impl TryFrom<JsonFeeReceiver> for FeeReceiver {
+    type Error = &'static str;
+
+    fn try_from(receiver: JsonFeeReceiver) -> Result<Self, Self::Error> {
+        match receiver {
+            JsonFeeReceiver::Account(JsonAccount::V1(account_id)) => {
+                if account_id == PROTOCOL_FEE_RECEIVER_ID {
+                    Ok(FeeReceiver::Protocol)
+                } else {
+                    Ok(FeeReceiver::Account {
+                        account_id,
+                        payout_type: FeePayoutType::KeepBoth,
+                        claim_mode: ClaimMode::OnlyOwner,
+                    })
+                }
+            }
+            JsonFeeReceiver::Account(JsonAccount::V2 {
+                account_id,
+                payout_type,
+                claim_mode,
+            }) => Ok(FeeReceiver::Account {
+                account_id,
+                payout_type,
+                claim_mode,
+            }),
+            JsonFeeReceiver::Pool => Ok(FeeReceiver::Pool),
+            JsonFeeReceiver::Community(account_id) => Ok(FeeReceiver::Account {
+                account_id,
+                payout_type: FeePayoutType::KeepBoth,
+                claim_mode: ClaimMode::Anyone,
+            }),
+            JsonFeeReceiver::Protocol => Ok(FeeReceiver::Protocol),
+        }
+    }
+}
+
+impl BorshDeserialize for FeeReceiver {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
+        BorshFeeReceiver::deserialize_reader(reader)?
+            .try_into()
+            .map_err(|error| {
+                near_sdk::borsh::io::Error::new(near_sdk::borsh::io::ErrorKind::InvalidData, error)
+            })
+    }
 }
 
 /// The events of the dex, logged as borsh with the engine's `dex_event` host function and
@@ -472,6 +706,20 @@ pub enum XykDexEvent {
         new_total_asset_0: U128,
         new_total_asset_1: U128,
         new_total_shares: U128,
+    },
+    LiquidityFeePayoutSet {
+        pool_id: PoolId,
+        account_id: AccountId,
+        payout_type: FeePayoutType,
+    },
+    /// Pool fees that a liquidity provider earned, moved to the fees it collected
+    LiquidityFeesCollected {
+        pool_id: PoolId,
+        account_id: AccountId,
+        asset_0: AssetId,
+        asset_1: AssetId,
+        amount_0: U128,
+        amount_1: U128,
     },
 }
 
@@ -612,31 +860,27 @@ pub enum XykDexEventV1 {
     },
 }
 
-pub fn asset_account_ids<const N: usize>(asset_ids: [&AssetId; N]) -> [&AccountIdRef; N] {
-    asset_ids.map(|asset_id| match asset_id {
-        AssetId::Near => NEAR_ACCOUNT_ID,
-        AssetId::Nep141(account_id) => account_id,
-        AssetId::Nep171(_, _) => panic!("Nep171 assets are not supported"),
-        AssetId::Nep245(account_id, _) => account_id,
-    })
+pub fn should_reduce_fee(asset_ids: &[&AssetId]) -> bool {
+    asset_ids.iter().all(|asset_id| is_stable_asset(asset_id))
 }
 
-pub fn should_reduce_fee(asset_account_ids: &[&AccountIdRef]) -> bool {
-    'assets: for asset_account_id in asset_account_ids {
-        for reduce_asset_account in PROTOCOL_FEE_REDUCE_ASSET_ACCOUNTS {
-            if asset_account_id.as_str() == *reduce_asset_account {
-                continue 'assets;
-            }
-        }
-        for bypass_asset_parent_account in PROTOCOL_FEE_REDUCE_ASSET_PARENT_ACCOUNTS {
-            if asset_account_id.is_sub_account_of(bypass_asset_parent_account) {
-                continue 'assets;
-            }
-        }
-        // If not matched by either of the above, it's a non-stable asset.
-        return false;
+pub fn is_stable_asset(asset_id: &AssetId) -> bool {
+    match asset_id {
+        AssetId::Near => true,
+        AssetId::Nep141(account_id) => PROTOCOL_FEE_REDUCE_ASSETS_NEP141.contains(&&**account_id),
+        AssetId::Nep171(_, _) => false,
+        AssetId::Nep245(_, _) => false,
     }
-    true
+}
+
+pub fn protocol_fee_payout(asset_ids: (&AssetId, &AssetId)) -> FeePayoutType {
+    if is_stable_asset(asset_ids.0) {
+        FeePayoutType::ConvertToFirstAsset
+    } else if is_stable_asset(asset_ids.1) {
+        FeePayoutType::ConvertToSecondAsset
+    } else {
+        FeePayoutType::KeepBoth
+    }
 }
 
 impl FeeAmount {
@@ -719,32 +963,19 @@ impl FeeAmount {
     }
 }
 
-impl FeeConfiguration {
+impl FeeConfigurationV2 {
     pub fn receivers_at(&self, timestamp: Timestamp) -> Vec<(FeeReceiver, FeeFraction)> {
-        match self {
-            FeeConfiguration::V1(fees) => fees.receivers.clone(),
-            FeeConfiguration::V2(fees) => fees
-                .receivers
-                .iter()
-                .map(|(receiver, fee)| (receiver.clone(), fee.fee_fraction_at(timestamp)))
-                .collect(),
-        }
+        self.receivers
+            .iter()
+            .map(|(receiver, fee)| (receiver.clone(), fee.fee_fraction_at(timestamp)))
+            .collect()
     }
 
-    pub fn validate(
-        &self,
-        pool_type: &PoolType,
-        timestamp: Timestamp,
-    ) -> Result<(), FeeConfigurationError> {
-        match self {
-            FeeConfiguration::V1(_) => {}
-            FeeConfiguration::V2(fees) => {
-                for (_, fee_amount) in fees.receivers.iter() {
-                    fee_amount
-                        .validate()
-                        .map_err(FeeConfigurationError::InvalidFeeAmount)?;
-                }
-            }
+    pub fn validate(&self, timestamp: Timestamp) -> Result<(), FeeConfigurationError> {
+        for (_, fee_amount) in &self.receivers {
+            fee_amount
+                .validate()
+                .map_err(FeeConfigurationError::InvalidFeeAmount)?;
         }
         let receivers = self.receivers_at(timestamp);
         if receivers.len() > MAX_FEE_RECEIVERS {
@@ -761,82 +992,51 @@ impl FeeConfiguration {
         if total_fee > MAX_TOTAL_FEE_FRACTION {
             return Err(FeeConfigurationError::TotalFeeTooHigh);
         }
-        if receivers.iter().any(|(receiver, _)| {
-            matches!(
-                receiver,
-                FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID
-            )
+        if receivers.iter().any(|(receiver, _)| match receiver {
+            FeeReceiver::Account { account_id, .. } => account_id == PROTOCOL_FEE_RECEIVER_ID,
+            FeeReceiver::Protocol => true,
+            FeeReceiver::Pool => false,
         }) {
             return Err(FeeConfigurationError::ProtocolFeeReceiverSet);
-        }
-        let has_community_receiver = receivers
-            .iter()
-            .any(|(receiver, _)| matches!(receiver, FeeReceiver::Community(_)));
-        let is_launch_pool = matches!(
-            pool_type,
-            PoolType::LaunchV1 { .. } | PoolType::LaunchLatest { .. } | PoolType::LaunchV2 { .. }
-        );
-        if has_community_receiver && !is_launch_pool {
-            return Err(FeeConfigurationError::CommunityReceiverOutsideLaunchPool);
         }
         Ok(())
     }
 
-    pub fn with_protocol_fee(
-        &self,
-        asset_account_ids: &[&AccountIdRef],
-        timestamp: Timestamp,
-    ) -> CurrentFees {
-        let protocol_fee = if should_reduce_fee(asset_account_ids) {
+    pub fn with_protocol_fee(&self, asset_ids: &[&AssetId], timestamp: Timestamp) -> CurrentFees {
+        let mut protocol_fee = if should_reduce_fee(asset_ids) {
             PROTOCOL_FEE_REDUCED
         } else {
             PROTOCOL_FEE
         };
-        match self {
-            FeeConfiguration::V1(fees) => {
-                let mut receivers = fees.receivers.clone();
-                receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
-                    protocol_fee,
-                ));
-                CurrentFees { receivers }
-            }
-            FeeConfiguration::V2(fees) => {
-                let mut receivers = Vec::new();
-                let mut protocol_fee = protocol_fee;
-                for (receiver, amount) in fees.receivers.iter() {
-                    match amount {
-                        FeeAmount::Fixed(fee_fraction) => {
-                            receivers.push((receiver.clone(), *fee_fraction));
-                        }
-                        FeeAmount::Scheduled {
-                            end: (end_time, _), ..
-                        } => {
-                            let mut fraction = amount.fee_fraction_at(timestamp);
-                            if timestamp < *end_time {
-                                const PROTOCOL_SHARE_PERCENT: u32 = 5;
-                                let protocol_share = fraction
-                                    .checked_mul(PROTOCOL_SHARE_PERCENT)
-                                    .unwrap()
-                                    .checked_div(100)
-                                    .unwrap();
-                                fraction = fraction.checked_sub(protocol_share).unwrap();
-                                protocol_fee = protocol_fee.checked_add(protocol_share).unwrap();
-                            }
-                            receivers.push((receiver.clone(), fraction));
-                        }
-                        FeeAmount::Dynamic { .. } => {
-                            unimplemented!("Dynamic fee configuration is not implemented yet");
-                        }
-                    }
+        let mut receivers = Vec::new();
+        for (receiver, amount) in &self.receivers {
+            match amount {
+                FeeAmount::Fixed(fee_fraction) => {
+                    receivers.push((receiver.clone(), *fee_fraction));
                 }
-                receivers.push((
-                    FeeReceiver::Account(PROTOCOL_FEE_RECEIVER_ID.to_owned()),
-                    protocol_fee,
-                ));
-                CurrentFees { receivers }
+                FeeAmount::Scheduled {
+                    end: (end_time, _), ..
+                } => {
+                    let mut fraction = amount.fee_fraction_at(timestamp);
+                    if timestamp < *end_time {
+                        const PROTOCOL_SHARE_PERCENT: u32 = 5;
+                        let protocol_share = fraction
+                            .checked_mul(PROTOCOL_SHARE_PERCENT)
+                            .unwrap()
+                            .checked_div(100)
+                            .unwrap();
+                        fraction = fraction.checked_sub(protocol_share).unwrap();
+                        protocol_fee = protocol_fee.checked_add(protocol_share).unwrap();
+                    }
+                    receivers.push((receiver.clone(), fraction));
+                }
+                FeeAmount::Dynamic { .. } => {
+                    unimplemented!("Dynamic fee configuration is not implemented yet");
+                }
             }
         }
+        receivers.push((FeeReceiver::Protocol, protocol_fee));
+        CurrentFees { receivers }
     }
 }
 
@@ -922,7 +1122,6 @@ pub enum FeeConfigurationError {
     ReceiverFeeTooHigh,
     TotalFeeTooHigh,
     ProtocolFeeReceiverSet,
-    CommunityReceiverOutsideLaunchPool,
 }
 
 impl fmt::Display for FeeConfigurationError {
@@ -938,12 +1137,6 @@ impl fmt::Display for FeeConfigurationError {
             }
             Self::ProtocolFeeReceiverSet => {
                 write!(f, "Protocol fee receiver can't be set by users")
-            }
-            Self::CommunityReceiverOutsideLaunchPool => {
-                write!(
-                    f,
-                    "Community fee receiver is only supported in Launch pools"
-                )
             }
         }
     }

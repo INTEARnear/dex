@@ -2,58 +2,41 @@ use intear_dex_types::AssetId;
 use near_sdk::{AccountId, Timestamp, json_types::U128, near, store::LookupMap};
 
 use crate::{
-    AssetWithBalance, CurrentFees, FeeConfiguration, PoolType, PoolView, SharesBalance,
-    asset_account_ids,
+    AssetWithBalance, CurrentFees, FeeConfigurationV2, FeePayoutType, FeeReceiver,
+    LiquidityPosition, PayoutGroups, PoolType, PoolView, SharesBalance, protocol_fee_payout,
 };
 
 #[near(serializers=[borsh])]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
 pub enum Pool {
-    PrivateV1 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
-        fees: CurrentFees,
-    },
-    PublicV1 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: CurrentFees,
-        user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-        total_shares: Option<SharesBalance>,
-    },
-    LaunchV1 {
-        near_amount: U128,
-        launched_asset: AssetWithBalance,
-        fees: FeeConfiguration,
-        phantom_liquidity_near: U128,
-    },
     PrivateV2 {
         assets: (AssetWithBalance, AssetWithBalance),
         owner_id: AccountId,
-        fees: FeeConfiguration,
+        fees: FeeConfigurationV2,
         locked: bool,
-    },
-    PublicV2 {
-        assets: (AssetWithBalance, AssetWithBalance),
-        fees: FeeConfiguration,
-        user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-        total_shares: Option<SharesBalance>,
-    },
-    /// The first asset is the quote asset, which the phantom liquidity is in
+    } = 3,
     LaunchV2 {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
-        fees: FeeConfiguration,
+        fees: FeeConfigurationV2,
         phantom_liquidity: U128,
-    },
+    } = 5,
+    PublicV3 {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: FeeConfigurationV2,
+        providers: LookupMap<AccountId, LiquidityPosition>,
+        total_shares: Option<SharesBalance>,
+        payout_groups: Box<PayoutGroups>,
+    } = 6,
 }
 
 impl Pool {
     pub fn asset_ids(&self) -> (&AssetId, &AssetId) {
         match self {
-            Pool::PrivateV1 { assets, .. }
-            | Pool::PublicV1 { assets, .. }
-            | Pool::PrivateV2 { assets, .. }
-            | Pool::PublicV2 { assets, .. } => (&assets.0.asset_id, &assets.1.asset_id),
-            Pool::LaunchV1 { launched_asset, .. } => (&AssetId::Near, &launched_asset.asset_id),
+            Pool::PrivateV2 { assets, .. } | Pool::PublicV3 { assets, .. } => {
+                (&assets.0.asset_id, &assets.1.asset_id)
+            }
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
@@ -64,15 +47,9 @@ impl Pool {
 
     pub fn balances(&self) -> [u128; 2] {
         match self {
-            Pool::PrivateV1 { assets, .. }
-            | Pool::PublicV1 { assets, .. }
-            | Pool::PrivateV2 { assets, .. }
-            | Pool::PublicV2 { assets, .. } => [assets.0.balance.0, assets.1.balance.0],
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                ..
-            } => [near_amount.0, launched_asset.balance.0],
+            Pool::PrivateV2 { assets, .. } | Pool::PublicV3 { assets, .. } => {
+                [assets.0.balance.0, assets.1.balance.0]
+            }
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
@@ -83,15 +60,9 @@ impl Pool {
 
     pub fn balances_mut(&mut self) -> [&mut u128; 2] {
         match self {
-            Pool::PrivateV1 { assets, .. }
-            | Pool::PublicV1 { assets, .. }
-            | Pool::PrivateV2 { assets, .. }
-            | Pool::PublicV2 { assets, .. } => [&mut assets.0.balance.0, &mut assets.1.balance.0],
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                ..
-            } => [&mut near_amount.0, &mut launched_asset.balance.0],
+            Pool::PrivateV2 { assets, .. } | Pool::PublicV3 { assets, .. } => {
+                [&mut assets.0.balance.0, &mut assets.1.balance.0]
+            }
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
@@ -101,15 +72,30 @@ impl Pool {
     }
 
     /// The pool fees, without the protocol fee
-    pub fn fee_configuration(&self) -> FeeConfiguration {
+    pub fn fee_configuration(&self) -> &FeeConfigurationV2 {
         match self {
-            Pool::PrivateV1 { fees, .. } | Pool::PublicV1 { fees, .. } => {
-                FeeConfiguration::V1(fees.clone())
+            Pool::PrivateV2 { fees, .. }
+            | Pool::LaunchV2 { fees, .. }
+            | Pool::PublicV3 { fees, .. } => fees,
+        }
+    }
+
+    /// How a `receiver` of [`Self::current_fees`] other than the pool takes its fees
+    pub fn account_fee_payout_type(&self, receiver: &FeeReceiver) -> FeePayoutType {
+        match receiver {
+            FeeReceiver::Account { payout_type, .. } => *payout_type,
+            FeeReceiver::Protocol => protocol_fee_payout(self.asset_ids()),
+            FeeReceiver::Pool => panic!("The pool's liquidity providers choose their payouts"),
+        }
+    }
+
+    /// The shares of a liquidity provider of a public pool, `None` if it isn't registered
+    pub fn liquidity_shares(&self, account_id: &AccountId) -> Option<u128> {
+        match self {
+            Pool::PublicV3 { providers, .. } => {
+                providers.get(account_id).map(|position| position.shares)
             }
-            Pool::LaunchV1 { fees, .. }
-            | Pool::PrivateV2 { fees, .. }
-            | Pool::PublicV2 { fees, .. }
-            | Pool::LaunchV2 { fees, .. } => fees.clone(),
+            Pool::PrivateV2 { .. } | Pool::LaunchV2 { .. } => None,
         }
     }
 
@@ -117,23 +103,14 @@ impl Pool {
     pub fn current_fees(&self, timestamp: Timestamp) -> CurrentFees {
         let (asset_0, asset_1) = self.asset_ids();
         self.fee_configuration()
-            .with_protocol_fee(&asset_account_ids([asset_0, asset_1]), timestamp)
+            .with_protocol_fee(&[asset_0, asset_1], timestamp)
     }
 
     /// The pool with its fees at `timestamp`, as views and events show it
     pub fn view(&self, timestamp: Timestamp) -> PoolView {
         let fees = self.current_fees(timestamp);
-        let fee_configuration = self.fee_configuration();
+        let fee_configuration = self.fee_configuration().clone();
         match self {
-            Pool::PrivateV1 {
-                assets, owner_id, ..
-            } => PoolView::Private {
-                assets: assets.clone(),
-                fees,
-                fee_configuration,
-                owner_id: owner_id.clone(),
-                locked: false,
-            },
             Pool::PrivateV2 {
                 assets,
                 owner_id,
@@ -146,12 +123,7 @@ impl Pool {
                 owner_id: owner_id.clone(),
                 locked: *locked,
             },
-            Pool::PublicV1 {
-                assets,
-                total_shares,
-                ..
-            }
-            | Pool::PublicV2 {
+            Pool::PublicV3 {
                 assets,
                 total_shares,
                 ..
@@ -161,24 +133,12 @@ impl Pool {
                 fee_configuration,
                 total_shares: total_shares.map(|s| U128(s.get())),
             },
-            Pool::LaunchV1 {
-                near_amount,
-                launched_asset,
-                phantom_liquidity_near,
-                ..
-            } => PoolView::Launch {
-                near_amount: *near_amount,
-                launched_asset: launched_asset.clone(),
-                fees,
-                fee_configuration,
-                phantom_liquidity_near: *phantom_liquidity_near,
-            },
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
                 phantom_liquidity,
                 ..
-            } => PoolView::LaunchV2 {
+            } => PoolView::Launch {
                 quote_asset: quote_asset.clone(),
                 launched_asset: launched_asset.clone(),
                 fees,
@@ -192,21 +152,13 @@ impl Pool {
 impl From<&Pool> for PoolType {
     fn from(pool: &Pool) -> Self {
         match pool {
-            Pool::PrivateV1 { .. } => PoolType::PrivateV1,
-            Pool::PublicV1 { .. } => PoolType::PublicV1,
-            Pool::LaunchV1 {
-                phantom_liquidity_near,
-                ..
-            } => PoolType::LaunchV1 {
-                phantom_liquidity_near: *phantom_liquidity_near,
-            },
             Pool::PrivateV2 { .. } => PoolType::PrivateV2,
-            Pool::PublicV2 { .. } => PoolType::PublicV2,
             Pool::LaunchV2 {
                 phantom_liquidity, ..
             } => PoolType::LaunchV2 {
                 phantom_liquidity: *phantom_liquidity,
             },
+            Pool::PublicV3 { .. } => PoolType::PublicV3,
         }
     }
 }

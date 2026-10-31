@@ -15,7 +15,7 @@ use near_primitives::views::{
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::{Base58CryptoHash, U128};
 use serde_json::json;
-use xyk_dex_types::{XykDexEvent, XykDexEventV1};
+use xyk_dex_types::{FeePayoutType, XykDexEvent, XykDexEventV1};
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::chain::xyk::{self, XykState};
@@ -547,5 +547,31 @@ fn xyk_event_line(
                 format!("{removed} for {burned_shares} shares")
             }
         }
+        XykDexEvent::LiquidityFeePayoutSet {
+            pool_id,
+            account_id,
+            payout_type,
+        } => {
+            let (verb, asset) = match payout_type {
+                FeePayoutType::KeepBoth => ("keeps", ""),
+                FeePayoutType::ConvertToFirstAsset => ("takes", " in its first asset"),
+                FeePayoutType::ConvertToSecondAsset => ("takes", " in its second asset"),
+            };
+            format!(
+                "{account_id} now {verb} its part of the fees of pool #{pool_id} of {dex_id}{asset}"
+            )
+        }
+        XykDexEvent::LiquidityFeesCollected {
+            pool_id,
+            account_id,
+            asset_0,
+            asset_1,
+            amount_0: U128(amount_0),
+            amount_1: U128(amount_1),
+        } => format!(
+            "{account_id} collected {} and {} of fees from pool #{pool_id} of {dex_id}",
+            format_amount(amount_0, &asset_0)?,
+            format_amount(amount_1, &asset_1)?
+        ),
     })
 }

@@ -8,7 +8,6 @@ members = [
     "dexes/xyk",
     "dexes/xyk/types",
     "intear-dex-management",
-    "test-support",
 ]
 
 [package]
@@ -48,11 +47,11 @@ lz4_flex = { version = "0.14", default-features = false, features = [
 [dev-dependencies]
 near-sdk = { version = "5.29", features = ["unit-testing"] }
 near-workspaces = { version = "0.22", features = ["unstable"] }
+near-sandbox = "0.3"
 tokio = { version = "1.12.0", features = ["full"] }
 near-crypto = "0.34.2"
 xyk-dex-types = { path = "./dexes/xyk/types" }
 otc-dex-types = { path = "./dexes/otc/types" }
-intear-dex-test-support = { path = "./test-support" }
 lz4_flex = "0.14"
 
 [profile.release]

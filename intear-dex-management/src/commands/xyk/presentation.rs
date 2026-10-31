@@ -2,11 +2,11 @@ use color_eyre::eyre::eyre;
 use intear_dex_types::AssetId;
 use serde_json::json;
 use xyk_dex_types::{
-    CurrentFees, FeeAmount, FeeConfiguration, FeeFraction, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID,
+    ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction, FeePayoutType, FeeReceiver,
     PoolId, PoolView, ScheduledFeeCurve,
 };
 
-use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
+use crate::chain::asset_metadata::AssetMetadataCache;
 use crate::display::{self, asset_label};
 
 /// The two assets of a pool with their reserves, in pool order.
@@ -17,14 +17,6 @@ pub fn pool_assets(pool: &PoolView) -> [(AssetId, u128); 2] {
             (assets.1.asset_id.clone(), assets.1.balance.0),
         ],
         PoolView::Launch {
-            near_amount,
-            launched_asset,
-            ..
-        } => [
-            (AssetId::Near, near_amount.0),
-            (launched_asset.asset_id.clone(), launched_asset.balance.0),
-        ],
-        PoolView::LaunchV2 {
             quote_asset,
             launched_asset,
             ..
@@ -39,13 +31,13 @@ pub fn pool_kind(pool: &PoolView) -> &'static str {
     match pool {
         PoolView::Private { .. } => "private",
         PoolView::Public { .. } => "public",
-        PoolView::Launch { .. } | PoolView::LaunchV2 { .. } => "launch",
+        PoolView::Launch { .. } => "launch",
     }
 }
 
 /// Fees charged now, including the protocol fee, and the configuration they
 /// come from.
-pub fn pool_fees(pool: &PoolView) -> (&CurrentFees, &FeeConfiguration) {
+pub fn pool_fees(pool: &PoolView) -> (&CurrentFees, &FeeConfigurationV2) {
     match pool {
         PoolView::Private {
             fees,
@@ -58,11 +50,6 @@ pub fn pool_fees(pool: &PoolView) -> (&CurrentFees, &FeeConfiguration) {
             ..
         }
         | PoolView::Launch {
-            fees,
-            fee_configuration,
-            ..
-        }
-        | PoolView::LaunchV2 {
             fees,
             fee_configuration,
             ..
@@ -84,56 +71,93 @@ pub fn total_fee_fraction(fees: &CurrentFees) -> color_eyre::eyre::Result<FeeFra
 
 pub fn fee_receiver_label(receiver: &FeeReceiver) -> String {
     match receiver {
-        FeeReceiver::Account(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID => {
-            "protocol".to_string()
-        }
-        FeeReceiver::Account(account_id) => account_id.to_string(),
         FeeReceiver::Pool => "pool".to_string(),
-        FeeReceiver::Community(account_id) => format!("community:{account_id}"),
+        FeeReceiver::Protocol => "protocol".to_string(),
+        FeeReceiver::Account {
+            account_id,
+            claim_mode: ClaimMode::Anyone,
+            ..
+        } => format!("community:{account_id}"),
+        FeeReceiver::Account {
+            account_id,
+            claim_mode: ClaimMode::OnlyOwner,
+            ..
+        } => account_id.to_string(),
     }
 }
 
-/// The fees of a pool's configuration, with their schedules
-pub fn format_fee_configuration(fee_configuration: &FeeConfiguration) -> String {
-    let receiver_fees = match fee_configuration {
-        FeeConfiguration::V1(fees) => fees
-            .receivers
-            .iter()
-            .map(|(receiver, fee)| {
-                format!(
-                    "{} {}",
-                    fee_receiver_label(receiver),
-                    display::format_fee(*fee)
-                )
-            })
-            .collect::<Vec<_>>(),
-        FeeConfiguration::V2(fees) => fees
-            .receivers
-            .iter()
-            .map(|(receiver, fee_amount)| {
-                let fee = match fee_amount {
-                    FeeAmount::Fixed(fee) => display::format_fee(*fee),
-                    FeeAmount::Scheduled {
-                        start: (start_time, start_fee),
-                        end: (end_time, end_fee),
-                        curve: ScheduledFeeCurve::Linear,
-                    } => format!(
-                        "{}..{} from {} to {} (linear)",
-                        display::format_fee(*start_fee),
-                        display::format_fee(*end_fee),
-                        display::format_timestamp(*start_time),
-                        display::format_timestamp(*end_time)
-                    ),
-                    FeeAmount::Dynamic { min, max } => format!(
-                        "dynamic {}..{}",
-                        display::format_fee(*min),
-                        display::format_fee(*max)
-                    ),
-                };
-                format!("{} {fee}", fee_receiver_label(receiver))
-            })
-            .collect(),
-    };
+/// How a receiver takes its fees, as `--payouts` takes it: keep, or the asset
+/// of the pool that its fees are converted to
+fn payout_text(payout_type: FeePayoutType, pool_asset_ids: [&AssetId; 2]) -> String {
+    match payout_type {
+        FeePayoutType::KeepBoth => "keep".to_string(),
+        FeePayoutType::ConvertToFirstAsset => pool_asset_ids[0].to_string(),
+        FeePayoutType::ConvertToSecondAsset => pool_asset_ids[1].to_string(),
+    }
+}
+
+/// The receiver's label with its fee, and the payout of an account that has one
+fn format_receiver_fee(
+    receiver: &FeeReceiver,
+    fee_text: String,
+    pool_asset_ids: [&AssetId; 2],
+) -> String {
+    let receiver_fee = format!("{} {fee_text}", fee_receiver_label(receiver));
+    match receiver {
+        FeeReceiver::Account {
+            payout_type: FeePayoutType::KeepBoth,
+            ..
+        } => format!("{receiver_fee} kept"),
+        FeeReceiver::Account { payout_type, .. } => format!(
+            "{receiver_fee} converted to {}",
+            payout_text(*payout_type, pool_asset_ids)
+        ),
+        FeeReceiver::Pool | FeeReceiver::Protocol => receiver_fee,
+    }
+}
+
+fn fee_receiver_json(receiver: &FeeReceiver, pool_asset_ids: [&AssetId; 2]) -> serde_json::Value {
+    let mut receiver_json = json!({ "receiver": fee_receiver_label(receiver) });
+    if let FeeReceiver::Account { payout_type, .. } = receiver {
+        receiver_json["payout"] = json!(payout_text(*payout_type, pool_asset_ids));
+    }
+    receiver_json
+}
+
+fn format_fee_amount(fee_amount: &FeeAmount) -> String {
+    match fee_amount {
+        FeeAmount::Fixed(fee) => display::format_fee(*fee),
+        FeeAmount::Scheduled {
+            start: (start_time, start_fee),
+            end: (end_time, end_fee),
+            curve: ScheduledFeeCurve::Linear,
+        } => format!(
+            "{}..{} from {} to {} (linear)",
+            display::format_fee(*start_fee),
+            display::format_fee(*end_fee),
+            display::format_timestamp(*start_time),
+            display::format_timestamp(*end_time)
+        ),
+        FeeAmount::Dynamic { min, max } => format!(
+            "dynamic {}..{}",
+            display::format_fee(*min),
+            display::format_fee(*max)
+        ),
+    }
+}
+
+/// The fees of a pool's configuration, with their schedules and payouts
+pub fn format_fee_configuration(
+    fee_configuration: &FeeConfigurationV2,
+    pool_asset_ids: [&AssetId; 2],
+) -> String {
+    let receiver_fees = fee_configuration
+        .receivers
+        .iter()
+        .map(|(receiver, fee_amount)| {
+            format_receiver_fee(receiver, format_fee_amount(fee_amount), pool_asset_ids)
+        })
+        .collect::<Vec<_>>();
     if receiver_fees.is_empty() {
         "none".to_string()
     } else {
@@ -161,53 +185,51 @@ pub fn pool_label(
     ))
 }
 
-fn fee_configuration_json(fee_configuration: &FeeConfiguration) -> serde_json::Value {
-    let receivers_json = match fee_configuration {
-        FeeConfiguration::V1(fees) => fees
-            .receivers
-            .iter()
-            .map(|(receiver, fee)| {
-                json!({
-                    "receiver": fee_receiver_label(receiver),
-                    "fixed": display::fee_json(*fee),
-                })
-            })
-            .collect::<Vec<_>>(),
-        FeeConfiguration::V2(fees) => fees
-            .receivers
-            .iter()
-            .map(|(receiver, fee_amount)| {
-                let mut receiver_json = json!({ "receiver": fee_receiver_label(receiver) });
-                match fee_amount {
-                    FeeAmount::Fixed(fee) => receiver_json["fixed"] = display::fee_json(*fee),
-                    FeeAmount::Scheduled {
-                        start: (start_time, start_fee),
-                        end: (end_time, end_fee),
-                        curve: ScheduledFeeCurve::Linear,
-                    } => {
-                        receiver_json["scheduled"] = json!({
-                            "start": {
-                                "time": display::format_timestamp(*start_time),
-                                "fee": display::fee_json(*start_fee),
-                            },
-                            "end": {
-                                "time": display::format_timestamp(*end_time),
-                                "fee": display::fee_json(*end_fee),
-                            },
-                            "curve": "linear",
-                        })
-                    }
-                    FeeAmount::Dynamic { min, max } => {
-                        receiver_json["dynamic"] = json!({
-                            "min": display::fee_json(*min),
-                            "max": display::fee_json(*max),
-                        })
-                    }
-                }
-                receiver_json
-            })
-            .collect(),
-    };
+fn fee_amount_json(fee_amount: &FeeAmount) -> (&'static str, serde_json::Value) {
+    match fee_amount {
+        FeeAmount::Fixed(fee) => ("fixed", display::fee_json(*fee)),
+        FeeAmount::Scheduled {
+            start: (start_time, start_fee),
+            end: (end_time, end_fee),
+            curve: ScheduledFeeCurve::Linear,
+        } => (
+            "scheduled",
+            json!({
+                "start": {
+                    "time": display::format_timestamp(*start_time),
+                    "fee": display::fee_json(*start_fee),
+                },
+                "end": {
+                    "time": display::format_timestamp(*end_time),
+                    "fee": display::fee_json(*end_fee),
+                },
+                "curve": "linear",
+            }),
+        ),
+        FeeAmount::Dynamic { min, max } => (
+            "dynamic",
+            json!({
+                "min": display::fee_json(*min),
+                "max": display::fee_json(*max),
+            }),
+        ),
+    }
+}
+
+fn fee_configuration_json(
+    fee_configuration: &FeeConfigurationV2,
+    pool_asset_ids: [&AssetId; 2],
+) -> serde_json::Value {
+    let receivers_json = fee_configuration
+        .receivers
+        .iter()
+        .map(|(receiver, fee_amount)| {
+            let mut receiver_json = fee_receiver_json(receiver, pool_asset_ids);
+            let (fee_kind, fee_json) = fee_amount_json(fee_amount);
+            receiver_json[fee_kind] = fee_json;
+            receiver_json
+        })
+        .collect::<Vec<_>>();
     json!({ "receivers": receivers_json })
 }
 
@@ -216,12 +238,13 @@ pub fn pool_json(
     pool: &PoolView,
     metadata_cache: &AssetMetadataCache,
 ) -> color_eyre::eyre::Result<serde_json::Value> {
+    let pool_assets = pool_assets(pool);
     let mut assets_json = Vec::new();
-    for (asset_id, reserve) in pool_assets(pool) {
-        let metadata = metadata_cache.get(&asset_id)?;
+    for (asset_id, reserve) in &pool_assets {
+        let metadata = metadata_cache.get(asset_id)?;
         assets_json.push(json!({
             "asset_id": asset_id,
-            "reserve": display::amount_json(reserve, metadata.as_ref()),
+            "reserve": display::amount_json(*reserve, metadata.as_ref()),
         }));
     }
     let (fees, fee_configuration) = pool_fees(pool);
@@ -243,7 +266,10 @@ pub fn pool_json(
             "total": display::fee_json(total_fee_fraction(fees)?),
             "receivers": fee_receivers_json,
         },
-        "fee_configuration": fee_configuration_json(fee_configuration),
+        "fee_configuration": fee_configuration_json(
+            fee_configuration,
+            [&pool_assets[0].0, &pool_assets[1].0],
+        ),
     });
     match pool {
         PoolView::Private {
@@ -256,14 +282,8 @@ pub fn pool_json(
             pool_json["total_shares"] =
                 json!(total_shares.map(|total_shares| total_shares.0.to_string()));
         }
+
         PoolView::Launch {
-            phantom_liquidity_near,
-            ..
-        } => {
-            pool_json["phantom_liquidity_near"] =
-                display::amount_json(phantom_liquidity_near.0, Some(&AssetMetadata::near()));
-        }
-        PoolView::LaunchV2 {
             quote_asset,
             phantom_liquidity,
             ..
