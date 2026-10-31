@@ -562,8 +562,10 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
         hint: |_| "`xyk liquidity show` shows the shares of an account".to_string(),
     },
     ContractPanicHint {
-        message_fragment: "Account does not have a registered community fee",
-        hint: |_| "Community fees come from launch pools that name the account".to_string(),
+        message_fragment: "that anyone can claim",
+        hint: |_| {
+            "Community fees come from pools that name the account as community:<account>, in the assets of its payout".to_string()
+        },
     },
     ContractPanicHint {
         message_fragment: "is less than the minimum bound",

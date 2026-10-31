@@ -6,22 +6,20 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use intear_dex_types::{AssetId, DexId, SwapRequest, SwapRequestAmount};
+use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
 use near_sdk::{
     AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
-    borsh::{
-        BorshDeserialize, BorshSerialize,
-        io::{Read, Write},
-    },
+    borsh::{BorshSerialize, io::Write},
     json_types::U128,
     near,
-    serde::Deserialize,
 };
 
+mod legacy_deserialization;
 mod liquidity_fees;
 pub mod math;
 mod pool;
 
+pub use legacy_deserialization::XykDexEventV1;
 pub use liquidity_fees::{
     FEE_GROWTH_SCALE, FeeGrowth, LiquidityPosition, PayoutGroup, PayoutGroups,
 };
@@ -91,33 +89,6 @@ impl BorshSerialize for SwapArgs {
         }
         self.routes.serialize(writer)?;
         self.fee_discount.serialize(writer)
-    }
-}
-
-impl BorshDeserialize for SwapArgs {
-    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
-        if let Ok(pool_id) = <[u8; 4]>::try_from(bytes.as_slice()) {
-            return Ok(Self::single_pool(PoolId::from_le_bytes(pool_id)));
-        }
-        let mut rest = bytes.as_slice();
-        let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
-        let fee_discount = Option::<SignedFeeDiscount>::deserialize(&mut rest)?;
-        if !rest.is_empty() {
-            // Referral fees of messages from before the engine took them, which are ignored
-            <Vec<(AccountId, FeeFraction)> as BorshDeserialize>::deserialize(&mut rest)?;
-        }
-        if !rest.is_empty() {
-            return Err(near_sdk::borsh::io::Error::new(
-                near_sdk::borsh::io::ErrorKind::InvalidData,
-                "Unexpected bytes after swap args",
-            ));
-        }
-        Ok(Self {
-            routes,
-            fee_discount,
-        })
     }
 }
 
@@ -361,9 +332,17 @@ impl PoolType {
     }
 }
 
-#[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq)]
+#[near(serializers=[json])]
+#[serde(from = "legacy_deserialization::JsonPoolView")]
+#[derive(Clone, PartialEq, BorshSerialize)]
+#[borsh(crate = "near_sdk::borsh")]
+#[borsh(use_discriminant = true)]
+#[cfg_attr(
+    all(feature = "abi", not(target_arch = "wasm32")),
+    derive(near_sdk::borsh::BorshSchema)
+)]
 #[cfg_attr(debug_assertions, derive(Debug))]
+#[repr(u8)]
 pub enum PoolView {
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
@@ -371,20 +350,20 @@ pub enum PoolView {
         fee_configuration: FeeConfigurationV2,
         owner_id: AccountId,
         locked: bool,
-    },
+    } = 4,
     Public {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
         total_shares: Option<U128>,
-    },
+    } = 5,
     Launch {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
         phantom_liquidity: U128,
-    },
+    } = 6,
 }
 
 #[near(serializers=[borsh, json])]
@@ -403,6 +382,7 @@ pub struct CurrentFees {
 }
 
 #[near(serializers=[borsh, json])]
+#[serde(from = "legacy_deserialization::JsonFeeConfiguration")]
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct FeeConfigurationV2 {
@@ -519,10 +499,14 @@ pub enum ScheduledFeeCurve {
 }
 
 #[near(serializers=[json])]
-#[serde(try_from = "JsonFeeReceiver")]
+#[serde(from = "legacy_deserialization::JsonFeeReceiver")]
 #[derive(PartialEq, Eq, Clone, BorshSerialize)]
 #[borsh(crate = "near_sdk::borsh")]
 #[borsh(use_discriminant = true)]
+#[cfg_attr(
+    all(feature = "abi", not(target_arch = "wasm32")),
+    derive(near_sdk::borsh::BorshSchema)
+)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 #[repr(u8)]
 pub enum FeeReceiver {
@@ -534,124 +518,6 @@ pub enum FeeReceiver {
     } = 3,
     /// Only in the fees of a swap, never in a fee configuration
     Protocol = 4,
-}
-
-#[derive(BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
-enum BorshFeeReceiver {
-    AccountV1(AccountId),
-    Pool,
-    CommunityV1(AccountId),
-    AccountV2 {
-        account_id: AccountId,
-        payout_type: FeePayoutType,
-        claim_mode: ClaimMode,
-    },
-    Protocol,
-}
-
-#[derive(Deserialize)]
-#[serde(crate = "near_sdk::serde")]
-enum JsonFeeReceiver {
-    Account(JsonAccount),
-    Pool,
-    Community(AccountId),
-    Protocol,
-}
-
-#[derive(Deserialize)]
-#[serde(crate = "near_sdk::serde", untagged)]
-enum JsonAccount {
-    V1(AccountId),
-    V2 {
-        account_id: AccountId,
-        payout_type: FeePayoutType,
-        claim_mode: ClaimMode,
-    },
-}
-
-impl TryFrom<BorshFeeReceiver> for FeeReceiver {
-    type Error = &'static str;
-
-    fn try_from(receiver: BorshFeeReceiver) -> Result<Self, Self::Error> {
-        Ok(match receiver {
-            BorshFeeReceiver::AccountV1(account_id) if account_id == PROTOCOL_FEE_RECEIVER_ID => {
-                FeeReceiver::Protocol
-            }
-            BorshFeeReceiver::AccountV1(account_id) => FeeReceiver::Account {
-                account_id,
-                payout_type: FeePayoutType::KeepBoth,
-                claim_mode: ClaimMode::OnlyOwner,
-            },
-            BorshFeeReceiver::CommunityV1(account_id) => FeeReceiver::Account {
-                account_id,
-                payout_type: FeePayoutType::KeepBoth,
-                claim_mode: ClaimMode::Anyone,
-            },
-            BorshFeeReceiver::AccountV2 { account_id, .. }
-                if account_id == PROTOCOL_FEE_RECEIVER_ID =>
-            {
-                return Err("The protocol fee receiver is FeeReceiver::Protocol, not an account");
-            }
-            BorshFeeReceiver::AccountV2 {
-                account_id,
-                payout_type,
-                claim_mode,
-            } => FeeReceiver::Account {
-                account_id,
-                payout_type,
-                claim_mode,
-            },
-            BorshFeeReceiver::Pool => FeeReceiver::Pool,
-            BorshFeeReceiver::Protocol => FeeReceiver::Protocol,
-        })
-    }
-}
-
-impl TryFrom<JsonFeeReceiver> for FeeReceiver {
-    type Error = &'static str;
-
-    fn try_from(receiver: JsonFeeReceiver) -> Result<Self, Self::Error> {
-        match receiver {
-            JsonFeeReceiver::Account(JsonAccount::V1(account_id)) => {
-                if account_id == PROTOCOL_FEE_RECEIVER_ID {
-                    Ok(FeeReceiver::Protocol)
-                } else {
-                    Ok(FeeReceiver::Account {
-                        account_id,
-                        payout_type: FeePayoutType::KeepBoth,
-                        claim_mode: ClaimMode::OnlyOwner,
-                    })
-                }
-            }
-            JsonFeeReceiver::Account(JsonAccount::V2 {
-                account_id,
-                payout_type,
-                claim_mode,
-            }) => Ok(FeeReceiver::Account {
-                account_id,
-                payout_type,
-                claim_mode,
-            }),
-            JsonFeeReceiver::Pool => Ok(FeeReceiver::Pool),
-            JsonFeeReceiver::Community(account_id) => Ok(FeeReceiver::Account {
-                account_id,
-                payout_type: FeePayoutType::KeepBoth,
-                claim_mode: ClaimMode::Anyone,
-            }),
-            JsonFeeReceiver::Protocol => Ok(FeeReceiver::Protocol),
-        }
-    }
-}
-
-impl BorshDeserialize for FeeReceiver {
-    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
-        BorshFeeReceiver::deserialize_reader(reader)?
-            .try_into()
-            .map_err(|error| {
-                near_sdk::borsh::io::Error::new(near_sdk::borsh::io::ErrorKind::InvalidData, error)
-            })
-    }
 }
 
 /// The events of the dex, logged as borsh with the engine's `dex_event` host function and
@@ -728,136 +594,6 @@ impl XykDexEvent {
     pub fn emit(&self) {
         intear_dex_types::env::dex_event(self);
     }
-}
-
-impl From<XykDexEventV1> for XykDexEvent {
-    fn from(event: XykDexEventV1) -> Self {
-        match event {
-            XykDexEventV1::PoolUpdated { pool_id, pool } => Self::PoolUpdated { pool_id, pool },
-            XykDexEventV1::Swap {
-                pool_id,
-                request,
-                amount_in,
-                fees_breakdown,
-                amount_out,
-            } => Self::Swap {
-                pool_id,
-                asset_in: request.asset_in,
-                asset_out: request.asset_out,
-                amount_in,
-                fees_breakdown,
-                amount_out,
-            },
-            XykDexEventV1::LiquidityAdded {
-                pool_id,
-                asset_0,
-                asset_1,
-                added_amount_0,
-                added_amount_1,
-                minted_shares,
-                new_owned_asset_0,
-                new_owned_asset_1,
-                new_owned_shares,
-                new_total_asset_0,
-                new_total_asset_1,
-                new_total_shares,
-            } => Self::LiquidityAdded {
-                pool_id,
-                asset_0,
-                asset_1,
-                added_amount_0,
-                added_amount_1,
-                minted_shares,
-                new_owned_asset_0,
-                new_owned_asset_1,
-                new_owned_shares,
-                new_total_asset_0,
-                new_total_asset_1,
-                new_total_shares,
-            },
-            XykDexEventV1::LiquidityRemoved {
-                pool_id,
-                asset_0,
-                asset_1,
-                removed_amount_0,
-                removed_amount_1,
-                burned_shares,
-                new_owned_asset_0,
-                new_owned_asset_1,
-                new_owned_shares,
-                new_total_asset_0,
-                new_total_asset_1,
-                new_total_shares,
-            } => Self::LiquidityRemoved {
-                pool_id,
-                asset_0,
-                asset_1,
-                removed_amount_0,
-                removed_amount_1,
-                burned_shares,
-                new_owned_asset_0,
-                new_owned_asset_1,
-                new_owned_shares,
-                new_total_asset_0,
-                new_total_asset_1,
-                new_total_shares,
-            },
-        }
-    }
-}
-
-/// The events as the dex logged them in JSON up to its switch to borsh, each in an engine
-/// `dex_event` log. `Swap` carried the whole request of the hop.
-#[near(event_json(standard = "xyk"))]
-#[derive(Deserialize)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum XykDexEventV1 {
-    #[event_version("1.0.0")]
-    PoolUpdated { pool_id: PoolId, pool: PoolView },
-    #[event_version("1.0.0")]
-    Swap {
-        pool_id: PoolId,
-        request: SwapRequest,
-        amount_in: U128,
-        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
-        amount_out: U128,
-    },
-    #[event_version("1.0.0")]
-    LiquidityAdded {
-        pool_id: PoolId,
-        asset_0: AssetId,
-        asset_1: AssetId,
-
-        added_amount_0: U128,
-        added_amount_1: U128,
-        minted_shares: U128,
-
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
-
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
-        new_total_shares: U128,
-    },
-    #[event_version("1.0.0")]
-    LiquidityRemoved {
-        pool_id: PoolId,
-        asset_0: AssetId,
-        asset_1: AssetId,
-
-        removed_amount_0: U128,
-        removed_amount_1: U128,
-        burned_shares: U128,
-
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
-
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
-        new_total_shares: U128,
-    },
 }
 
 pub fn should_reduce_fee(asset_ids: &[&AssetId]) -> bool {

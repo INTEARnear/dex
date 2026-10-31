@@ -13,4 +13,5 @@ ethnum = "1.5.3"
 near-sdk = { version = "5", default-features = false, features = ["non-contract-usage"] }
 
 [features]
+abi = ["near-sdk/abi", "intear-dex-types/abi"]
 dex = ["intear-dex-types/dex"]
