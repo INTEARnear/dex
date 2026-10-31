@@ -249,7 +249,7 @@ impl RunContext {
                 for (referrer_id, fee_fraction) in &referral_fees.0 {
                     steps.push(format!(
                         "{referrer_id} takes {} of the first swap's input as its referral fee, if it registered that asset on {ENGINE_ACCOUNT_ID}",
-                        display::format_fee(*fee_fraction)
+                        display::format_millionths(*fee_fraction)
                     ));
                 }
                 function_calls.push(FunctionCall {

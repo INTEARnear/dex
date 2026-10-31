@@ -7,7 +7,7 @@ use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::types::{BlockReference, StoreKey};
 use near_primitives::views::QueryRequest;
 use std::collections::{BTreeMap, HashMap};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU128};
 
 use intear_dex_types::AssetId;
 use near_primitives::types::AccountId;
@@ -15,7 +15,7 @@ use near_sdk::PublicKey;
 use near_sdk::json_types::U128;
 use xyk_dex_types::{
     GetClaimableFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, PoolId,
-    PoolView, SharesBalance,
+    PoolView, ProviderShares,
 };
 
 use super::ViewPanicked;
@@ -34,7 +34,7 @@ pub fn pool_count(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
     dex_id: &DexId,
-) -> color_eyre::eyre::Result<PoolId> {
+) -> color_eyre::eyre::Result<u32> {
     dex_view(
         network_config,
         block_reference,
@@ -49,10 +49,10 @@ pub fn all_pools(
     block_reference: &BlockReference,
     dex_id: &DexId,
 ) -> color_eyre::eyre::Result<Vec<(PoolId, PoolView)>> {
-    const PAGE_SIZE: PoolId = 50;
+    const PAGE_SIZE: u32 = 50;
     let pool_count = pool_count(network_config, block_reference, dex_id)?;
     let mut pools = Vec::new();
-    let mut start_index: PoolId = 0;
+    let mut start_index: u32 = 0;
     while start_index < pool_count {
         let page: Vec<PoolView> = dex_view(
             network_config,
@@ -60,11 +60,11 @@ pub fn all_pools(
             dex_id,
             "get_pools",
             &GetPoolsArgs {
-                start_index,
+                start_index: PoolId::new(start_index),
                 limit: PAGE_SIZE,
             },
         )?;
-        for (pool_id, pool) in (start_index..).zip(page) {
+        for (pool_id, pool) in (start_index..).map(PoolId::new).zip(page) {
             pools.push((pool_id, pool));
         }
         start_index = start_index.saturating_add(PAGE_SIZE);
@@ -133,7 +133,7 @@ pub fn pool_shares(
     dex_id: &DexId,
     pool_ids: Vec<PoolId>,
     account_id: &AccountId,
-) -> color_eyre::eyre::Result<Vec<Option<U128>>> {
+) -> color_eyre::eyre::Result<Vec<Option<ProviderShares>>> {
     dex_view(
         network_config,
         block_reference,
@@ -256,7 +256,7 @@ pub fn providers_from_before_migration(
             let dex_value: Vec<u8> = near_sdk::borsh::from_slice(&item.value)?;
             // A position doesn't read as shares
             if dex_key.first() == Some(&PUBLIC_POOL_PROVIDERS_PREFIX)
-                && near_sdk::borsh::from_slice::<Option<SharesBalance>>(&dex_value).is_ok()
+                && near_sdk::borsh::from_slice::<Option<NonZeroU128>>(&dex_value).is_ok()
             {
                 let (_, pool_id, account_id): (u8, PoolId, AccountId) =
                     near_sdk::borsh::from_slice(&dex_key)?;

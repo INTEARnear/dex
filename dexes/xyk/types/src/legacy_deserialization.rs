@@ -9,8 +9,8 @@ use near_sdk::{
 
 use crate::{
     AssetWithBalance, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction,
-    FeePayoutType, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolView, SignedFeeDiscount,
-    SwapArgs, SwapRoute, XykDexEvent,
+    FeePayoutType, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolView, ProviderShares,
+    SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
 };
 
 /// The message of a swap through a single pool without a fee discount is just its pool ID, which
@@ -21,7 +21,7 @@ impl BorshDeserialize for SwapArgs {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
         if let Ok(pool_id) = <[u8; 4]>::try_from(bytes.as_slice()) {
-            return Ok(Self::single_pool(PoolId::from_le_bytes(pool_id)));
+            return Ok(Self::single_pool(PoolId::new(u32::from_le_bytes(pool_id))));
         }
         let mut rest = bytes.as_slice();
         let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
@@ -203,21 +203,21 @@ enum BorshPoolView {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV1,
-        total_shares: Option<U128>,
+        total_shares: TotalShares,
     } = 1,
     LaunchV1 {
-        near_amount: U128,
+        near_amount: TokenAmount,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV1,
-        phantom_liquidity_near: U128,
+        phantom_liquidity_near: TokenAmount,
     } = 2,
     LaunchV2 {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV1,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     } = 3,
     Private {
         assets: (AssetWithBalance, AssetWithBalance),
@@ -230,14 +230,14 @@ enum BorshPoolView {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        total_shares: Option<U128>,
+        total_shares: TotalShares,
     } = 5,
     Launch {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     } = 6,
 }
 
@@ -380,7 +380,7 @@ pub(crate) enum JsonPoolView {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        total_shares: Option<U128>,
+        total_shares: TotalShares,
     },
     Launch(JsonLaunchPoolView),
     LaunchV2 {
@@ -388,7 +388,7 @@ pub(crate) enum JsonPoolView {
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     },
 }
 
@@ -396,18 +396,18 @@ pub(crate) enum JsonPoolView {
 #[serde(crate = "near_sdk::serde", untagged)]
 pub(crate) enum JsonLaunchPoolView {
     LaunchV1 {
-        near_amount: U128,
+        near_amount: TokenAmount,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        phantom_liquidity_near: U128,
+        phantom_liquidity_near: TokenAmount,
     },
     LaunchV2 {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     },
 }
 
@@ -489,7 +489,7 @@ fn convert_launch_pool_view(
     launched_asset: AssetWithBalance,
     mut fees: CurrentFees,
     mut fee_configuration: FeeConfigurationV2,
-    phantom_liquidity: U128,
+    phantom_liquidity: TokenAmount,
 ) -> PoolView {
     let receivers = fees
         .receivers
@@ -525,9 +525,9 @@ pub enum XykDexEventV1 {
     Swap {
         pool_id: PoolId,
         request: SwapRequest,
-        amount_in: U128,
-        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
-        amount_out: U128,
+        amount_in: TokenAmount,
+        fees_breakdown: Vec<(FeeReceiver, AssetId, TokenAmount)>,
+        amount_out: TokenAmount,
     },
     #[event_version("1.0.0")]
     LiquidityAdded {
@@ -535,16 +535,16 @@ pub enum XykDexEventV1 {
         asset_0: AssetId,
         asset_1: AssetId,
 
-        added_amount_0: U128,
-        added_amount_1: U128,
+        added_amount_0: TokenAmount,
+        added_amount_1: TokenAmount,
         minted_shares: U128,
 
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
+        new_owned_asset_0: TokenAmount,
+        new_owned_asset_1: TokenAmount,
         new_owned_shares: U128,
 
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
+        new_total_asset_0: TokenAmount,
+        new_total_asset_1: TokenAmount,
         new_total_shares: U128,
     },
     #[event_version("1.0.0")]
@@ -553,16 +553,16 @@ pub enum XykDexEventV1 {
         asset_0: AssetId,
         asset_1: AssetId,
 
-        removed_amount_0: U128,
-        removed_amount_1: U128,
+        removed_amount_0: TokenAmount,
+        removed_amount_1: TokenAmount,
         burned_shares: U128,
 
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
+        new_owned_asset_0: TokenAmount,
+        new_owned_asset_1: TokenAmount,
         new_owned_shares: U128,
 
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
+        new_total_asset_0: TokenAmount,
+        new_total_asset_1: TokenAmount,
         new_total_shares: U128,
     },
 }
@@ -604,10 +604,10 @@ impl From<XykDexEventV1> for XykDexEvent {
                 asset_1,
                 added_amount_0,
                 added_amount_1,
-                minted_shares,
+                minted_shares: ProviderShares::new(minted_shares.0),
                 new_owned_asset_0,
                 new_owned_asset_1,
-                new_owned_shares,
+                new_owned_shares: ProviderShares::new(new_owned_shares.0),
                 new_total_asset_0,
                 new_total_asset_1,
                 new_total_shares,
@@ -631,10 +631,10 @@ impl From<XykDexEventV1> for XykDexEvent {
                 asset_1,
                 removed_amount_0,
                 removed_amount_1,
-                burned_shares,
+                burned_shares: ProviderShares::new(burned_shares.0),
                 new_owned_asset_0,
                 new_owned_asset_1,
-                new_owned_shares,
+                new_owned_shares: ProviderShares::new(new_owned_shares.0),
                 new_total_asset_0,
                 new_total_asset_1,
                 new_total_shares,

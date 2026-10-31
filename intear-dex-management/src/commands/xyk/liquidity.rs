@@ -1,5 +1,3 @@
-use std::num::NonZeroU128;
-
 use intear_dex_types::{AccountOrDexId, DexId};
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
@@ -7,12 +5,11 @@ use near_cli_rs::network_view_at_block::{
 };
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
-use near_sdk::json_types::U128;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use xyk_dex_types::{
-    AddLiquidityArgs, FULL_FEE_FRACTION, INITIAL_SHARES, PoolId, PoolView, RegisterLiquidityArgs,
-    RemoveLiquidityArgs,
+    AddLiquidityArgs, FULL_FEE_FRACTION, INITIAL_SHARES, PoolId, PoolView, ProviderShares,
+    RegisterLiquidityArgs, RemoveLiquidityArgs, TokenAmount,
 };
 
 use super::presentation::{pool_assets, pool_kind};
@@ -150,22 +147,21 @@ fn positions(
                     pool,
                 });
             }
-            PoolView::Public {
-                total_shares: Some(U128(total_shares)),
-                ..
-            } => {
+            PoolView::Public { total_shares, .. } if !total_shares.is_none() => {
+                let total_shares = total_shares.get();
                 let shares = public_pool_ids
                     .iter()
                     .position(|public_pool_id| *public_pool_id == pool_id)
                     .and_then(|index| public_pool_shares.get(index).copied().flatten());
-                if let Some(U128(shares)) = shares.filter(|U128(shares)| *shares > 0) {
+                if let Some(shares) = shares.filter(|shares| !shares.is_zero()) {
+                    let shares = shares.get();
                     positions.push(Position {
                         pool_id,
                         shares: Some(shares),
-                        share_of_pool: display::format_share(shares, *total_shares)?,
+                        share_of_pool: display::format_share(shares, total_shares)?,
                         amounts: liquidity_for_shares(
                             shares,
-                            *total_shares,
+                            total_shares,
                             (reserve_0, reserve_1),
                         )?,
                         pool,
@@ -491,29 +487,25 @@ impl AddMaxSlippageContext {
                                 &[(intear_dex_types::AssetId::Near, storage_near.as_yoctonear())],
                             )?);
                         }
-                        let min_shares_received = match total_shares {
+                        let min_shares_received = if total_shares.is_none() {
                             // The first liquidity sets the price, and gets
                             // all the shares there are
-                            None => {
-                                steps.push(format!(
-                                    "Add {amounts_label} to {pool_label}, the first liquidity, which sets its price"
-                                ));
-                                None
-                            }
-                            Some(U128(total_shares)) => {
-                                let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
-                                let expected_shares = shares_for_liquidity(
-                                    (amount_0, amount_1),
-                                    (reserve_0, reserve_1),
-                                    *total_shares,
-                                )?;
-                                let min_shares =
-                                    at_least_with_slippage(expected_shares, max_slippage)?;
-                                steps.push(format!(
-                                    "Add up to {amounts_label} to {pool_label} for at least {min_shares} shares, {expected_shares} at the current ratio; what doesn't fit the ratio goes back to {signer_id}'s wallet"
-                                ));
-                                NonZeroU128::new(min_shares)
-                            }
+                            steps.push(format!(
+                                "Add {amounts_label} to {pool_label}, the first liquidity, which sets its price"
+                            ));
+                            None
+                        } else {
+                            let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
+                            let expected_shares = shares_for_liquidity(
+                                (amount_0, amount_1),
+                                (reserve_0, reserve_1),
+                                total_shares.get(),
+                            )?;
+                            let min_shares = at_least_with_slippage(expected_shares, max_slippage)?;
+                            steps.push(format!(
+                                "Add up to {amounts_label} to {pool_label} for at least {min_shares} shares, {expected_shares} at the current ratio; what doesn't fit the ratio goes back to {signer_id}'s wallet"
+                            ));
+                            Some(ProviderShares::new(min_shares))
                         };
                         operations.push(planning::dex_call_operation(
                             &dex_id,
@@ -648,9 +640,11 @@ fn shares_to_remove(
 ) -> color_eyre::eyre::Result<u128> {
     let shares = match share {
         ShareArg::All => owned,
-        ShareArg::Percent(PercentArg(millionths)) => {
-            mul_div_floor(owned, u128::from(millionths), u128::from(FULL_FEE_FRACTION))?
-        }
+        ShareArg::Percent(PercentArg(millionths)) => mul_div_floor(
+            owned,
+            u128::from(millionths),
+            u128::from(FULL_FEE_FRACTION.get()),
+        )?,
         ShareArg::RawShares(shares) => shares,
     };
     if shares == 0 {
@@ -758,25 +752,28 @@ impl RemoveMaxSlippageContext {
                         .first()
                         .copied()
                         .flatten()
-                        .map_or(0, |U128(shares)| shares);
-                        let (Some(U128(total_shares)), true) = (total_shares, owned_shares > 0)
-                        else {
+                        .map_or(0, ProviderShares::get);
+                        if total_shares.is_none() || owned_shares == 0 {
                             return Err(PreflightError::NoShares {
                                 owner: signer_id.clone(),
                                 dex_id: dex_id.clone(),
                                 pool_id,
                             }
                             .into_report());
-                        };
+                        }
                         let shares =
                             shares_to_remove(share, owned_shares, preflight, &dex_id, pool_id)?;
                         (
                             shares,
                             format!(
                                 "{shares} shares ({} of the pool) from {pool_label}",
-                                display::format_share(shares, *total_shares)?
+                                display::format_share(shares, total_shares.get())?
                             ),
-                            liquidity_for_shares(shares, *total_shares, (reserve_0, reserve_1))?,
+                            liquidity_for_shares(
+                                shares,
+                                total_shares.get(),
+                                (reserve_0, reserve_1),
+                            )?,
                         )
                     }
                 };
@@ -825,7 +822,9 @@ impl RemoveMaxSlippageContext {
                 }
                 let shares_to_remove = match share {
                     ShareArg::All => None,
-                    ShareArg::Percent(_) | ShareArg::RawShares(_) => NonZeroU128::new(shares),
+                    ShareArg::Percent(_) | ShareArg::RawShares(_) => {
+                        Some(ProviderShares::new(shares))
+                    }
                 };
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
@@ -836,7 +835,10 @@ impl RemoveMaxSlippageContext {
                             &RemoveLiquidityArgs {
                                 pool_id,
                                 shares_to_remove,
-                                min_assets_received: Some((U128(minimums.0), U128(minimums.1))),
+                                min_assets_received: Some((
+                                    TokenAmount::new(minimums.0),
+                                    TokenAmount::new(minimums.1),
+                                )),
                             },
                             &[],
                         )?],

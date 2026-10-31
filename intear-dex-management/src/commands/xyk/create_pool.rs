@@ -3,11 +3,11 @@ use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
 use near_sdk::NearToken;
-use near_sdk::json_types::U128;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use xyk_dex_types::{
-    CreatePoolArgs, FeePayoutType, PROTOCOL_FEE_RECEIVER_ID, PoolAssets, PoolType,
+    CreatePoolArgs, FeePayoutType, PROTOCOL_FEE_RECEIVER_ID, PROTOCOL_FEE_SHARE, PoolAssets,
+    PoolType, TokenAmount,
 };
 
 use super::XykContext;
@@ -493,7 +493,7 @@ impl PoolFeesContext {
                                 PoolType::PublicLatest,
                                 "public",
                                 NewPoolKind::Public,
-                                Some((U128(amount_0), U128(amount_1))),
+                                Some((TokenAmount::new(amount_0), TokenAmount::new(amount_1))),
                             )
                         }
                         NewPool::Launch {
@@ -529,7 +529,9 @@ impl PoolFeesContext {
                             (
                                 (AssetId::Near, token.clone()),
                                 PoolType::LaunchLatest {
-                                    phantom_liquidity: U128(phantom_liquidity.as_yoctonear()),
+                                    phantom_liquidity: TokenAmount::new(
+                                        phantom_liquidity.as_yoctonear(),
+                                    ),
                                 },
                                 "launch",
                                 NewPoolKind::Launch,
@@ -609,8 +611,8 @@ impl PoolFeesContext {
                     preflight.protocol_limits.storage_byte_cost,
                 )?;
                 let initial_liquidity_near = match initial_liquidity {
-                    Some((U128(amount_0), _)) if assets.0 == AssetId::Near => amount_0,
-                    Some((_, U128(amount_1))) if assets.1 == AssetId::Near => amount_1,
+                    Some((amount_0, _)) if assets.0 == AssetId::Near => amount_0.get(),
+                    Some((_, amount_1)) if assets.1 == AssetId::Near => amount_1.get(),
                     _ => 0,
                 };
                 attached_assets.insert(
@@ -633,7 +635,7 @@ impl PoolFeesContext {
                 let mut steps = registration_calls.steps;
                 let mut function_calls = registration_calls.function_calls;
                 steps.push(format!(
-                    "Create a {kind_label} {pair} pool on {dex_id} with fees {}, plus the protocol fee",
+                    "Create a {kind_label} {pair} pool on {dex_id} with fees {}, of which the protocol takes {PROTOCOL_FEE_SHARE}",
                     format_fee_configuration(&fee_configuration, [&assets.0, &assets.1])
                 ));
                 steps.extend(extra_steps);

@@ -1,20 +1,20 @@
 use std::str::FromStr;
 
-use xyk_dex_types::{FULL_FEE_FRACTION, FeeFraction};
+use xyk_dex_types::FULL_FEE_FRACTION;
 
 use crate::display;
 
-const MILLIONTHS_PER_PERCENT: FeeFraction = 10_000;
+const MILLIONTHS_PER_PERCENT: u32 = 10_000;
 const PERCENT_DECIMALS: usize = 4;
 
 /// A percentage with up to four decimals, in millionths like the xyk
 /// contract's fee fractions: 0.3% is 3000
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PercentArg(pub FeeFraction);
+pub struct PercentArg(pub u32);
 
 impl std::fmt::Display for PercentArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", display::format_fee(self.0))
+        write!(f, "{}", display::format_millionths(self.0))
     }
 }
 
@@ -39,15 +39,14 @@ impl FromStr for PercentArg {
             ));
         }
         let more_than_hundred = || format!("{s} is more than 100%");
-        let whole_percents: FeeFraction =
-            integer_digits.parse().map_err(|_| more_than_hundred())?;
-        let fraction_millionths: FeeFraction = format!("{fraction_digits:0<PERCENT_DECIMALS$}")
+        let whole_percents: u32 = integer_digits.parse().map_err(|_| more_than_hundred())?;
+        let fraction_millionths: u32 = format!("{fraction_digits:0<PERCENT_DECIMALS$}")
             .parse()
             .map_err(|_| expected())?;
         let millionths = whole_percents
             .checked_mul(MILLIONTHS_PER_PERCENT)
             .and_then(|whole_millionths| whole_millionths.checked_add(fraction_millionths))
-            .filter(|millionths| *millionths <= FULL_FEE_FRACTION)
+            .filter(|millionths| *millionths <= FULL_FEE_FRACTION.get())
             .ok_or_else(more_than_hundred)?;
         Ok(Self(millionths))
     }

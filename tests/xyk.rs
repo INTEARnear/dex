@@ -22,13 +22,14 @@ use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use xyk_dex_types::{
     AddLiquidityArgs, AssetWithBalance, CAN_MIGRATE, ClaimFeesArgs, ClaimMode, CreatePoolArgs,
-    CurrentFees, FULL_FEE_FRACTION, FULL_SPLIT_FRACTION, FeeAmount, FeeConfigurationV2,
-    FeeDiscount, FeeDiscountSignaturePayload, FeePayoutType, FeeReceiver, GetClaimableFeesArgs,
-    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
-    LiquidityPositionView, LockPoolArgs, MAX_FEE_RECEIVERS, MigrateArgs, PROTOCOL_FEE,
-    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, RegisterLiquidityArgs,
-    RemoveLiquidityArgs, ScheduledFeeCurve, SetFeeDiscountSignerArgs, SignedFeeDiscount,
-    SplitFraction, SwapArgs, SwapRoute, WithdrawFeesArgs, XykDexEvent,
+    CurrentFees, FULL_FEE_DISCOUNT, FULL_ROUTE_FRACTION, FeeAmount, FeeConfigurationV2,
+    FeeDiscount, FeeDiscountFraction, FeeDiscountSignaturePayload, FeeFraction, FeePayoutType,
+    FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
+    GetPoolSharesArgs, LAST_CREATED_POOL_ID_MARKER, LiquidityPositionView, LockPoolArgs,
+    MAX_FEE_RECEIVERS, MigrateArgs, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView,
+    ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, ScheduledFeeCurve,
+    SetFeeDiscountSignerArgs, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares,
+    WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -136,7 +137,7 @@ async fn get_claimable_fees(
     near_sdk::borsh::from_slice(&result.json::<Base64VecU8>().unwrap().0).unwrap()
 }
 
-async fn get_pool_count(dex_engine_contract: &Contract, dex_id: &DexId) -> PoolId {
+async fn get_pool_count(dex_engine_contract: &Contract, dex_id: &DexId) -> u32 {
     let result = dex_engine_contract
         .view("dex_view")
         .args_json(json!({
@@ -202,21 +203,21 @@ enum PoolViewBeforeMigration {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationBeforeMigration,
-        total_shares: Option<U128>,
+        total_shares: TotalShares,
     },
     Launch {
-        near_amount: U128,
+        near_amount: TokenAmount,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationBeforeMigration,
-        phantom_liquidity_near: U128,
+        phantom_liquidity_near: TokenAmount,
     },
     LaunchV2 {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationBeforeMigration,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     },
 }
 
@@ -358,7 +359,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
     let swap_amount_ft1 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u32; // First pool will have ID 0
+    let first_pool_id = PoolId::new(0); // First pool will have ID 0
 
     let wasms = get_compiled_wasms().await;
 
@@ -469,8 +470,8 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
         PoolView::Private {
             assets, owner_id, ..
         } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1);
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2);
             assert_eq!(owner_id, deployer.id());
         }
         _ => panic!("Expected private pool"),
@@ -519,21 +520,17 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // The pool has no fee receivers, but the protocol still takes 0.1% = 100,000 FT1
-    let protocol_fee_ft1 = 100_000u128;
-    // (99,900,000 * 2,000,000,000) / (1,000,000,000 + 99,900,000) = 181,652,877 FT2
-    let expected_ft2_out = 181_652_877u128;
+    // The pool has no fee receivers, so the protocol has no fees to take its share of
+    // (100,000,000 * 2,000,000,000) / (1,000,000,000 + 100,000,000) = 181,818,181 FT2
+    let expected_ft2_out = 181_818_181u128;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap();
     match &pool {
         PoolView::Private { assets, .. } => {
-            assert_eq!(
-                assets.0.balance.0,
-                add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_ft1
-            );
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1 + swap_amount_ft1);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2 - expected_ft2_out);
         }
         _ => panic!("Expected private pool"),
     }
@@ -575,8 +572,8 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
         .unwrap();
     match &pool {
         PoolView::Private { assets, .. } => {
-            assert_eq!(assets.0.balance.0, 0);
-            assert_eq!(assets.1.balance.0, 0);
+            assert_eq!(assets.0.balance.get(), 0);
+            assert_eq!(assets.1.balance.get(), 0);
         }
         _ => panic!("Expected private pool"),
     }
@@ -621,7 +618,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
     let swap_amount_ft1 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 4_000_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -702,8 +699,8 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type,
                             initial_liquidity: Some((
-                                U128(add_liquidity_ft1_deployer),
-                                U128(add_liquidity_ft2_deployer),
+                                TokenAmount::new(add_liquidity_ft1_deployer),
+                                TokenAmount::new(add_liquidity_ft2_deployer),
                             )),
                         })
                         .unwrap(),
@@ -826,14 +823,14 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
             ..
         } => {
             assert_eq!(
-                assets.0.balance.0,
+                assets.0.balance.get(),
                 add_liquidity_ft1_deployer + add_liquidity_ft1_user1
             );
             assert_eq!(
-                assets.1.balance.0,
+                assets.1.balance.get(),
                 add_liquidity_ft2_deployer + added_liquidity_ft2_user1 - 1
             );
-            assert!(total_shares.is_some());
+            assert!(!total_shares.is_none());
         }
         _ => panic!("Expected public pool"),
     }
@@ -891,12 +888,11 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // The pool has no fee receivers, but the protocol still takes 0.1% = 100,000 FT1
-    let protocol_fee_ft1 = 100_000u128;
-    // (99,900,000 * 2,999,999,999) / (1,500,000,000 + 99,900,000) = 187,324,207 FT2
-    let expected_ft2_out = 187_324_207u128;
+    // The pool has no fee receivers, so the protocol has no fees to take its share of
+    // (100,000,000 * 2,999,999,999) / (1,500,000,000 + 100,000,000) = 187,499,999 FT2
+    let expected_ft2_out = 187_499_999u128;
     let pool_ft1_after_swap =
-        add_liquidity_ft1_deployer + add_liquidity_ft1_user1 + swap_amount_ft1 - protocol_fee_ft1;
+        add_liquidity_ft1_deployer + add_liquidity_ft1_user1 + swap_amount_ft1;
     let pool_ft2_after_swap =
         add_liquidity_ft2_deployer + added_liquidity_ft2_user1 - 1 - expected_ft2_out;
 
@@ -913,11 +909,11 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
             total_shares,
             ..
         } => {
-            assert_eq!(assets.0.balance.0, pool_ft1_after_swap);
-            assert_eq!(assets.1.balance.0, pool_ft2_after_swap);
+            assert_eq!(assets.0.balance.get(), pool_ft1_after_swap);
+            assert_eq!(assets.1.balance.get(), pool_ft2_after_swap);
             assert_eq!(
-                *total_shares,
-                Some(U128(10u128.pow(18) + 10u128.pow(18) / 2 - 1000000000))
+                total_shares.get(),
+                10u128.pow(18) + 10u128.pow(18) / 2 - 1000000000
             );
         }
         _ => panic!("Expected public pool"),
@@ -970,8 +966,8 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
             total_shares,
             ..
         } => {
-            assert_eq!(assets.0.balance.0, 0);
-            assert_eq!(assets.1.balance.0, 0);
+            assert_eq!(assets.0.balance.get(), 0);
+            assert_eq!(assets.1.balance.get(), 0);
             assert!(total_shares.is_none());
         }
         _ => panic!("Expected public pool"),
@@ -1126,7 +1122,7 @@ async fn test_xyk_migration_of_mainnet_state() {
 
     let pool_count = get_pool_count(&dex_engine_contract, &dex_id).await;
     let mut migrated_pools = Vec::new();
-    for pool_id in 0..pool_count {
+    for pool_id in (0..pool_count).map(PoolId::new) {
         migrated_pools.push(get_pool_as_migrated(&dex_engine_contract, &dex_id, pool_id).await);
     }
     // The accounts that anyone can claim the fees of were communities before the migration
@@ -1234,7 +1230,7 @@ async fn test_xyk_migration_of_mainnet_state() {
     assert!(!result.is_success());
     assert!(is_paused(&dex_engine_contract).await.unwrap());
     assert_eq!(
-        without_fees_now(get_pool_as_migrated(&dex_engine_contract, &dex_id, 0).await),
+        without_fees_now(get_pool_as_migrated(&dex_engine_contract, &dex_id, PoolId::new(0)).await),
         without_fees_now(migrated_pools[0].clone())
     );
 
@@ -1256,7 +1252,7 @@ async fn test_xyk_migration_of_mainnet_state() {
         get_pool_count(&dex_engine_contract, &dex_id).await,
         pool_count
     );
-    for (pool_id, migrated_pool) in (0..).zip(migrated_pools.clone()) {
+    for (pool_id, migrated_pool) in (0..).map(PoolId::new).zip(migrated_pools.clone()) {
         assert_eq!(
             without_fees_now(
                 get_pool(&dex_engine_contract, &dex_id, pool_id)
@@ -1305,7 +1301,7 @@ async fn test_xyk_migration_of_mainnet_state() {
             get_liquidity_position(&dex_engine_contract, &dex_id, *pool_id, account_id).await,
             Some(LiquidityPositionView {
                 payout_type: FeePayoutType::KeepBoth,
-                uncollected_fees: (U128(0), U128(0)),
+                uncollected_fees: (TokenAmount::ZERO, TokenAmount::ZERO),
             })
         );
     }
@@ -1315,15 +1311,14 @@ async fn test_xyk_migration_of_mainnet_state() {
     let (pool_id, token_asset_id) = shares_before_migration
         .iter()
         .find_map(
-            |(pool_id, account_id, shares)| match &migrated_pools[*pool_id as usize] {
+            |(pool_id, account_id, shares)| match &migrated_pools[pool_id.get() as usize] {
                 PoolView::Public { assets, fees, .. }
                     if account_id == owner.id()
                         && shares.0 > 0
                         && assets.0.asset_id == AssetId::Near
-                        && fees
-                            .receivers
-                            .iter()
-                            .any(|(receiver, fee)| *receiver == FeeReceiver::Pool && *fee > 0) =>
+                        && fees.receivers.iter().any(|(receiver, fee)| {
+                            *receiver == FeeReceiver::Pool && *fee > FeeFraction::ZERO
+                        }) =>
                 {
                     Some((*pool_id, assets.1.asset_id.clone()))
                 }
@@ -1383,8 +1378,8 @@ async fn test_xyk_migration_of_mainnet_state() {
     else {
         panic!("Expected a position that keeps its fees");
     };
-    assert!(uncollected_fee_near.0 > 0);
-    assert_eq!(uncollected_fee_token, U128(0));
+    assert!(!uncollected_fee_near.is_zero());
+    assert_eq!(uncollected_fee_token, TokenAmount::ZERO);
     let owner_fees_before_removal = get_pending_fees(
         &dex_engine_contract,
         &dex_id,
@@ -1426,7 +1421,7 @@ async fn test_xyk_migration_of_mainnet_state() {
     assert_eq!(
         owner_fees_after_removal.get(&AssetId::Near),
         Some(&U128(
-            owner_fees_before_removal[&AssetId::Near].0 + uncollected_fee_near.0
+            owner_fees_before_removal[&AssetId::Near].0 + uncollected_fee_near.get()
         ))
     );
 }
@@ -1439,7 +1434,7 @@ async fn test_xyk_lock_pool() {
     let add_liquidity_ft2 = 2_000_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -1595,7 +1590,7 @@ async fn test_xyk_lock_pool() {
 #[tokio::test]
 async fn test_xyk_multi_user_liquidity() {
     let storage_deposit_for_pool = NearToken::from_millinear(50);
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let user_liquidity = [
         (100_000_000u128, 200_000_000u128),
@@ -1730,7 +1725,10 @@ async fn test_xyk_multi_user_liquidity() {
                         ),
                         fees: FeeConfigurationV2 { receivers: vec![] },
                         pool_type: PoolType::PublicLatest,
-                        initial_liquidity: Some((U128(ft1_amount), U128(ft2_amount))),
+                        initial_liquidity: Some((
+                            TokenAmount::new(ft1_amount),
+                            TokenAmount::new(ft2_amount),
+                        )),
                     })
                     .unwrap(),
                 ),
@@ -1789,8 +1787,8 @@ async fn test_xyk_multi_user_liquidity() {
         .unwrap();
     match &pool {
         PoolView::Public { assets, .. } => {
-            assert_eq!(assets.0.balance.0, total_ft1 - 3);
-            assert_eq!(assets.1.balance.0, total_ft2 - 8);
+            assert_eq!(assets.0.balance.get(), total_ft1 - 3);
+            assert_eq!(assets.1.balance.get(), total_ft2 - 8);
         }
         _ => panic!("Expected public pool"),
     }
@@ -1826,8 +1824,8 @@ async fn test_xyk_multi_user_liquidity() {
             total_shares,
             ..
         } => {
-            assert_eq!(assets.0.balance.0, 0);
-            assert_eq!(assets.1.balance.0, 0);
+            assert_eq!(assets.0.balance.get(), 0);
+            assert_eq!(assets.1.balance.get(), 0);
             assert!(total_shares.is_none());
         }
         _ => panic!("Expected public pool"),
@@ -1869,7 +1867,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
     let storage_deposit_for_pool = NearToken::from_millinear(50);
     let initial_liquidity_near = NearToken::from_near(5).as_yoctonear();
     let initial_liquidity_ft1 = 1_000_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -1919,7 +1917,8 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
     assert_success(&result).unwrap();
 
     // NEAR is both a pool asset and the storage deposit, so the attached NEAR covers both
-    let create_pool = |initial_liquidity: Option<(U128, U128)>, attached_ft1: u128| {
+    let create_pool = |initial_liquidity: Option<(TokenAmount, TokenAmount)>,
+                       attached_ft1: u128| {
         deployer
             .call(dex_engine_contract.id(), "execute_operations")
             .max_gas()
@@ -1932,7 +1931,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                         args: Base64VecU8(
                             near_sdk::borsh::to_vec(&CreatePoolArgs {
                                 assets: (AssetId::Near, AssetId::Nep141(ft1.id().clone())),
-                                fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(3_000))] },
+                                fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(3_000)))] },
                                 pool_type: PoolType::PublicLatest,
                                 initial_liquidity,
                             })
@@ -1958,20 +1957,28 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
             "Public pools must be created with initial liquidity",
         ),
         (
-            Some((U128(initial_liquidity_near), U128(initial_liquidity_ft1))),
+            Some((
+                TokenAmount::new(initial_liquidity_near),
+                TokenAmount::new(initial_liquidity_ft1),
+            )),
             initial_liquidity_ft1 - 1,
             "must be equal to its initial liquidity",
         ),
         (
             Some((
-                U128(storage_deposit_for_pool.as_yoctonear() + initial_liquidity_near + 1),
-                U128(initial_liquidity_ft1),
+                TokenAmount::new(
+                    storage_deposit_for_pool.as_yoctonear() + initial_liquidity_near + 1,
+                ),
+                TokenAmount::new(initial_liquidity_ft1),
             )),
             initial_liquidity_ft1,
             "Not enough NEAR attached for initial liquidity and storage",
         ),
         (
-            Some((U128(initial_liquidity_near), U128(0))),
+            Some((
+                TokenAmount::new(initial_liquidity_near),
+                TokenAmount::new(0),
+            )),
             0,
             "Initial liquidity amounts must be greater than 0",
         ),
@@ -1986,7 +1993,10 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
     assert_eq!(get_pool_count(&dex_engine_contract, &dex_id).await, 0);
 
     let result = create_pool(
-        Some((U128(initial_liquidity_near), U128(initial_liquidity_ft1))),
+        Some((
+            TokenAmount::new(initial_liquidity_near),
+            TokenAmount::new(initial_liquidity_ft1),
+        )),
         initial_liquidity_ft1,
     )
     .await
@@ -2002,9 +2012,9 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
             total_shares,
             ..
         } => {
-            assert_eq!(assets.0.balance.0, initial_liquidity_near);
-            assert_eq!(assets.1.balance.0, initial_liquidity_ft1);
-            assert_eq!(total_shares, Some(U128(10u128.pow(18))));
+            assert_eq!(assets.0.balance.get(), initial_liquidity_near);
+            assert_eq!(assets.1.balance.get(), initial_liquidity_ft1);
+            assert_eq!(total_shares.get(), 10u128.pow(18));
         }
         _ => panic!("Expected public pool"),
     }
@@ -2026,7 +2036,10 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
         .collect::<Vec<_>>();
     assert_eq!(
         liquidity_added,
-        vec![(U128(10u128.pow(18)), U128(initial_liquidity_near))]
+        vec![(
+            ProviderShares::new(10u128.pow(18)),
+            TokenAmount::new(initial_liquidity_near)
+        )]
     );
 }
 
@@ -2037,10 +2050,11 @@ async fn test_xyk_fees() {
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
     let swap_amount_ft1 = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let receiver_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
 
     let wasms = get_compiled_wasms().await;
 
@@ -2118,7 +2132,7 @@ async fn test_xyk_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -2187,12 +2201,12 @@ async fn test_xyk_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // fee = swap_amount_ft1 * fee_fraction / 1_000_000 = 100_000_000 * 10_000 / 1_000_000 = 1_000_000
-    let fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
+    // fee = 100_000_000 * 8_000 / 1_000_000 = 800_000
+    let fee_amount = swap_amount_ft1 * receiver_fee_fraction as u128 / 1_000_000;
     let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
     let amount_after_fee = swap_amount_ft1 - fee_amount - protocol_fee_amount;
-    // out = (98_900_000 * 2_000_000_000) / (1_000_000_000 + 98_900_000) = 179_998_179
-    let expected_ft2_out = 179_998_179;
+    // out = (99_000_000 * 2_000_000_000) / (1_000_000_000 + 99_000_000) = 180_163_785
+    let expected_ft2_out = 180_163_785;
 
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
         .await
@@ -2203,8 +2217,8 @@ async fn test_xyk_fees() {
         .unwrap();
     match &pool {
         PoolView::Private { assets, fees, .. } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1 + amount_after_fee);
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1 + amount_after_fee);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2 - expected_ft2_out);
             assert_eq!(fees.receivers.len(), 2);
         }
         _ => panic!("Expected private pool"),
@@ -2244,11 +2258,10 @@ async fn test_xyk_scheduled_fees() {
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
     let swap_amount_ft1 = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let scheduled_fee_start = 20_000u32; // 2%
     let scheduled_fee_end = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
 
     let wasms = get_compiled_wasms().await;
 
@@ -2340,8 +2353,8 @@ async fn test_xyk_scheduled_fees() {
                                 receivers: vec![(
                                     FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner },
                                     FeeAmount::Scheduled {
-                                        start: (scheduled_start_timestamp, scheduled_fee_start),
-                                        end: (scheduled_end_timestamp, scheduled_fee_end),
+                                        start: (scheduled_start_timestamp, FeeFraction::new(scheduled_fee_start)),
+                                        end: (scheduled_end_timestamp, FeeFraction::new(scheduled_fee_end)),
                                         curve: ScheduledFeeCurve::Linear,
                                     },
                                 )],
@@ -2453,9 +2466,9 @@ async fn test_xyk_scheduled_fees() {
     .unwrap()
     .expect("missing internal fee balance for user2 after withdraw_fees")
     .0;
-    // 5% protocol fee
+    // 20% protocol fee
     let expected_fee_fraction_after_fast_forward =
-        expected_fee_fraction_after_fast_forward as u128 * 95 / 100;
+        expected_fee_fraction_after_fast_forward as u128 * 80 / 100;
     // +/- 1% to account for fast_forward time inconsistency
     const TIME_INCONSISTENCY_PERCENT: u128 = 1;
     let min_fee_fraction =
@@ -2472,22 +2485,24 @@ async fn test_xyk_scheduled_fees() {
         max_fee_amount
     );
 
-    let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
-    let user_fee_fraction_from_balance = user2_fee_balance
-        .checked_mul(1_000_000)
-        .unwrap()
-        .checked_div(swap_amount_ft1)
-        .unwrap();
-    let scheduled_total_fee_fraction = user_fee_fraction_from_balance * 100 / 95;
-    let scheduled_protocol_fee_fraction = scheduled_total_fee_fraction * 5 / 100;
-    let scheduled_protocol_fee_amount =
-        swap_amount_ft1 * scheduled_protocol_fee_fraction / 1_000_000;
+    let protocol_fee_amount = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        &PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+        vec![AssetId::Nep141(ft1.id().clone())],
+    )
+    .await[&AssetId::Nep141(ft1.id().clone())]
+        .0;
+    let one_fee_fraction_amount = swap_amount_ft1 / 1_000_000;
+    assert!(
+        (protocol_fee_amount * 4..protocol_fee_amount * 4 + 5 * one_fee_fraction_amount)
+            .contains(&user2_fee_balance),
+        "The protocol took {protocol_fee_amount} and the receiver {user2_fee_balance}"
+    );
     let amount_after_fee = swap_amount_ft1
         .checked_sub(user2_fee_balance)
         .unwrap()
         .checked_sub(protocol_fee_amount)
-        .unwrap()
-        .checked_sub(scheduled_protocol_fee_amount)
         .unwrap();
     let expected_ft2_out =
         amount_after_fee * add_liquidity_ft2 / (add_liquidity_ft1 + amount_after_fee);
@@ -2501,8 +2516,8 @@ async fn test_xyk_scheduled_fees() {
         .unwrap();
     match &pool {
         PoolView::Private { assets, fees, .. } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1 + amount_after_fee);
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2 - expected_ft2_out);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1 + amount_after_fee);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2 - expected_ft2_out);
             assert_eq!(fees.receivers.len(), 2);
         }
         _ => panic!("Expected private pool"),
@@ -2518,7 +2533,7 @@ async fn test_xyk_exact_output() {
     let exact_output_ft2 = 100_000_000u128;
     let ft1_initial_deposit = 2_000_000_000u128;
     let ft2_initial_deposit = 3_000_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -2629,8 +2644,8 @@ async fn test_xyk_exact_output() {
         PoolView::Private {
             assets, owner_id, ..
         } => {
-            assert_eq!(assets.0.balance.0, add_liquidity_ft1);
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2);
             assert_eq!(owner_id, deployer.id());
         }
         _ => panic!("Expected private pool"),
@@ -2693,21 +2708,16 @@ async fn test_xyk_exact_output() {
 
     // amount_in_without_fees = floor((1_000_000_000 * 100_000_000) / (2_000_000_000 - 100_000_000)) + 1
     //                        = 52_631_579
-    // The pool has no fee receivers, but the protocol still takes 0.1%:
-    // amount_in = ceil(52_631_579 / 0.999) = 52_684_264, of which 52_684 is the protocol fee
-    let expected_ft1_in = 52_684_264u128;
-    let protocol_fee_ft1 = 52_684u128;
+    // The pool has no fee receivers, so the protocol has no fees to take its share of
+    let expected_ft1_in = 52_631_579u128;
 
     let pool = get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
         .unwrap();
     match &pool {
         PoolView::Private { assets, .. } => {
-            assert_eq!(
-                assets.0.balance.0,
-                add_liquidity_ft1 + expected_ft1_in - protocol_fee_ft1
-            );
-            assert_eq!(assets.1.balance.0, add_liquidity_ft2 - exact_output_ft2);
+            assert_eq!(assets.0.balance.get(), add_liquidity_ft1 + expected_ft1_in);
+            assert_eq!(assets.1.balance.get(), add_liquidity_ft2 - exact_output_ft2);
         }
         _ => panic!("Expected private pool"),
     }
@@ -2733,10 +2743,11 @@ async fn test_xyk_pool_fees() {
     let add_liquidity_ft1 = 1_000_000_000u128;
     let add_liquidity_ft2 = 2_000_000_000u128;
     let swap_amount_ft1 = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let pool_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
 
     let wasms = get_compiled_wasms().await;
 
@@ -2813,9 +2824,9 @@ async fn test_xyk_pool_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::PublicLatest,
-                            initial_liquidity: Some((U128(add_liquidity_ft1), U128(add_liquidity_ft2))),
+                            initial_liquidity: Some((TokenAmount::new(add_liquidity_ft1), TokenAmount::new(add_liquidity_ft2))),
                         })
                         .unwrap(),
                     ),
@@ -2880,11 +2891,11 @@ async fn test_xyk_pool_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // out = (98_900_000 * 2_000_000_000) / (1_000_000_000 + 98_900_000) = 179_998_179
-    let expected_ft2_out = 179_998_179u128;
+    // out = (99_000_000 * 2_000_000_000) / (1_000_000_000 + 99_000_000) = 180_163_785
+    let expected_ft2_out = 180_163_785u128;
     let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
     // The providers take the pool's fee out of the pool, and keep it by default
-    let pool_fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
+    let pool_fee_amount = swap_amount_ft1 * pool_fee_fraction as u128 / 1_000_000;
 
     let pool_ft1_after_swap =
         add_liquidity_ft1 + swap_amount_ft1 - protocol_fee_amount - pool_fee_amount;
@@ -2895,8 +2906,8 @@ async fn test_xyk_pool_fees() {
         .unwrap();
     match &pool {
         PoolView::Public { assets, .. } => {
-            assert_eq!(assets.0.balance.0, pool_ft1_after_swap);
-            assert_eq!(assets.1.balance.0, pool_ft2_after_swap);
+            assert_eq!(assets.0.balance.get(), pool_ft1_after_swap);
+            assert_eq!(assets.1.balance.get(), pool_ft2_after_swap);
         }
         _ => panic!("Expected public pool"),
     }
@@ -2934,8 +2945,8 @@ async fn test_xyk_pool_fees() {
             total_shares,
             ..
         } => {
-            assert_eq!(assets.0.balance.0, 0);
-            assert_eq!(assets.1.balance.0, 0);
+            assert_eq!(assets.0.balance.get(), 0);
+            assert_eq!(assets.1.balance.get(), 0);
             assert!(total_shares.is_none());
         }
         _ => panic!("Expected public pool"),
@@ -2986,7 +2997,7 @@ async fn test_xyk_launch_pool_flow() {
     let launch_liquidity_ft2 = 2_000_000_000u128;
     let phantom_liquidity_near = 1_000_000_000u128;
     let near_swap_in = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -3050,7 +3061,7 @@ async fn test_xyk_launch_pool_flow() {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -3085,10 +3096,10 @@ async fn test_xyk_launch_pool_flow() {
             ..
         } => {
             assert_eq!(quote_asset.asset_id, AssetId::Near);
-            assert_eq!(quote_asset.balance.0, phantom_liquidity_near);
+            assert_eq!(quote_asset.balance.get(), phantom_liquidity_near);
             assert_eq!(launched_asset.asset_id, AssetId::Nep141(ft2.id().clone()));
-            assert_eq!(launched_asset.balance.0, launch_liquidity_ft2);
-            assert_eq!(pool_phantom_liquidity_near.0, phantom_liquidity_near);
+            assert_eq!(launched_asset.balance.get(), launch_liquidity_ft2);
+            assert_eq!(pool_phantom_liquidity_near.get(), phantom_liquidity_near);
         }
         _ => panic!("Expected launch pool"),
     }
@@ -3130,9 +3141,8 @@ async fn test_xyk_launch_pool_flow() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // The pool has no fee receivers, but the protocol still takes its fee
-    let protocol_fee_near = near_swap_in * PROTOCOL_FEE as u128 / 1_000_000;
-    let near_swap_in_after_fees = near_swap_in - protocol_fee_near;
+    // The pool has no fee receivers, so the protocol has no fees to take its share of
+    let near_swap_in_after_fees = near_swap_in;
     let expected_ft2_out = near_swap_in_after_fees * launch_liquidity_ft2
         / (phantom_liquidity_near + near_swap_in_after_fees);
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
@@ -3149,11 +3159,11 @@ async fn test_xyk_launch_pool_flow() {
             ..
         } => {
             assert_eq!(
-                quote_asset.balance.0,
+                quote_asset.balance.get(),
                 phantom_liquidity_near + near_swap_in_after_fees
             );
             assert_eq!(
-                launched_asset.balance.0,
+                launched_asset.balance.get(),
                 launch_liquidity_ft2 - expected_ft2_out
             );
         }
@@ -3168,7 +3178,7 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
     let phantom_liquidity_near = 1_000_000_000u128;
     let near_swap_in = 100_000_000u128;
     let ft2_swap_in = 10_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -3244,8 +3254,8 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                     claim_mode: ClaimMode::OnlyOwner,
                 },
                 FeeAmount::Scheduled {
-                    start: (1, 20_000),
-                    end: (u64::MAX / 2, 10_000),
+                    start: (1, FeeFraction::new(20_000)),
+                    end: (u64::MAX / 2, FeeFraction::new(10_000)),
                     curve: ScheduledFeeCurve::Linear,
                 },
             )
@@ -3276,7 +3286,7 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -3333,7 +3343,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
     let launch_liquidity_ft2 = 2_000_000_000u128;
     let phantom_liquidity_near = 1_000_000_000u128;
     let near_swap_in = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -3410,7 +3420,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -3429,7 +3439,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                 },
                 Operation::SwapSimple {
                     dex_id: dex_id.clone(),
-                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(u32::MAX)).unwrap()),
+                    message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(LAST_CREATED_POOL_ID_MARKER)).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
@@ -3448,9 +3458,8 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    // The pool has no fee receivers, but the protocol still takes its fee
-    let protocol_fee_near = near_swap_in * PROTOCOL_FEE as u128 / 1_000_000;
-    let near_swap_in_after_fees = near_swap_in - protocol_fee_near;
+    // The pool has no fee receivers, so the protocol has no fees to take its share of
+    let near_swap_in_after_fees = near_swap_in;
     let expected_ft2_out = near_swap_in_after_fees * launch_liquidity_ft2
         / (phantom_liquidity_near + near_swap_in_after_fees);
     assert_ft_balance(&user1, ft2.clone(), U128(expected_ft2_out))
@@ -3467,11 +3476,11 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
             ..
         } => {
             assert_eq!(
-                quote_asset.balance.0,
+                quote_asset.balance.get(),
                 phantom_liquidity_near + near_swap_in_after_fees
             );
             assert_eq!(
-                launched_asset.balance.0,
+                launched_asset.balance.get(),
                 launch_liquidity_ft2 - expected_ft2_out
             );
         }
@@ -3487,9 +3496,10 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
     let phantom_liquidity_near = 1_000_000_000u128;
     let near_swap_in = 100_000_000u128;
     let sell_amount_ft2 = 50_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let receiver_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
     let protocol_fee_receiver: AccountId = "plach.intear.near".parse().unwrap();
 
     let wasms = get_compiled_wasms().await;
@@ -3553,9 +3563,9 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::ConvertToFirstAsset, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::ConvertToFirstAsset, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -3633,7 +3643,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
     )
     .await;
 
-    let buy_user_fee_near = near_swap_in * fee_fraction as u128 / 1_000_000;
+    let buy_user_fee_near = near_swap_in * receiver_fee_fraction as u128 / 1_000_000;
     let buy_protocol_fee_near = near_swap_in * protocol_fee_fraction as u128 / 1_000_000;
     let buy_amount_after_fees = near_swap_in
         .checked_sub(buy_user_fee_near)
@@ -3645,7 +3655,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
     let near_reserve_after_buy = phantom_liquidity_near + buy_amount_after_fees;
     let token_reserve_after_buy = launch_liquidity_ft2 - buy_token_out;
 
-    let sell_user_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
+    let sell_user_fee_token = sell_amount_ft2 * receiver_fee_fraction as u128 / 1_000_000;
     let sell_protocol_fee_token = sell_amount_ft2 * protocol_fee_fraction as u128 / 1_000_000;
     let sell_amount_after_fees = sell_amount_ft2
         .checked_sub(sell_user_fee_token)
@@ -3751,9 +3761,10 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
     let phantom_liquidity_ft1 = 1_000_000_000u128;
     let ft1_swap_in = 100_000_000u128;
     let sell_amount_ft2 = 50_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let receiver_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
     let protocol_fee_receiver: AccountId = "plach.intear.near".parse().unwrap();
 
     let wasms = get_compiled_wasms().await;
@@ -3821,9 +3832,9 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                         args: Base64VecU8(
                             near_sdk::borsh::to_vec(&CreatePoolArgs {
                                 assets: (quote_asset_id.clone(), launched_asset_id.clone()),
-                                fees: FeeConfigurationV2 { receivers: vec![(fee_receiver, FeeAmount::Fixed(fee_fraction))] },
+                                fees: FeeConfigurationV2 { receivers: vec![(fee_receiver, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                                 pool_type: PoolType::LaunchLatest {
-                                    phantom_liquidity: U128(phantom_liquidity_ft1),
+                                    phantom_liquidity: TokenAmount::new(phantom_liquidity_ft1),
                                 },
                                 initial_liquidity: None,
                             })
@@ -3862,10 +3873,10 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
             ..
         } => {
             assert_eq!(quote_asset.asset_id, quote_asset_id);
-            assert_eq!(quote_asset.balance.0, phantom_liquidity_ft1);
+            assert_eq!(quote_asset.balance.get(), phantom_liquidity_ft1);
             assert_eq!(launched_asset.asset_id, launched_asset_id);
-            assert_eq!(launched_asset.balance.0, launch_liquidity_ft2);
-            assert_eq!(phantom_liquidity.0, phantom_liquidity_ft1);
+            assert_eq!(launched_asset.balance.get(), launch_liquidity_ft2);
+            assert_eq!(phantom_liquidity.get(), phantom_liquidity_ft1);
         }
         _ => panic!("Expected launch pool"),
     }
@@ -3912,7 +3923,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let buy_user_fee_ft1 = ft1_swap_in * fee_fraction as u128 / 1_000_000;
+    let buy_user_fee_ft1 = ft1_swap_in * receiver_fee_fraction as u128 / 1_000_000;
     let buy_protocol_fee_ft1 = ft1_swap_in * protocol_fee_fraction as u128 / 1_000_000;
     let buy_amount_after_fees = ft1_swap_in
         .checked_sub(buy_user_fee_ft1)
@@ -3927,7 +3938,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
         .await
         .unwrap();
 
-    let sell_user_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
+    let sell_user_fee_token = sell_amount_ft2 * receiver_fee_fraction as u128 / 1_000_000;
     let sell_protocol_fee_token = sell_amount_ft2 * protocol_fee_fraction as u128 / 1_000_000;
     let sell_amount_after_fees = sell_amount_ft2
         .checked_sub(sell_user_fee_token)
@@ -4014,7 +4025,7 @@ async fn test_xyk_launch_pool_restrictions() {
     let launch_liquidity_ft2 = 2_000_000_000u128;
     let phantom_liquidity_near = 1_000_000_000u128;
     let ft2_for_failed_swap = 100_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -4077,7 +4088,7 @@ async fn test_xyk_launch_pool_restrictions() {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -4168,9 +4179,10 @@ async fn test_xyk_launch_pool_community_fees() {
     let phantom_liquidity_near = 1_000_000_000u128;
     let near_swap_in = 100_000_000u128;
     let sell_amount_ft2 = 50_000_000u128;
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
+    let receiver_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
 
     let wasms = get_compiled_wasms().await;
 
@@ -4243,9 +4255,9 @@ async fn test_xyk_launch_pool_community_fees() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfigurationV2 { receivers: vec![(community_receiver.clone(), FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(community_receiver.clone(), FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::LaunchLatest {
-                                phantom_liquidity: U128(phantom_liquidity_near),
+                                phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
                             initial_liquidity: None,
                         })
@@ -4296,7 +4308,10 @@ async fn test_xyk_launch_pool_community_fees() {
         } => {
             assert_eq!(
                 receivers,
-                vec![(community_receiver.clone(), FeeAmount::Fixed(fee_fraction))]
+                vec![(
+                    community_receiver.clone(),
+                    FeeAmount::Fixed(FeeFraction::new(fee_fraction))
+                )]
             );
         }
         _ => panic!("Expected launch pool"),
@@ -4352,7 +4367,7 @@ async fn test_xyk_launch_pool_community_fees() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    let buy_community_fee_near = near_swap_in * fee_fraction as u128 / 1_000_000;
+    let buy_community_fee_near = near_swap_in * receiver_fee_fraction as u128 / 1_000_000;
     let buy_protocol_fee_near = near_swap_in * protocol_fee_fraction as u128 / 1_000_000;
     let buy_amount_after_fees = near_swap_in
         .checked_sub(buy_community_fee_near)
@@ -4375,7 +4390,7 @@ async fn test_xyk_launch_pool_community_fees() {
     assert!(swap_fees[0].contains(&(
         community_receiver.clone(),
         AssetId::Near,
-        U128(buy_community_fee_near),
+        TokenAmount::new(buy_community_fee_near),
     )));
 
     assert_eq!(
@@ -4383,7 +4398,7 @@ async fn test_xyk_launch_pool_community_fees() {
         HashMap::from([(AssetId::Near, U128(buy_community_fee_near))])
     );
 
-    let sell_community_fee_token = sell_amount_ft2 * fee_fraction as u128 / 1_000_000;
+    let sell_community_fee_token = sell_amount_ft2 * receiver_fee_fraction as u128 / 1_000_000;
     let sell_protocol_fee_token = sell_amount_ft2 * protocol_fee_fraction as u128 / 1_000_000;
     let sell_amount_after_fees = sell_amount_ft2
         .checked_sub(sell_community_fee_token)
@@ -4519,7 +4534,7 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
     let initial_near_deposit = NearToken::from_near(20);
     let storage_deposit_for_pool = NearToken::from_millinear(50);
     let fee_fraction = 10_000u32; // 1%
-    let first_pool_id = 0u32;
+    let first_pool_id = PoolId::new(0);
 
     let wasms = get_compiled_wasms().await;
 
@@ -4569,7 +4584,7 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::Anyone }, FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::Anyone }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -4603,7 +4618,7 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
                         payout_type: FeePayoutType::KeepBoth,
                         claim_mode: ClaimMode::Anyone,
                     },
-                    FeeAmount::Fixed(fee_fraction)
+                    FeeAmount::Fixed(FeeFraction::new(fee_fraction))
                 )]
             );
         }
@@ -4876,9 +4891,10 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     let exact_amount_out_ft2 = 1_000_000u128;
 
     let fee_fraction = 10_000u32; // 1%
-    let protocol_fee_fraction = 1_000u32; // 0.1%
-    let half_discounted_fee_fraction = 5_000u32; // 0.5%
-    let half_discounted_protocol_fee_fraction = 500u32; // 0.05%
+    let receiver_fee_fraction = 8_000u32;
+    let protocol_fee_fraction = 2_000u32;
+    let half_discounted_fee_fraction = 4_000u32;
+    let half_discounted_protocol_fee_fraction = 1_000u32;
 
     let fee_discount_signer =
         SecretKey::from_seed(fee_discount_signer_key_type, "fee-discount-signer");
@@ -4902,7 +4918,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
     let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
     let protocol_fee_receiver_id = PROTOCOL_FEE_RECEIVER_ID.to_owned();
-    let pool_id = get_pool_count(&dex_engine_contract, &dex_id).await;
+    let pool_id = PoolId::new(get_pool_count(&dex_engine_contract, &dex_id).await);
 
     let result = deployer
         .call(dex_engine_contract.id(), "deposit_near")
@@ -4942,7 +4958,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (ft1_asset_id.clone(), ft2_asset_id.clone()),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(fee_fraction))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -5026,7 +5042,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         .await
         .unwrap()
     {
-        PoolView::Private { assets, .. } => (assets.0.balance.0, assets.1.balance.0),
+        PoolView::Private { assets, .. } => (assets.0.balance.get(), assets.1.balance.get()),
         _ => panic!("Expected private pool"),
     };
     let user1_balance = async |asset_id: &AssetId| {
@@ -5058,7 +5074,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         asset_out: ft2_asset_id.clone(),
         trader_id: Some(user1.id().clone()),
         amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
-        fee_discount: FULL_FEE_FRACTION,
+        fee_discount: FULL_FEE_DISCOUNT,
         expiration_block_height: current_block_height + 1_000,
     };
     let full_exact_out_fee_discount_for_user1 = FeeDiscount {
@@ -5103,7 +5119,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     assert!(
         matches!(
             swap_events.as_slice(),
-            [XykDexEvent::Swap { fees_breakdown, .. }] if fees_breakdown.iter().all(|(_, _, amount)| amount.0 == 0)
+            [XykDexEvent::Swap { fees_breakdown, .. }] if fees_breakdown.iter().all(|(_, _, amount)| amount.is_zero())
         ),
         "A fully discounted swap logs no fee amounts: {swap_events:#?}"
     );
@@ -5115,7 +5131,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         swap_message_with_fee_discount(sign_fee_discount(
             FeeDiscount {
                 trader_id: None,
-                fee_discount: FULL_FEE_FRACTION / 2,
+                fee_discount: FeeDiscountFraction::new(FULL_FEE_DISCOUNT.get() / 2),
                 ..full_fee_discount_for_user1.clone()
             },
             &fee_discount_signer,
@@ -5189,7 +5205,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     .await
     .unwrap();
     assert_success(&result).unwrap();
-    let fee_amount = swap_amount_ft1 * fee_fraction as u128 / 1_000_000;
+    let fee_amount = swap_amount_ft1 * receiver_fee_fraction as u128 / 1_000_000;
     let protocol_fee_amount = swap_amount_ft1 * protocol_fee_fraction as u128 / 1_000_000;
     let amount_after_fees = swap_amount_ft1 - fee_amount - protocol_fee_amount;
     let expected_ft2_out = amount_after_fees * ft2_in_pool / (ft1_in_pool + amount_after_fees);
@@ -5237,7 +5253,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 discount: full_fee_discount_for_user1.clone(),
                 signature: sign_fee_discount(
                     FeeDiscount {
-                        fee_discount: 1,
+                        fee_discount: FeeDiscountFraction::new(1),
                         ..full_fee_discount_for_user1.clone()
                     },
                     &fee_discount_signer,
@@ -5253,7 +5269,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         (
             sign_fee_discount(
                 FeeDiscount {
-                    routes: SwapArgs::single_pool(pool_id + 1).routes,
+                    routes: SwapArgs::single_pool(PoolId::new(pool_id.get() + 1)).routes,
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
@@ -5335,7 +5351,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
         (
             sign_fee_discount(
                 FeeDiscount {
-                    fee_discount: FULL_FEE_FRACTION + 1,
+                    fee_discount: FeeDiscountFraction::new(FULL_FEE_DISCOUNT.get() + 1),
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
@@ -5393,12 +5409,12 @@ async fn test_xyk_fee_discount_without_signer() {
     let chain_id = sandbox.status().await.unwrap().chain_id;
     let fee_discount = sign_fee_discount(
         FeeDiscount {
-            routes: SwapArgs::single_pool(0).routes,
+            routes: SwapArgs::single_pool(PoolId::new(0)).routes,
             asset_in: AssetId::Nep141(ft1.id().clone()),
             asset_out: AssetId::Nep141(ft2.id().clone()),
             trader_id: None,
             amount: SwapRequestAmount::ExactIn(U128(1)),
-            fee_discount: FULL_FEE_FRACTION,
+            fee_discount: FULL_FEE_DISCOUNT,
             expiration_block_height: u64::MAX,
         },
         &SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer"),
@@ -5417,7 +5433,7 @@ async fn test_xyk_fee_discount_without_signer() {
                     dex_id: dex_id.clone(),
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs {
                         fee_discount: Some(fee_discount),
-                        ..SwapArgs::single_pool(0)
+                        ..SwapArgs::single_pool(PoolId::new(0))
                     }).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
@@ -5435,9 +5451,9 @@ async fn test_xyk_fee_discount_without_signer() {
     );
 }
 
-fn route(percent: SplitFraction, pool_ids: Vec<PoolId>) -> SwapRoute {
+fn route(percent: u32, pool_ids: Vec<PoolId>) -> SwapRoute {
     SwapRoute {
-        fraction: FULL_SPLIT_FRACTION / 100 * percent,
+        fraction: RouteFraction::new(FULL_ROUTE_FRACTION.get() / 100 * percent),
         pool_ids,
     }
 }
@@ -5468,8 +5484,8 @@ async fn test_xyk_route_fee_discount() {
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
     let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
     let ft3_asset_id = AssetId::Nep141(ft3.id().clone());
-    let first_pool_id = get_pool_count(&dex_engine_contract, &dex_id).await;
-    let second_pool_id = first_pool_id + 1;
+    let first_pool_id = PoolId::new(get_pool_count(&dex_engine_contract, &dex_id).await);
+    let second_pool_id = PoolId::new(first_pool_id.get() + 1);
 
     let result = deployer
         .call(dex_engine_contract.id(), "deposit_near")
@@ -5512,9 +5528,9 @@ async fn test_xyk_route_fee_discount() {
                     args: Base64VecU8(
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: assets.clone(),
-                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(10_000))] },
+                            fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(10_000)))] },
                             pool_type: PoolType::PrivateLatest,
-                            initial_liquidity: Some((U128(liquidity), U128(liquidity))),
+                            initial_liquidity: Some((TokenAmount::new(liquidity), TokenAmount::new(liquidity))),
                         })
                         .unwrap(),
                     ),
@@ -5604,7 +5620,7 @@ async fn test_xyk_route_fee_discount() {
         asset_out: ft3_asset_id.clone(),
         trader_id: Some(user1.id().clone()),
         amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
-        fee_discount: FULL_FEE_FRACTION,
+        fee_discount: FULL_FEE_DISCOUNT,
         expiration_block_height: current_block_height + 1_000,
     };
 
@@ -5630,6 +5646,9 @@ async fn test_xyk_route_fee_discount() {
     let result = swap_ft1_to_ft3(None).await;
     assert_success(&result).unwrap();
     let pending_fees = user2_pending_fees().await;
-    assert_eq!(pending_fees[&ft1_asset_id], U128(swap_amount_ft1 / 100));
+    assert_eq!(
+        pending_fees[&ft1_asset_id],
+        U128(swap_amount_ft1 * 8 / 1000)
+    );
     assert!(pending_fees[&ft2_asset_id].0 > 0);
 }

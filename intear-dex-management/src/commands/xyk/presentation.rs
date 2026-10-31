@@ -13,16 +13,19 @@ use crate::display::{self, asset_label};
 pub fn pool_assets(pool: &PoolView) -> [(AssetId, u128); 2] {
     match pool {
         PoolView::Private { assets, .. } | PoolView::Public { assets, .. } => [
-            (assets.0.asset_id.clone(), assets.0.balance.0),
-            (assets.1.asset_id.clone(), assets.1.balance.0),
+            (assets.0.asset_id.clone(), assets.0.balance.get()),
+            (assets.1.asset_id.clone(), assets.1.balance.get()),
         ],
         PoolView::Launch {
             quote_asset,
             launched_asset,
             ..
         } => [
-            (quote_asset.asset_id.clone(), quote_asset.balance.0),
-            (launched_asset.asset_id.clone(), launched_asset.balance.0),
+            (quote_asset.asset_id.clone(), quote_asset.balance.get()),
+            (
+                launched_asset.asset_id.clone(),
+                launched_asset.balance.get(),
+            ),
         ],
     }
 }
@@ -60,13 +63,8 @@ pub fn pool_fees(pool: &PoolView) -> (&CurrentFees, &FeeConfigurationV2) {
 pub fn total_fee_fraction(fees: &CurrentFees) -> color_eyre::eyre::Result<FeeFraction> {
     fees.receivers
         .iter()
-        .try_fold(0, |total: FeeFraction, (_, fee)| total.checked_add(*fee))
-        .ok_or_else(|| {
-            eyre!(
-                "The fees of this pool add up to more than {}",
-                FeeFraction::MAX
-            )
-        })
+        .try_fold(FeeFraction::ZERO, |total, (_, fee)| total.checked_add(*fee))
+        .ok_or_else(|| eyre!("The fees of this pool add up to more than {}", u32::MAX))
 }
 
 pub fn fee_receiver_label(receiver: &FeeReceiver) -> String {
@@ -279,8 +277,7 @@ pub fn pool_json(
             pool_json["locked"] = json!(locked);
         }
         PoolView::Public { total_shares, .. } => {
-            pool_json["total_shares"] =
-                json!(total_shares.map(|total_shares| total_shares.0.to_string()));
+            pool_json["total_shares"] = json!(total_shares);
         }
 
         PoolView::Launch {
@@ -289,7 +286,7 @@ pub fn pool_json(
             ..
         } => {
             pool_json["phantom_liquidity"] = display::amount_json(
-                phantom_liquidity.0,
+                phantom_liquidity.get(),
                 metadata_cache.get(&quote_asset.asset_id)?.as_ref(),
             );
         }

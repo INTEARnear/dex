@@ -68,11 +68,15 @@ pub fn amount_json(raw: u128, metadata: Option<&AssetMetadata>) -> serde_json::V
     })
 }
 
-pub fn format_fee(fee_fraction: FeeFraction) -> String {
+pub fn format_millionths(millionths: u32) -> String {
     format!(
         "{}%",
-        decimal_amount(u128::from(fee_fraction), FEE_FRACTION_PERCENT_DECIMALS)
+        decimal_amount(u128::from(millionths), FEE_FRACTION_PERCENT_DECIMALS)
     )
+}
+
+pub fn format_fee(fee_fraction: FeeFraction) -> String {
+    format_millionths(fee_fraction.get())
 }
 
 /// `part` as a percentage of `whole`, rounded down to 0.0001%, like fees
@@ -91,7 +95,7 @@ pub fn format_share(part: u128, whole: u128) -> color_eyre::eyre::Result<String>
 pub fn fee_json(fee_fraction: FeeFraction) -> serde_json::Value {
     json!({
         "fraction": fee_fraction,
-        "percent": decimal_amount(u128::from(fee_fraction), FEE_FRACTION_PERCENT_DECIMALS),
+        "percent": decimal_amount(u128::from(fee_fraction.get()), FEE_FRACTION_PERCENT_DECIMALS),
     })
 }
 
@@ -157,9 +161,9 @@ mod tests {
 
     #[test]
     fn fees_are_percentages_of_one_million() {
-        assert_eq!(format_fee(2500), "0.25%");
-        assert_eq!(format_fee(1), "0.0001%");
-        assert_eq!(format_fee(3001), "0.3001%");
-        assert_eq!(format_fee(0), "0%");
+        assert_eq!(format_fee(FeeFraction::new(2500)), "0.25%");
+        assert_eq!(format_fee(FeeFraction::new(1)), "0.0001%");
+        assert_eq!(format_fee(FeeFraction::new(3001)), "0.3001%");
+        assert_eq!(format_fee(FeeFraction::ZERO), "0%");
     }
 }

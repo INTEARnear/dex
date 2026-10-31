@@ -1,9 +1,10 @@
 use intear_dex_types::AssetId;
-use near_sdk::{AccountId, Timestamp, json_types::U128, near, store::LookupMap};
+use near_sdk::{AccountId, Timestamp, near, store::LookupMap};
 
 use crate::{
     AssetWithBalance, CurrentFees, FeeConfigurationV2, FeePayoutType, FeeReceiver,
-    LiquidityPosition, PayoutGroups, PoolType, PoolView, SharesBalance, protocol_fee_payout,
+    LiquidityPosition, PayoutGroups, PoolAssets, PoolType, PoolView, ProviderShares, TokenAmount,
+    TotalShares, protocol_fee_payout,
 };
 
 #[near(serializers=[borsh])]
@@ -20,13 +21,13 @@ pub enum Pool {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: FeeConfigurationV2,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     } = 5,
     PublicV3 {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: FeeConfigurationV2,
         providers: LookupMap<AccountId, LiquidityPosition>,
-        total_shares: Option<SharesBalance>,
+        total_shares: TotalShares,
         payout_groups: Box<PayoutGroups>,
     } = 6,
 }
@@ -45,33 +46,40 @@ impl Pool {
         }
     }
 
-    pub fn balances(&self) -> [u128; 2] {
+    fn assets_mut(&mut self) -> [&mut AssetWithBalance; 2] {
         match self {
             Pool::PrivateV2 { assets, .. } | Pool::PublicV3 { assets, .. } => {
-                [assets.0.balance.0, assets.1.balance.0]
+                [&mut assets.0, &mut assets.1]
             }
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
                 ..
-            } => [quote_asset.balance.0, launched_asset.balance.0],
+            } => [quote_asset, launched_asset],
         }
     }
 
-    pub fn balances_mut(&mut self) -> [&mut u128; 2] {
-        match self {
+    pub fn balances(&self) -> PoolAssets<TokenAmount> {
+        let (asset_0, asset_1) = match self {
             Pool::PrivateV2 { assets, .. } | Pool::PublicV3 { assets, .. } => {
-                [&mut assets.0.balance.0, &mut assets.1.balance.0]
+                (&assets.0, &assets.1)
             }
             Pool::LaunchV2 {
                 quote_asset,
                 launched_asset,
                 ..
-            } => [&mut quote_asset.balance.0, &mut launched_asset.balance.0],
+            } => (quote_asset, launched_asset),
+        };
+        PoolAssets([asset_0.balance, asset_1.balance])
+    }
+
+    pub fn set_balances(&mut self, balances: PoolAssets<TokenAmount>) {
+        for (asset, balance) in self.assets_mut().into_iter().zip(balances.0) {
+            asset.balance = balance;
         }
     }
 
-    /// The pool fees, without the protocol fee
+    /// The pool fees, before the protocol takes its share
     pub fn fee_configuration(&self) -> &FeeConfigurationV2 {
         match self {
             Pool::PrivateV2 { fees, .. }
@@ -90,7 +98,7 @@ impl Pool {
     }
 
     /// The shares of a liquidity provider of a public pool, `None` if it isn't registered
-    pub fn liquidity_shares(&self, account_id: &AccountId) -> Option<u128> {
+    pub fn liquidity_shares(&self, account_id: &AccountId) -> Option<ProviderShares> {
         match self {
             Pool::PublicV3 { providers, .. } => {
                 providers.get(account_id).map(|position| position.shares)
@@ -99,11 +107,9 @@ impl Pool {
         }
     }
 
-    /// The fees of a swap at `timestamp`, with the protocol fee
+    /// The fees of a swap at `timestamp`, with the protocol's share
     pub fn current_fees(&self, timestamp: Timestamp) -> CurrentFees {
-        let (asset_0, asset_1) = self.asset_ids();
-        self.fee_configuration()
-            .with_protocol_fee(&[asset_0, asset_1], timestamp)
+        self.fee_configuration().with_protocol_fee(timestamp)
     }
 
     /// The pool with its fees at `timestamp`, as views and events show it
@@ -131,7 +137,7 @@ impl Pool {
                 assets: assets.clone(),
                 fees,
                 fee_configuration,
-                total_shares: total_shares.map(|s| U128(s.get())),
+                total_shares: *total_shares,
             },
             Pool::LaunchV2 {
                 quote_asset,

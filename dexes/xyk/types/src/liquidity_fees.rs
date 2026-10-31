@@ -1,68 +1,110 @@
-use std::num::NonZeroU128;
-
 use ethnum::U256;
 use near_sdk::near;
 
-use crate::{AssetIndex, FeePayoutType, PoolAssets, Shares, SharesBalance, math::mul_div};
+use crate::{
+    AssetIndex, FeePayoutType, PayoutGroupShares, PoolAssets, ProviderShares, TokenAmount,
+    TotalShares,
+};
 
-pub const FEE_GROWTH_SCALE: NonZeroU128 = NonZeroU128::new(10u128.pow(18)).unwrap();
-
-/// What one share earned in each asset of a pool, times [`FEE_GROWTH_SCALE`], as a 256-bit number
-/// stored as its high and low halves.
+/// What one liquidity share earned of an asset, times [`FeeGrowthPerShare::SCALE`], as a 256-bit
+/// number stored as its high and low halves
 #[near(serializers=[borsh])]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeGrowth(PoolAssets<[u128; 2]>);
+pub struct FeeGrowthPerShare([u128; 2]);
 
-impl FeeGrowth {
-    fn get(&self, asset_index: AssetIndex) -> U256 {
-        let [high, low] = self.0[asset_index];
+impl FeeGrowthPerShare {
+    const SCALE: u128 = 10u128.pow(18);
+
+    fn scaled(self) -> U256 {
+        let [high, low] = self.0;
         U256::from_words(high, low)
     }
 
-    fn set(&mut self, asset_index: AssetIndex, growth: U256) {
+    fn from_scaled(growth: U256) -> Self {
         let (high, low) = growth.into_words();
-        self.0[asset_index] = [high, low];
+        Self([high, low])
     }
 
-    /// Adds `amount` of the asset at `asset_index`, shared by `shares`. Returns the part of it that
-    /// the shares take, which is less than `amount` by what they can't take after rounding.
-    fn add(&mut self, asset_index: AssetIndex, amount: u128, shares: SharesBalance) -> u128 {
-        let scale = U256::from(FEE_GROWTH_SCALE.get());
-        let shares = U256::from(shares.get());
-        let added_growth = U256::from(amount)
-            .checked_mul(scale)
-            .and_then(|scaled_amount| scaled_amount.checked_div(shares))
-            .unwrap();
-        self.set(
-            asset_index,
-            self.get(asset_index)
-                .checked_add(added_growth)
-                .expect("Fee growth overflow"),
-        );
+    fn of_fee(fee: TokenAmount, shares: PayoutGroupShares) -> Option<Self> {
+        let shares = U256::from(shares.non_zero()?.get());
+        let growth = U256::from(fee.get())
+            .checked_mul(U256::from(Self::SCALE))
+            .and_then(|scaled_fee| scaled_fee.checked_div(shares))
+            .expect("u128 times 10^18 fits in u256");
+        Some(Self::from_scaled(growth))
+    }
+
+    fn checked_add(self, other: Self) -> Option<Self> {
+        self.scaled()
+            .checked_add(other.scaled())
+            .map(Self::from_scaled)
+    }
+
+    fn since(self, earlier: Self) -> Self {
+        Self::from_scaled(
+            self.scaled()
+                .checked_sub(earlier.scaled())
+                .expect("Fee growth only grows"),
+        )
+    }
+
+    fn earned_by(self, shares: ProviderShares) -> TokenAmount {
+        let earned = self
+            .scaled()
+            .checked_mul(U256::from(shares.get()))
+            .and_then(|scaled_earned| scaled_earned.checked_div(U256::from(Self::SCALE)))
+            .expect("Earned fees overflow");
+        TokenAmount::new(u128::try_from(earned).expect("Earned fees overflow"))
+    }
+
+    fn taken_by_at_most(self, shares: PayoutGroupShares) -> TokenAmount {
         // Each position rounds its part down, so all of them take at most this
-        let shares_part = added_growth
+        let shares = U256::from(shares.non_zero().map_or(0, |shares| shares.get()));
+        let scale = U256::from(Self::SCALE);
+        let taken = self
+            .scaled()
             .checked_mul(shares)
-            .and_then(|scaled_part| scaled_part.checked_add(scale.checked_sub(U256::ONE)?))
-            .and_then(|scaled_part| scaled_part.checked_div(scale))
-            .unwrap();
-        u128::try_from(shares_part).expect("The shares take at most the amount")
+            .and_then(|scaled_taken| scaled_taken.checked_add(scale.checked_sub(U256::ONE)?))
+            .and_then(|scaled_taken| scaled_taken.checked_div(scale))
+            .expect("Fee growth overflow");
+        TokenAmount::new(u128::try_from(taken).expect("The shares take at most the fee"))
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeGrowth(PoolAssets<FeeGrowthPerShare>);
+
+impl FeeGrowth {
+    /// Adds `fee` of the asset at `asset_index`, shared by `shares`. Returns the part of it that
+    /// the shares take, which is less than `fee` by what they can't take after rounding.
+    fn add(
+        &mut self,
+        asset_index: AssetIndex,
+        fee: TokenAmount,
+        shares: PayoutGroupShares,
+    ) -> TokenAmount {
+        let Some(added_growth) = FeeGrowthPerShare::of_fee(fee, shares) else {
+            return TokenAmount::ZERO;
+        };
+        self.0[asset_index] = self.0[asset_index]
+            .checked_add(added_growth)
+            .expect("Fee growth overflow");
+        added_growth.taken_by_at_most(shares)
     }
 
     /// What `shares` earned since the growth was `collected`, in each asset, rounded down
-    fn earned_since(&self, collected: FeeGrowth, shares: Shares) -> PoolAssets<u128> {
+    fn earned_since(
+        &self,
+        collected: FeeGrowth,
+        shares: ProviderShares,
+    ) -> PoolAssets<TokenAmount> {
         PoolAssets(AssetIndex::BOTH.map(|asset_index| {
-            let growth = self
-                .get(asset_index)
-                .checked_sub(collected.get(asset_index))
-                .expect("Fee growth only grows");
-            let earned = growth
-                .checked_mul(U256::from(shares))
-                .and_then(|scaled_earned| {
-                    scaled_earned.checked_div(U256::from(FEE_GROWTH_SCALE.get()))
-                })
-                .expect("Earned fees overflow");
-            u128::try_from(earned).expect("Earned fees overflow")
+            self.0[asset_index]
+                .since(collected.0[asset_index])
+                .earned_by(shares)
         }))
     }
 }
@@ -82,7 +124,7 @@ pub struct PayoutGroups {
 #[derive(Clone, Default)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct PayoutGroup {
-    pub shares: Shares,
+    pub shares: PayoutGroupShares,
     pub fee_growth: FeeGrowth,
 }
 
@@ -92,7 +134,7 @@ pub struct PayoutGroup {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct LiquidityPosition {
     pub payout_type: FeePayoutType,
-    pub shares: Shares,
+    pub shares: ProviderShares,
     /// The fee growth of the payout's group when the position last collected
     pub fee_growth_collected: FeeGrowth,
 }
@@ -118,12 +160,12 @@ impl PayoutGroups {
     pub fn add_shares(
         &mut self,
         position: &mut LiquidityPosition,
-        shares: Shares,
-    ) -> PoolAssets<u128> {
+        shares: ProviderShares,
+    ) -> PoolAssets<TokenAmount> {
         let group = self.group_mut(position.payout_type);
         let collected_fees = position.collect(group);
         position.shares = position.shares.checked_add(shares).expect("Overflow");
-        group.shares = group.shares.checked_add(shares).expect("Overflow");
+        group.shares = group.shares.joined_by(shares).expect("Overflow");
         collected_fees
     }
 
@@ -131,15 +173,15 @@ impl PayoutGroups {
     pub fn remove_shares(
         &mut self,
         position: &mut LiquidityPosition,
-        shares: Shares,
-    ) -> PoolAssets<u128> {
+        shares: ProviderShares,
+    ) -> PoolAssets<TokenAmount> {
         let group = self.group_mut(position.payout_type);
         let collected_fees = position.collect(group);
         position.shares = position
             .shares
             .checked_sub(shares)
             .expect("Not enough shares to remove");
-        group.shares = group.shares.checked_sub(shares).expect("Underflow");
+        group.shares = group.shares.left_by(shares).expect("Underflow");
         collected_fees
     }
 
@@ -149,10 +191,11 @@ impl PayoutGroups {
         &mut self,
         position: &mut LiquidityPosition,
         payout_type: FeePayoutType,
-    ) -> PoolAssets<u128> {
+    ) -> PoolAssets<TokenAmount> {
         let shares = position.shares;
         let collected_fees = self.remove_shares(position, shares);
-        *position = LiquidityPosition::new(payout_type, 0, self.group(payout_type));
+        *position =
+            LiquidityPosition::new(payout_type, ProviderShares::ZERO, self.group(payout_type));
         self.add_shares(position, shares);
         collected_fees
     }
@@ -161,39 +204,37 @@ impl PayoutGroups {
     /// shares, each rounded down. What rounding leaves stays in the pool.
     pub fn split_pool_fee(
         &self,
-        pool_fee: u128,
-        total_shares: SharesBalance,
-    ) -> [(FeePayoutType, u128); 3] {
+        pool_fee: TokenAmount,
+        total_shares: TotalShares,
+    ) -> [(FeePayoutType, TokenAmount); 3] {
         FeePayoutType::ALL.map(|payout_type| {
             (
                 payout_type,
-                mul_div(pool_fee, self.group(payout_type).shares, total_shares),
+                self.group(payout_type)
+                    .shares
+                    .part_of(pool_fee, total_shares),
             )
         })
     }
 }
 
 impl PayoutGroup {
-    /// Shares `amount` of the asset at `asset_index` among the group's shares. Returns the part
+    /// Shares `fee` of the asset at `asset_index` among the group's shares. Returns the part
     /// that they can't take after rounding, which stays in the pool.
-    pub fn share_fee(&mut self, asset_index: AssetIndex, amount: u128) -> u128 {
-        let Some(shares) = NonZeroU128::new(self.shares) else {
-            return amount;
-        };
-        amount
-            .checked_sub(self.fee_growth.add(asset_index, amount, shares))
+    pub fn share_fee(&mut self, asset_index: AssetIndex, fee: TokenAmount) -> TokenAmount {
+        fee.checked_sub(self.fee_growth.add(asset_index, fee, self.shares))
             .expect("Paid out more than the fee")
     }
 
     /// What `position` earned since it last collected, in each asset of the pool
-    pub fn uncollected_fees(&self, position: &LiquidityPosition) -> PoolAssets<u128> {
+    pub fn uncollected_fees(&self, position: &LiquidityPosition) -> PoolAssets<TokenAmount> {
         self.fee_growth
             .earned_since(position.fee_growth_collected, position.shares)
     }
 }
 
 impl LiquidityPosition {
-    pub fn new(payout_type: FeePayoutType, shares: Shares, group: &PayoutGroup) -> Self {
+    pub fn new(payout_type: FeePayoutType, shares: ProviderShares, group: &PayoutGroup) -> Self {
         Self {
             payout_type,
             shares,
@@ -202,7 +243,7 @@ impl LiquidityPosition {
     }
 
     /// Returns what the position earned since it last collected, which it collects now
-    pub fn collect(&mut self, group: &PayoutGroup) -> PoolAssets<u128> {
+    pub fn collect(&mut self, group: &PayoutGroup) -> PoolAssets<TokenAmount> {
         let uncollected_fees = group.uncollected_fees(self);
         self.fee_growth_collected = group.fee_growth;
         uncollected_fees

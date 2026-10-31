@@ -493,37 +493,37 @@ fn xyk_event_line(
             pool_id,
             asset_in,
             asset_out,
-            amount_in: U128(amount_in),
-            amount_out: U128(amount_out),
+            amount_in,
+            amount_out,
             ..
         } => format!(
             "Pool #{pool_id} of {dex_id} swapped {} for {}",
-            format_amount(amount_in, &asset_in)?,
-            format_amount(amount_out, &asset_out)?
+            format_amount(amount_in.get(), &asset_in)?,
+            format_amount(amount_out.get(), &asset_out)?
         ),
         XykDexEvent::LiquidityAdded {
             pool_id,
             asset_0,
             asset_1,
-            added_amount_0: U128(added_amount_0),
-            added_amount_1: U128(added_amount_1),
-            minted_shares: U128(minted_shares),
-            new_owned_shares: U128(new_owned_shares),
+            added_amount_0,
+            added_amount_1,
+            minted_shares,
+            new_owned_shares,
             new_total_shares: U128(new_total_shares),
             ..
         } => {
             let added = format!(
                 "Added {} and {} to pool #{pool_id} of {dex_id}",
-                format_amount(added_amount_0, &asset_0)?,
-                format_amount(added_amount_1, &asset_1)?
+                format_amount(added_amount_0.get(), &asset_0)?,
+                format_amount(added_amount_1.get(), &asset_1)?
             );
             // Only public pools have shares
-            if minted_shares == 0 {
+            if minted_shares.is_zero() {
                 added
             } else {
                 format!(
                     "{added} for {minted_shares} shares, {} of the pool",
-                    display::format_share(new_owned_shares, new_total_shares)?
+                    display::format_share(new_owned_shares.get(), new_total_shares)?
                 )
             }
         }
@@ -531,17 +531,17 @@ fn xyk_event_line(
             pool_id,
             asset_0,
             asset_1,
-            removed_amount_0: U128(removed_amount_0),
-            removed_amount_1: U128(removed_amount_1),
-            burned_shares: U128(burned_shares),
+            removed_amount_0,
+            removed_amount_1,
+            burned_shares,
             ..
         } => {
             let removed = format!(
                 "Removed {} and {} from pool #{pool_id} of {dex_id}",
-                format_amount(removed_amount_0, &asset_0)?,
-                format_amount(removed_amount_1, &asset_1)?
+                format_amount(removed_amount_0.get(), &asset_0)?,
+                format_amount(removed_amount_1.get(), &asset_1)?
             );
-            if burned_shares == 0 {
+            if burned_shares.is_zero() {
                 removed
             } else {
                 format!("{removed} for {burned_shares} shares")
@@ -566,12 +566,12 @@ fn xyk_event_line(
             account_id,
             asset_0,
             asset_1,
-            amount_0: U128(amount_0),
-            amount_1: U128(amount_1),
+            amount_0,
+            amount_1,
         } => format!(
             "{account_id} collected {} and {} of fees from pool #{pool_id} of {dex_id}",
-            format_amount(amount_0, &asset_0)?,
-            format_amount(amount_1, &asset_1)?
+            format_amount(amount_0.get(), &asset_0)?,
+            format_amount(amount_1.get(), &asset_1)?
         ),
     })
 }

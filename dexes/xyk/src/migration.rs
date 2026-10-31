@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU128};
 
 use intear_dex_types::{AssetId, Caller, env, expect};
 use near_sdk::{
@@ -9,8 +9,8 @@ use near_sdk::{
 };
 use xyk_dex_types::{
     AssetWithBalance, CAN_MIGRATE, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2,
-    FeeGrowth, FeePayoutType, FeeReceiver, LiquidityPosition, MigrateArgs, PayoutGroup,
-    PayoutGroups, Pool, PoolAssets, PoolType, Shares, SharesBalance,
+    FeeGrowth, FeePayoutType, FeeReceiver, LiquidityPosition, MigrateArgs, Pool, PoolAssets,
+    PoolId, PoolType, ProviderShares, TokenAmount, TotalShares,
 };
 
 use crate::{StorageKey, XykDex, XykDexExt, start_fee_balances};
@@ -37,7 +37,7 @@ impl XykDex {
         #[near(serializers=[borsh])]
         struct OldXykDex {
             pools: Vector<Pool>,
-            fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
+            fees_collected_by_users: LookupMap<(AccountId, AssetId), TokenAmount>,
             _unused_referral_settings: LookupMap<AccountId, ()>,
             _community_owned_fees: LookupMap<AccountId, NearToken>,
             fee_discount_signer_public_key: Option<PublicKey>,
@@ -64,8 +64,8 @@ impl XykDex {
             PublicV1 {
                 assets: (AssetWithBalance, AssetWithBalance),
                 fees: CurrentFees,
-                user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-                total_shares: Option<SharesBalance>,
+                user_shares: LookupMap<AccountId, Option<NonZeroU128>>,
+                total_shares: TotalShares,
             } = 1,
             PrivateV2 {
                 assets: (AssetWithBalance, AssetWithBalance),
@@ -76,14 +76,14 @@ impl XykDex {
             PublicV2 {
                 assets: (AssetWithBalance, AssetWithBalance),
                 fees: OldFeeConfiguration,
-                user_shares: LookupMap<AccountId, Option<SharesBalance>>,
-                total_shares: Option<SharesBalance>,
+                user_shares: LookupMap<AccountId, Option<NonZeroU128>>,
+                total_shares: TotalShares,
             } = 4,
             LaunchV2 {
                 quote_asset: AssetWithBalance,
                 launched_asset: AssetWithBalance,
                 fees: OldFeeConfiguration,
-                phantom_liquidity: U128,
+                phantom_liquidity: TokenAmount,
             } = 5,
         }
         const LAUNCH_V1_TAG: u8 = 2;
@@ -101,30 +101,22 @@ impl XykDex {
             OldFeeConfiguration::V2(fees) => fees,
         };
 
-        // Every share keeps its fees from now on, from fee growth zero, where the providers'
-        // positions start
-        let public_v3 =
-            |pool_id, assets, fees, total_shares: Option<SharesBalance>| Pool::PublicV3 {
-                assets,
-                fees,
-                providers: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
-                total_shares,
-                payout_groups: Box::new(PayoutGroups {
-                    keep_both: PayoutGroup {
-                        shares: total_shares.map_or(0, |shares| shares.get()),
-                        fee_growth: FeeGrowth::default(),
-                    },
-                    ..Default::default()
-                }),
-            };
+        let public_v3 = |pool_id, assets, fees, total_shares| Pool::PublicV3 {
+            assets,
+            fees,
+            providers: LookupMap::new(StorageKey::PublicPoolUserShares { pool_id }),
+            total_shares,
+            payout_groups: Box::default(),
+        };
 
         let old_state: OldXykDex = near_sdk::env::state_read().expect("State read failed");
         // Each pool is read and written by itself, as the vector of pools would keep every pool
         // it read in memory, and there isn't enough memory for all of them
         let pools_prefix = StorageKey::Pools.into_storage_key();
         let mut providers = providers.into_iter().peekable();
-        for pool_id in 0..old_state.pools.len() {
-            let pool_key = [pools_prefix.as_slice(), &pool_id.to_le_bytes()].concat();
+        for pool_index in 0..old_state.pools.len() {
+            let pool_id = PoolId::new(pool_index);
+            let pool_key = [pools_prefix.as_slice(), &pool_index.to_le_bytes()].concat();
             let old_pool = near_sdk::env::storage_read(&pool_key).expect("Pool not found");
             let old_pool = match old_pool[0] {
                 // Its fields after its NEAR amount are those of LaunchV2, whose quote asset holds
@@ -206,7 +198,7 @@ impl XykDex {
                 }
             }
             // Maps of its own for each pool, as the dex's would keep every balance they read
-            let mut fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), U128> =
+            let mut fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), TokenAmount> =
                 LookupMap::new(StorageKey::FeesClaimableByAnyone);
             let mut community_owned_fees: LookupMap<AccountId, NearToken> =
                 LookupMap::new(StorageKey::UnusedCommunityOwnedFees);
@@ -228,9 +220,8 @@ impl XykDex {
                         let claimable_near = fees_claimable_by_anyone
                             .get_mut(&(account_id, AssetId::Near))
                             .expect("Communities collect their fees in NEAR");
-                        claimable_near.0 = claimable_near
-                            .0
-                            .checked_add(community_fees.as_yoctonear())
+                        *claimable_near = claimable_near
+                            .checked_add(TokenAmount::new(community_fees.as_yoctonear()))
                             .expect("Overflow");
                     }
                 }
@@ -242,24 +233,33 @@ impl XykDex {
                 assets,
                 providers: pool_providers,
                 total_shares,
+                payout_groups,
                 ..
             } = &mut pool
             {
                 let account_ids = providers
                     .next_if(|(providers_pool_id, _)| *providers_pool_id == pool_id)
                     .map_or(Vec::new(), |(_, account_ids)| account_ids);
-                let shares_before_migration: LookupMap<AccountId, Option<SharesBalance>> =
+                let shares_before_migration: LookupMap<AccountId, Option<NonZeroU128>> =
                     LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
                 // A map of its own for each pool, as the dex's would keep every balance it reads
                 let mut fees_collected_by_users = LookupMap::new(StorageKey::FeesCollectedByUsers);
-                let mut providers_shares: Shares = 0;
+                let mut providers_total_shares = TotalShares::NONE;
                 for account_id in account_ids {
                     expect!(
                         let Some(shares) = shares_before_migration.get(&account_id),
                         "{account_id} isn't a liquidity provider of pool {pool_id}"
                     );
-                    let shares = shares.map_or(0, |shares| shares.get());
-                    providers_shares = providers_shares.checked_add(shares).expect("Overflow");
+                    let shares = ProviderShares::new(shares.map_or(0, NonZeroU128::get));
+                    providers_total_shares =
+                        providers_total_shares.minted(shares).expect("Overflow");
+                    // Every share keeps its fees from now on, from fee growth zero, where the
+                    // providers' positions start
+                    payout_groups.keep_both.shares = payout_groups
+                        .keep_both
+                        .shares
+                        .joined_by(shares)
+                        .expect("Overflow");
                     // Unlike insert, set doesn't read the entry it replaces, which is shares
                     pool_providers.set(
                         account_id.clone(),
@@ -278,7 +278,7 @@ impl XykDex {
                 }
                 // A provider left out would have shares and no position
                 expect!(
-                    providers_shares == total_shares.map_or(0, |shares| shares.get()),
+                    providers_total_shares == *total_shares,
                     "The providers of pool {pool_id} don't have all of its shares"
                 );
                 pool_providers.flush();

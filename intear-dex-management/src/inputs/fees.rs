@@ -3,7 +3,8 @@ use std::str::FromStr;
 use intear_dex_types::AssetId;
 use near_primitives::types::AccountId;
 use xyk_dex_types::{
-    ClaimMode, FeeAmount, FeeConfigurationV2, FeePayoutType, FeeReceiver, ScheduledFeeCurve,
+    ClaimMode, FeeAmount, FeeConfigurationV2, FeeFraction, FeePayoutType, FeeReceiver,
+    ScheduledFeeCurve,
 };
 
 use super::percent::PercentArg;
@@ -375,15 +376,21 @@ impl FeesArg {
                 FeeReceiverArg::Pool => FeeReceiver::Pool,
             };
             let fee_amount = match amount {
-                FeeAmountArg::Fixed(PercentArg(fee)) => FeeAmount::Fixed(*fee),
+                FeeAmountArg::Fixed(PercentArg(fee)) => FeeAmount::Fixed(FeeFraction::new(*fee)),
                 FeeAmountArg::Scheduled {
                     start_fee: PercentArg(start_fee),
                     end_fee: PercentArg(end_fee),
                     start_time,
                     end_time,
                 } => FeeAmount::Scheduled {
-                    start: (start_time.nanoseconds(now_nanoseconds)?, *start_fee),
-                    end: (end_time.nanoseconds(now_nanoseconds)?, *end_fee),
+                    start: (
+                        start_time.nanoseconds(now_nanoseconds)?,
+                        FeeFraction::new(*start_fee),
+                    ),
+                    end: (
+                        end_time.nanoseconds(now_nanoseconds)?,
+                        FeeFraction::new(*end_fee),
+                    ),
                     curve: ScheduledFeeCurve::Linear,
                 },
             };
@@ -414,9 +421,9 @@ mod tests {
                         payout_type: FeePayoutType::KeepBoth,
                         claim_mode: ClaimMode::OnlyOwner,
                     },
-                    FeeAmount::Fixed(2_500)
+                    FeeAmount::Fixed(FeeFraction::new(2_500))
                 ),
-                (FeeReceiver::Pool, FeeAmount::Fixed(500))
+                (FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(500)))
             ]
         );
         assert_eq!("none".parse::<FeesArg>().unwrap().0, Vec::new());
@@ -443,8 +450,14 @@ mod tests {
         let FeeAmount::Scheduled { start, end, .. } = receivers[0].1 else {
             panic!("the first fee should be scheduled");
         };
-        assert_eq!(start, (1_000, 10_000));
-        assert_eq!(end, (1_000 + 7 * 24 * 60 * 60 * 1_000_000_000, 3_000));
+        assert_eq!(start, (1_000, FeeFraction::new(10_000)));
+        assert_eq!(
+            end,
+            (
+                1_000 + 7 * 24 * 60 * 60 * 1_000_000_000,
+                FeeFraction::new(3_000)
+            )
+        );
         let absolute: FeesArg = "alice.near=2%..1%@2025-01-01T00:00:00Z..2025-07-01T00:00:00Z"
             .parse()
             .unwrap();
@@ -479,7 +492,7 @@ mod tests {
                         payout_type: FeePayoutType::KeepBoth,
                         claim_mode: ClaimMode::OnlyOwner,
                     },
-                    FeeAmount::Fixed(2_500)
+                    FeeAmount::Fixed(FeeFraction::new(2_500))
                 ),
                 (
                     FeeReceiver::Account {
@@ -487,9 +500,9 @@ mod tests {
                         payout_type: FeePayoutType::ConvertToSecondAsset,
                         claim_mode: ClaimMode::Anyone,
                     },
-                    FeeAmount::Fixed(10_000)
+                    FeeAmount::Fixed(FeeFraction::new(10_000))
                 ),
-                (FeeReceiver::Pool, FeeAmount::Fixed(500)),
+                (FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(500))),
             ]
         );
         let usdt = AssetId::Nep141("usdt.tether-token.near".parse().unwrap());

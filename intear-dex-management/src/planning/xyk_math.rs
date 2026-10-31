@@ -4,7 +4,7 @@
 
 use color_eyre::eyre::eyre;
 use crypto_bigint::{CheckedMul, U256};
-use xyk_dex_types::{FULL_FEE_FRACTION, FeeFraction};
+use xyk_dex_types::FULL_FEE_FRACTION;
 
 fn u256_to_u128(value: U256) -> Option<u128> {
     if value.bits() > u128::BITS {
@@ -24,20 +24,17 @@ pub fn mul_div_floor(a: u128, b: u128, c: u128) -> color_eyre::eyre::Result<u128
     u256_to_u128(quotient).ok_or_else(|| eyre!("{a} * {b} / {c} doesn't fit in 128 bits"))
 }
 
-/// The least that `expected` may become with `max_slippage`, rounded down,
-/// in the user's favor
+/// The least that `expected` may become with `max_slippage_millionths`,
+/// rounded down, in the user's favor
 pub fn at_least_with_slippage(
     expected: u128,
-    max_slippage: FeeFraction,
+    max_slippage_millionths: u32,
 ) -> color_eyre::eyre::Result<u128> {
-    let kept_fraction = FULL_FEE_FRACTION
-        .checked_sub(max_slippage)
+    let whole = FULL_FEE_FRACTION.get();
+    let kept_millionths = whole
+        .checked_sub(max_slippage_millionths)
         .ok_or_else(|| eyre!("Slippage over 100%"))?;
-    mul_div_floor(
-        expected,
-        u128::from(kept_fraction),
-        u128::from(FULL_FEE_FRACTION),
-    )
+    mul_div_floor(expected, u128::from(kept_millionths), u128::from(whole))
 }
 
 /// The shares that adding `amounts` to a public pool with `reserves` and

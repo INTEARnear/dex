@@ -2,17 +2,24 @@
 
 use std::{
     fmt,
-    num::NonZeroU128,
+    num::{NonZeroU32, NonZeroU128, ParseIntError},
     ops::{Index, IndexMut},
+    str::FromStr,
 };
 
 use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
 use near_sdk::{
     AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
-    borsh::{BorshSerialize, io::Write},
+    borsh::{
+        BorshDeserialize, BorshSerialize,
+        io::{Read, Write},
+    },
     json_types::U128,
     near,
+    serde::{Deserializer, Serializer},
 };
+
+use crate::math::mul_div;
 
 mod legacy_deserialization;
 mod liquidity_fees;
@@ -21,39 +28,393 @@ mod pool;
 
 pub use legacy_deserialization::XykDexEventV1;
 pub use liquidity_fees::{
-    FEE_GROWTH_SCALE, FeeGrowth, LiquidityPosition, PayoutGroup, PayoutGroups,
+    FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup, PayoutGroups,
 };
 pub use pool::Pool;
 
-pub type PoolId = u32;
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PoolId(u32);
 
-pub const LAST_CREATED_POOL_ID_MARKER: PoolId = PoolId::MAX;
+pub const LAST_CREATED_POOL_ID_MARKER: PoolId = PoolId(u32::MAX);
+
+impl PoolId {
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for PoolId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for PoolId {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
+    }
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct TokenAmount(U128);
+
+impl TokenAmount {
+    pub const ZERO: Self = Self(U128(0));
+
+    pub const fn new(amount: u128) -> Self {
+        Self(U128(amount))
+    }
+
+    pub const fn get(self) -> u128 {
+        self.0.0
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.get() == 0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.get().checked_add(other.get()).map(Self::new)
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.get().checked_sub(other.get()).map(Self::new)
+    }
+}
+
+impl fmt::Display for TokenAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.get())
+    }
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SwapReserves {
+    pub input: TokenAmount,
+    pub output: TokenAmount,
+}
 
 /// 100% = 1000000
-pub type FeeFraction = u32;
-pub const FULL_FEE_FRACTION: FeeFraction = 1000000;
-pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FULL_FEE_FRACTION / 10 * 9; // 90%
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeFraction(u32);
+
+pub const FULL_FEE_FRACTION: FeeFraction = FeeFraction::new(1_000_000);
+
+impl FeeFraction {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(millionths: u32) -> Self {
+        Self(millionths)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
+    pub fn of(self, amount: TokenAmount) -> TokenAmount {
+        TokenAmount::new(mul_div(
+            amount.get(),
+            u128::from(self.0),
+            NonZeroU128::from(FULL_FEE_FRACTION.non_zero()),
+        ))
+    }
+
+    pub(crate) fn non_zero(self) -> NonZeroU32 {
+        NonZeroU32::new(self.0).expect("Fee fraction is zero")
+    }
+}
+
+impl fmt::Display for FeeFraction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// 100% = 1000000
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeDiscountFraction(u32);
+
+pub const FULL_FEE_DISCOUNT: FeeDiscountFraction = FeeDiscountFraction::new(1_000_000);
+
+impl FeeDiscountFraction {
+    pub const fn new(millionths: u32) -> Self {
+        Self(millionths)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn apply(self, fee: FeeFraction) -> FeeFraction {
+        let remaining_millionths = FULL_FEE_DISCOUNT
+            .0
+            .checked_sub(self.0)
+            .expect("Fee discount can't exceed 100%");
+        let discounted = u64::from(fee.0)
+            .checked_mul(u64::from(remaining_millionths))
+            .expect("Fee fraction overflow")
+            .checked_div(u64::from(FULL_FEE_DISCOUNT.0))
+            .expect("Dividing by the full fee discount");
+        FeeFraction(
+            u32::try_from(discounted)
+                .expect("Discounted fee can't be higher than the original fee"),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ProtocolFeeShare {
+    percent: u32,
+}
+
+pub const PROTOCOL_FEE_SHARE: ProtocolFeeShare = ProtocolFeeShare { percent: 20 };
+
+impl ProtocolFeeShare {
+    pub fn of(self, fee: FeeFraction) -> FeeFraction {
+        FeeFraction(
+            fee.0
+                .checked_mul(self.percent)
+                .expect("Fee fraction overflow")
+                .checked_div(100)
+                .expect("Dividing by 100"),
+        )
+    }
+}
+
+impl fmt::Display for ProtocolFeeShare {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}%", self.percent)
+    }
+}
+
+/// 100% of the requested amount = 1000000
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct RouteFraction(u32);
+
+pub const FULL_ROUTE_FRACTION: RouteFraction = RouteFraction::new(1_000_000);
+
+impl RouteFraction {
+    pub const fn new(millionths: u32) -> Self {
+        Self(millionths)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn add_up_to_full(fractions: impl IntoIterator<Item = Self>) -> bool {
+        fractions
+            .into_iter()
+            .try_fold(0u32, |total, fraction| total.checked_add(fraction.0))
+            == Some(FULL_ROUTE_FRACTION.0)
+    }
+
+    pub fn of(self, amount: TokenAmount) -> TokenAmount {
+        let full = NonZeroU128::new(u128::from(FULL_ROUTE_FRACTION.0)).expect("Is 1_000_000");
+        TokenAmount::new(mul_div(amount.get(), u128::from(self.0), full))
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ProviderShares(u128);
+
+pub const INITIAL_SHARES: ProviderShares = ProviderShares(10u128.pow(18));
+
+impl ProviderShares {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(shares: u128) -> Self {
+        Self(shares)
+    }
+
+    pub const fn get(self) -> u128 {
+        self.0
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
+    pub fn minted_for(
+        tokens: TokenAmount,
+        total_shares: TotalShares,
+        reserve: TokenAmount,
+    ) -> Self {
+        let reserve = NonZeroU128::new(reserve.get()).expect("Pool is empty");
+        Self(mul_div(tokens.get(), total_shares.0, reserve))
+    }
+
+    pub fn worth_in(self, total_shares: TotalShares, reserve: TokenAmount) -> TokenAmount {
+        TokenAmount::new(mul_div(reserve.get(), self.0, total_shares.non_zero()))
+    }
+}
+
+impl fmt::Display for ProviderShares {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct TotalShares(u128);
+
+pub const PRIVATE_POOL_TOTAL_SHARES: TotalShares = TotalShares(INITIAL_SHARES.get());
+
+impl TotalShares {
+    pub const NONE: Self = Self(0);
+
+    pub const fn get(self) -> u128 {
+        self.0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn minted(self, shares: ProviderShares) -> Option<Self> {
+        self.0.checked_add(shares.0).map(Self)
+    }
+
+    pub fn burned(self, shares: ProviderShares) -> Option<Self> {
+        self.0.checked_sub(shares.0).map(Self)
+    }
+
+    fn non_zero(self) -> NonZeroU128 {
+        NonZeroU128::new(self.0).expect("Pool has no shares")
+    }
+}
+
+impl BorshSerialize for TotalShares {
+    fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
+        BorshSerialize::serialize(&NonZeroU128::new(self.0), writer)
+    }
+}
+
+impl BorshDeserialize for TotalShares {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
+        Ok(Self(
+            Option::<NonZeroU128>::deserialize_reader(reader)?.map_or(0, NonZeroU128::get),
+        ))
+    }
+}
+
+impl near_sdk::serde::Serialize for TotalShares {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let shares = NonZeroU128::new(self.0).map(|shares| U128(shares.get()));
+        near_sdk::serde::Serialize::serialize(&shares, serializer)
+    }
+}
+
+impl<'de> near_sdk::serde::Deserialize<'de> for TotalShares {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let shares: Option<U128> = near_sdk::serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self(shares.map_or(0, |U128(shares)| shares)))
+    }
+}
+
+#[cfg(all(feature = "abi", not(target_arch = "wasm32")))]
+impl near_sdk::schemars::JsonSchema for TotalShares {
+    fn schema_name() -> String {
+        <Option<U128> as near_sdk::schemars::JsonSchema>::schema_name()
+    }
+
+    fn json_schema(
+        generator: &mut near_sdk::schemars::r#gen::SchemaGenerator,
+    ) -> near_sdk::schemars::schema::Schema {
+        <Option<U128> as near_sdk::schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
+#[cfg(all(feature = "abi", not(target_arch = "wasm32")))]
+impl near_sdk::borsh::BorshSchema for TotalShares {
+    fn declaration() -> near_sdk::borsh::schema::Declaration {
+        <Option<NonZeroU128> as near_sdk::borsh::BorshSchema>::declaration()
+    }
+
+    fn add_definitions_recursively(
+        definitions: &mut std::collections::BTreeMap<
+            near_sdk::borsh::schema::Declaration,
+            near_sdk::borsh::schema::Definition,
+        >,
+    ) {
+        <Option<NonZeroU128> as near_sdk::borsh::BorshSchema>::add_definitions_recursively(
+            definitions,
+        )
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct PayoutGroupShares(u128);
+
+impl PayoutGroupShares {
+    pub const NONE: Self = Self(0);
+
+    pub fn joined_by(self, shares: ProviderShares) -> Option<Self> {
+        self.0.checked_add(shares.0).map(Self)
+    }
+
+    pub fn left_by(self, shares: ProviderShares) -> Option<Self> {
+        self.0.checked_sub(shares.0).map(Self)
+    }
+
+    pub(crate) fn non_zero(self) -> Option<NonZeroU128> {
+        NonZeroU128::new(self.0)
+    }
+
+    pub fn part_of(self, pool_fee: TokenAmount, total_shares: TotalShares) -> TokenAmount {
+        TokenAmount::new(mul_div(pool_fee.get(), self.0, total_shares.non_zero()))
+    }
+}
+
+pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FeeFraction::new(900_000); // 90%
 pub const MAX_FEE_RECEIVERS: usize = 20;
-pub const PROTOCOL_FEE: FeeFraction = FULL_FEE_FRACTION / 1000; // 0.1%
 pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("plach.intear.near");
 
-/// 100% = 1000000
-pub type FeeFractionFraction = u32;
-pub const FULL_FEE_FRACTION_FRACTION: FeeFractionFraction = 1000000;
-
-pub type SharesBalance = NonZeroU128;
-/// Shares of a public pool's liquidity, like a [`SharesBalance`], but can be zero
-pub type Shares = u128;
-pub const INITIAL_SHARES: SharesBalance = NonZeroU128::new(10u128.pow(18)).unwrap();
-
-pub const PROTOCOL_FEE_REDUCE_ASSETS_NEP141: &[&AccountIdRef] = &[
+pub const STABLE_ASSETS_NEP141: &[&AccountIdRef] = &[
     AccountIdRef::new_or_panic("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"),
     AccountIdRef::new_or_panic("usdt.tether-token.near"),
 ];
-pub const PROTOCOL_FEE_REDUCED: FeeFraction = 1; // 0.0001%
 const _: () = assert!(
-    MAX_TOTAL_FEE_FRACTION + PROTOCOL_FEE < FULL_FEE_FRACTION,
-    "Pool and protocol fees combined must stay below 100%"
+    MAX_TOTAL_FEE_FRACTION.get() < FULL_FEE_FRACTION.get(),
+    "Fees must stay below 100%"
 );
 
 pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
@@ -68,7 +429,7 @@ impl SwapArgs {
     pub fn single_pool(pool_id: PoolId) -> Self {
         Self {
             routes: vec![SwapRoute {
-                fraction: FULL_SPLIT_FRACTION,
+                fraction: FULL_ROUTE_FRACTION,
                 pool_ids: vec![pool_id],
             }],
             fee_discount: None,
@@ -82,25 +443,21 @@ impl BorshSerialize for SwapArgs {
     fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
         if let ([SwapRoute { fraction, pool_ids }], None) =
             (self.routes.as_slice(), &self.fee_discount)
-            && *fraction == FULL_SPLIT_FRACTION
+            && *fraction == FULL_ROUTE_FRACTION
             && let [pool_id] = pool_ids.as_slice()
         {
-            return pool_id.serialize(writer);
+            return BorshSerialize::serialize(pool_id, writer);
         }
         self.routes.serialize(writer)?;
         self.fee_discount.serialize(writer)
     }
 }
 
-/// 100% of the requested amount = 1000000
-pub type SplitFraction = u32;
-pub const FULL_SPLIT_FRACTION: SplitFraction = 1000000;
-
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SwapRoute {
-    pub fraction: SplitFraction,
+    pub fraction: RouteFraction,
     /// Pools that the route swaps through, in order. Each pool swaps the
     /// output of the previous one into its other asset, and the last one
     /// outputs [`SwapRequest::asset_out`].
@@ -128,8 +485,8 @@ pub struct FeeDiscount {
     pub trader_id: Option<AccountId>,
     pub amount: SwapRequestAmount,
     /// Reduces pool and protocol fees, but not referral fees.
-    /// [`FULL_FEE_FRACTION`] waives pool and protocol fees entirely.
-    pub fee_discount: FeeFractionFraction,
+    /// [`FULL_FEE_DISCOUNT`] waives pool and protocol fees entirely.
+    pub fee_discount: FeeDiscountFraction,
     pub expiration_block_height: BlockHeight,
 }
 
@@ -168,7 +525,7 @@ pub struct CreatePoolArgs {
     /// attached assets. Required for public pools, so nobody else can set their
     /// ratio before the creator does. Optional for private pools, not accepted
     /// for launch pools.
-    pub initial_liquidity: Option<(U128, U128)>,
+    pub initial_liquidity: Option<(TokenAmount, TokenAmount)>,
 }
 
 #[near(serializers=[borsh])]
@@ -187,7 +544,7 @@ pub struct RegisterLiquidityArgs {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct AddLiquidityArgs {
     pub pool_id: PoolId,
-    pub min_shares_received: Option<SharesBalance>,
+    pub min_shares_received: Option<ProviderShares>,
 }
 
 #[near(serializers=[borsh])]
@@ -198,8 +555,8 @@ pub struct AddLiquidityResponse;
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct RemoveLiquidityArgs {
     pub pool_id: PoolId,
-    pub shares_to_remove: Option<SharesBalance>,
-    pub min_assets_received: Option<(U128, U128)>,
+    pub shares_to_remove: Option<ProviderShares>,
+    pub min_assets_received: Option<(TokenAmount, TokenAmount)>,
 }
 
 #[near(serializers=[borsh])]
@@ -261,7 +618,7 @@ pub struct GetPoolArgs {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct GetPoolsArgs {
     pub start_index: PoolId,
-    pub limit: PoolId,
+    pub limit: u32,
 }
 
 #[near(serializers=[borsh])]
@@ -297,7 +654,7 @@ pub struct GetLiquidityPositionArgs {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct LiquidityPositionView {
     pub payout_type: FeePayoutType,
-    pub uncollected_fees: (U128, U128),
+    pub uncollected_fees: (TokenAmount, TokenAmount),
 }
 
 #[near(serializers=[borsh])]
@@ -305,13 +662,13 @@ pub struct LiquidityPositionView {
 pub enum PoolType {
     PrivateLatest,
     PublicLatest,
-    LaunchLatest { phantom_liquidity: U128 },
-    LaunchV1 { phantom_liquidity_near: U128 },
+    LaunchLatest { phantom_liquidity: TokenAmount },
+    LaunchV1 { phantom_liquidity_near: TokenAmount },
     PrivateV1,
     PublicV1,
     PrivateV2,
     PublicV2,
-    LaunchV2 { phantom_liquidity: U128 },
+    LaunchV2 { phantom_liquidity: TokenAmount },
     PublicV3,
 }
 
@@ -355,14 +712,14 @@ pub enum PoolView {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        total_shares: Option<U128>,
+        total_shares: TotalShares,
     } = 5,
     Launch {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
-        phantom_liquidity: U128,
+        phantom_liquidity: TokenAmount,
     } = 6,
 }
 
@@ -371,7 +728,7 @@ pub enum PoolView {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct AssetWithBalance {
     pub asset_id: AssetId,
-    pub balance: U128,
+    pub balance: TokenAmount,
 }
 
 #[near(serializers=[borsh, json])]
@@ -535,25 +892,25 @@ pub enum XykDexEvent {
         pool_id: PoolId,
         asset_in: AssetId,
         asset_out: AssetId,
-        amount_in: U128,
-        fees_breakdown: Vec<(FeeReceiver, AssetId, U128)>,
-        amount_out: U128,
+        amount_in: TokenAmount,
+        fees_breakdown: Vec<(FeeReceiver, AssetId, TokenAmount)>,
+        amount_out: TokenAmount,
     },
     LiquidityAdded {
         pool_id: PoolId,
         asset_0: AssetId,
         asset_1: AssetId,
 
-        added_amount_0: U128,
-        added_amount_1: U128,
-        minted_shares: U128,
+        added_amount_0: TokenAmount,
+        added_amount_1: TokenAmount,
+        minted_shares: ProviderShares,
 
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
+        new_owned_asset_0: TokenAmount,
+        new_owned_asset_1: TokenAmount,
+        new_owned_shares: ProviderShares,
 
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
+        new_total_asset_0: TokenAmount,
+        new_total_asset_1: TokenAmount,
         new_total_shares: U128,
     },
     LiquidityRemoved {
@@ -561,16 +918,16 @@ pub enum XykDexEvent {
         asset_0: AssetId,
         asset_1: AssetId,
 
-        removed_amount_0: U128,
-        removed_amount_1: U128,
-        burned_shares: U128,
+        removed_amount_0: TokenAmount,
+        removed_amount_1: TokenAmount,
+        burned_shares: ProviderShares,
 
-        new_owned_asset_0: U128,
-        new_owned_asset_1: U128,
-        new_owned_shares: U128,
+        new_owned_asset_0: TokenAmount,
+        new_owned_asset_1: TokenAmount,
+        new_owned_shares: ProviderShares,
 
-        new_total_asset_0: U128,
-        new_total_asset_1: U128,
+        new_total_asset_0: TokenAmount,
+        new_total_asset_1: TokenAmount,
         new_total_shares: U128,
     },
     LiquidityFeePayoutSet {
@@ -584,8 +941,8 @@ pub enum XykDexEvent {
         account_id: AccountId,
         asset_0: AssetId,
         asset_1: AssetId,
-        amount_0: U128,
-        amount_1: U128,
+        amount_0: TokenAmount,
+        amount_1: TokenAmount,
     },
 }
 
@@ -596,14 +953,10 @@ impl XykDexEvent {
     }
 }
 
-pub fn should_reduce_fee(asset_ids: &[&AssetId]) -> bool {
-    asset_ids.iter().all(|asset_id| is_stable_asset(asset_id))
-}
-
 pub fn is_stable_asset(asset_id: &AssetId) -> bool {
     match asset_id {
         AssetId::Near => true,
-        AssetId::Nep141(account_id) => PROTOCOL_FEE_REDUCE_ASSETS_NEP141.contains(&&**account_id),
+        AssetId::Nep141(account_id) => STABLE_ASSETS_NEP141.contains(&&**account_id),
         AssetId::Nep171(_, _) => false,
         AssetId::Nep245(_, _) => false,
     }
@@ -675,11 +1028,13 @@ impl FeeAmount {
                 let fee_decrease = match curve {
                     ScheduledFeeCurve::Linear => {
                         // total_duration is not 0 due to .validate() check
-                        let fee_decrease = u128::from(fee_range)
+                        let fee_decrease = u128::from(fee_range.get())
                             .checked_mul(u128::from(time_elapsed))
                             .and_then(|product| product.checked_div(u128::from(total_duration)))
                             .expect("Fee decrease calculation overflow");
-                        FeeFraction::try_from(fee_decrease).expect("Fee decrease overflows u32")
+                        FeeFraction::new(
+                            u32::try_from(fee_decrease).expect("Fee decrease overflows u32"),
+                        )
                     }
                 };
 
@@ -723,7 +1078,7 @@ impl FeeConfigurationV2 {
         let total_fee = receivers
             .iter()
             .map(|(_, fee)| *fee)
-            .try_fold(0u32, |acc, fee| acc.checked_add(fee))
+            .try_fold(FeeFraction::ZERO, |acc, fee| acc.checked_add(fee))
             .unwrap();
         if total_fee > MAX_TOTAL_FEE_FRACTION {
             return Err(FeeConfigurationError::TotalFeeTooHigh);
@@ -738,38 +1093,20 @@ impl FeeConfigurationV2 {
         Ok(())
     }
 
-    pub fn with_protocol_fee(&self, asset_ids: &[&AssetId], timestamp: Timestamp) -> CurrentFees {
-        let mut protocol_fee = if should_reduce_fee(asset_ids) {
-            PROTOCOL_FEE_REDUCED
-        } else {
-            PROTOCOL_FEE
-        };
+    pub fn with_protocol_fee(&self, timestamp: Timestamp) -> CurrentFees {
+        let mut protocol_fee = FeeFraction::ZERO;
         let mut receivers = Vec::new();
-        for (receiver, amount) in &self.receivers {
-            match amount {
-                FeeAmount::Fixed(fee_fraction) => {
-                    receivers.push((receiver.clone(), *fee_fraction));
-                }
-                FeeAmount::Scheduled {
-                    end: (end_time, _), ..
-                } => {
-                    let mut fraction = amount.fee_fraction_at(timestamp);
-                    if timestamp < *end_time {
-                        const PROTOCOL_SHARE_PERCENT: u32 = 5;
-                        let protocol_share = fraction
-                            .checked_mul(PROTOCOL_SHARE_PERCENT)
-                            .unwrap()
-                            .checked_div(100)
-                            .unwrap();
-                        fraction = fraction.checked_sub(protocol_share).unwrap();
-                        protocol_fee = protocol_fee.checked_add(protocol_share).unwrap();
-                    }
-                    receivers.push((receiver.clone(), fraction));
-                }
-                FeeAmount::Dynamic { .. } => {
-                    unimplemented!("Dynamic fee configuration is not implemented yet");
-                }
-            }
+        for (receiver, fee_fraction) in self.receivers_at(timestamp) {
+            let protocol_part = PROTOCOL_FEE_SHARE.of(fee_fraction);
+            protocol_fee = protocol_fee
+                .checked_add(protocol_part)
+                .expect("Fee fraction overflow");
+            receivers.push((
+                receiver,
+                fee_fraction
+                    .checked_sub(protocol_part)
+                    .expect("The protocol's part is less than the fee"),
+            ));
         }
         receivers.push((FeeReceiver::Protocol, protocol_fee));
         CurrentFees { receivers }
@@ -780,30 +1117,26 @@ impl CurrentFees {
     pub fn total_fee_fraction(&self) -> FeeFraction {
         self.receivers
             .iter()
-            .map(|(_, fee_fraction)| *fee_fraction)
-            .sum()
+            .try_fold(FeeFraction::ZERO, |total, (_, fee_fraction)| {
+                total.checked_add(*fee_fraction)
+            })
+            .expect("Fee fraction overflow")
     }
 
     /// The fee of each receiver on `amount_in`, each rounded down
-    pub fn amounts(&self, amount_in: u128) -> impl Iterator<Item = (&FeeReceiver, u128)> {
-        self.receivers.iter().map(move |(receiver, fee_fraction)| {
-            (receiver, math::fee_amount(amount_in, *fee_fraction))
-        })
+    pub fn amounts(
+        &self,
+        amount_in: TokenAmount,
+    ) -> impl Iterator<Item = (&FeeReceiver, TokenAmount)> {
+        self.receivers
+            .iter()
+            .map(move |(receiver, fee_fraction)| (receiver, fee_fraction.of(amount_in)))
     }
 
     /// Each fee is rounded down after the discount
-    pub fn discounted(mut self, fee_discount: FeeFractionFraction) -> CurrentFees {
-        let remaining_fee_share = FULL_FEE_FRACTION_FRACTION
-            .checked_sub(fee_discount)
-            .expect("Fee discount can't exceed 100%");
+    pub fn discounted(mut self, fee_discount: FeeDiscountFraction) -> CurrentFees {
         for (_, fee_fraction) in self.receivers.iter_mut() {
-            let discounted_fee_fraction = u64::from(*fee_fraction)
-                .checked_mul(u64::from(remaining_fee_share))
-                .unwrap()
-                .checked_div(u64::from(FULL_FEE_FRACTION_FRACTION))
-                .unwrap();
-            *fee_fraction = FeeFraction::try_from(discounted_fee_fraction)
-                .expect("Discounted fee can't be higher than the original fee");
+            *fee_fraction = fee_discount.apply(*fee_fraction);
         }
         self
     }

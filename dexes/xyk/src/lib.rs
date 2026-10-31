@@ -1,7 +1,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
 use core::panic;
-use std::{collections::HashMap, num::NonZeroU128};
+use std::collections::HashMap;
 
 use intear_dex_types::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
@@ -16,15 +16,16 @@ use near_sdk::{
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
     ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
-    EditFeesArgs, FULL_SPLIT_FRACTION, FeeConfigurationV2, FeeDiscountSignaturePayload,
-    FeeFraction, FeeFractionFraction, FeeGrowth, FeePayoutType, FeeReceiver, GetClaimableFeesArgs,
-    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
-    INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER, LiquidityPosition, LiquidityPositionView,
-    LockPoolArgs, PROTOCOL_FEE_RECEIVER_ID, PayoutGroup, PayoutGroups, Pool, PoolAssets, PoolId,
-    PoolType, PoolView, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
-    SignedFeeDiscount, SwapArgs, SwapRoute, WithdrawFeesArgs, XykDexEvent,
-    math::{exact_in_amount_out, exact_out_amount_in, mul_div, shares_to_tokens, tokens_to_shares},
+    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeeDiscountSignaturePayload, FeeGrowth,
+    FeePayoutType, FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs,
+    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
+    LiquidityPosition, LiquidityPositionView, LockPoolArgs, PRIVATE_POOL_TOTAL_SHARES,
+    PROTOCOL_FEE_RECEIVER_ID, PayoutGroup, PayoutGroupShares, PayoutGroups, Pool, PoolAssets,
+    PoolId, PoolType, PoolView, ProviderShares, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction, SetFeeDiscountSignerArgs,
+    SetLiquidityFeePayoutArgs, SignedFeeDiscount, SwapArgs, SwapReserves, SwapRoute, TokenAmount,
+    TotalShares, WithdrawFeesArgs, XykDexEvent,
+    math::{exact_in_amount_out, exact_out_amount_in},
 };
 
 mod migration;
@@ -53,8 +54,8 @@ enum StorageKey {
 #[derive(PanicOnDefault)]
 pub struct XykDex {
     pools: Vector<Pool>,
-    fees_collected_by_users: LookupMap<(AccountId, AssetId), U128>,
-    fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), U128>,
+    fees_collected_by_users: LookupMap<(AccountId, AssetId), TokenAmount>,
+    fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), TokenAmount>,
     fee_discount_signer_public_key: Option<PublicKey>,
 }
 
@@ -71,11 +72,7 @@ impl Dex for XykDex {
         };
         expect!(!routes.is_empty(), "No routes");
         expect!(
-            routes
-                .iter()
-                .map(|route| route.fraction as u64)
-                .sum::<u64>()
-                == FULL_SPLIT_FRACTION as u64,
+            RouteFraction::add_up_to_full(routes.iter().map(|route| route.fraction)),
             "Route fractions must add up to 100%"
         );
         let fee_discount = fee_discount.map(|signed_fee_discount| {
@@ -84,21 +81,20 @@ impl Dex for XykDex {
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
+        let requested_amount = TokenAmount::new(requested_amount.0);
         let mut route_amounts = routes
             .into_iter()
             .map(|route| {
-                let amount = mul_div(
-                    requested_amount.0,
-                    route.fraction as u128,
-                    NonZeroU128::new(FULL_SPLIT_FRACTION as u128).unwrap(),
-                );
+                let amount = route.fraction.of(requested_amount);
                 (route, amount)
             })
             .collect::<Vec<_>>();
         // Fractions round down, so the first route also swaps what's left
-        let unsplit_amount = requested_amount
-            .0
-            .checked_sub(route_amounts.iter().map(|(_route, amount)| amount).sum())
+        let unsplit_amount = route_amounts
+            .iter()
+            .try_fold(requested_amount, |unsplit_amount, (_route, amount)| {
+                unsplit_amount.checked_sub(*amount)
+            })
             .expect("Routes exceed the requested amount");
         route_amounts[0].1 = route_amounts[0]
             .1
@@ -136,7 +132,7 @@ impl Dex for XykDex {
                 pool_id,
                 pool: self
                     .pools
-                    .get(pool_id)
+                    .get(pool_id.get())
                     .unwrap()
                     .view(near_sdk::env::block_timestamp()),
             }
@@ -153,7 +149,7 @@ impl XykDex {
         signed_fee_discount: SignedFeeDiscount,
         routes: &[SwapRoute],
         request: &SwapRequest,
-    ) -> FeeFractionFraction {
+    ) -> FeeDiscountFraction {
         let SignedFeeDiscount {
             discount,
             signature,
@@ -260,8 +256,8 @@ impl XykDex {
         &mut self,
         pool_ids: &[PoolId],
         request: &SwapRequest,
-        amount: u128,
-        fee_discount: Option<FeeFraction>,
+        amount: TokenAmount,
+        fee_discount: Option<FeeDiscountFraction>,
         updated_pool_ids: &mut Vec<PoolId>,
     ) -> SwapResponse {
         expect!(!pool_ids.is_empty(), "Route has no pools");
@@ -271,11 +267,11 @@ impl XykDex {
             let pool_id = if *pool_id == LAST_CREATED_POOL_ID_MARKER {
                 // Last created pool. This is used to batch "create launch pool + buy"
                 // without having to wait to know the pool ID
-                self.pools.len().checked_sub(1).expect("No pools created")
+                PoolId::new(self.pools.len().checked_sub(1).expect("No pools created"))
             } else {
                 *pool_id
             };
-            let Some(pool) = self.pools.get(pool_id) else {
+            let Some(pool) = self.pools.get(pool_id.get()) else {
                 panic!("Pool not found");
             };
             let asset_out = match pool.asset_ids() {
@@ -292,41 +288,45 @@ impl XykDex {
         );
         match request.amount {
             SwapRequestAmount::ExactIn(_) => {
-                let mut hop_amount = U128(amount);
+                let mut hop_amount = amount;
                 for (pool_id, asset_in, asset_out) in hops {
-                    hop_amount = self
-                        .swap_in_pool(
+                    hop_amount = TokenAmount::new(
+                        self.swap_in_pool(
                             pool_id,
                             fee_discount,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
-                            SwapRequestAmount::ExactIn(hop_amount),
+                            SwapRequestAmount::ExactIn(U128(hop_amount.get())),
                         )
-                        .amount_out;
+                        .amount_out
+                        .0,
+                    );
                 }
                 SwapResponse {
-                    amount_in: U128(amount),
-                    amount_out: hop_amount,
+                    amount_in: U128(amount.get()),
+                    amount_out: U128(hop_amount.get()),
                 }
             }
             SwapRequestAmount::ExactOut(_) => {
-                let mut hop_amount = U128(amount);
+                let mut hop_amount = amount;
                 for (pool_id, asset_in, asset_out) in hops.into_iter().rev() {
-                    hop_amount = self
-                        .swap_in_pool(
+                    hop_amount = TokenAmount::new(
+                        self.swap_in_pool(
                             pool_id,
                             fee_discount,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
-                            SwapRequestAmount::ExactOut(hop_amount),
+                            SwapRequestAmount::ExactOut(U128(hop_amount.get())),
                         )
-                        .amount_in;
+                        .amount_in
+                        .0,
+                    );
                 }
                 SwapResponse {
-                    amount_in: hop_amount,
-                    amount_out: U128(amount),
+                    amount_in: U128(hop_amount.get()),
+                    amount_out: U128(amount.get()),
                 }
             }
         }
@@ -335,13 +335,13 @@ impl XykDex {
     fn swap_in_pool(
         &mut self,
         pool_id: PoolId,
-        fee_discount: Option<FeeFraction>,
+        fee_discount: Option<FeeDiscountFraction>,
         updated_pool_ids: &mut Vec<PoolId>,
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
     ) -> SwapResponse {
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
         let pool_asset_ids = {
@@ -350,9 +350,9 @@ impl XykDex {
         };
         expect!(pool_asset_ids.0.contains(&asset_in), "Invalid asset in");
         expect!(pool_asset_ids.0.contains(&asset_out), "Invalid asset out");
-        let mut balances = PoolAssets(pool.balances());
+        let mut balances = pool.balances();
         expect!(
-            balances[AssetIndex::First] > 0 && balances[AssetIndex::Second] > 0,
+            !balances[AssetIndex::First].is_zero() && !balances[AssetIndex::Second].is_zero(),
             "Pool is empty"
         );
         let (in_index, out_index) = match (
@@ -366,9 +366,7 @@ impl XykDex {
             _ => panic!("Invalid assets or pool ID"),
         };
 
-        let pool_and_protocol_fees = pool
-            .fee_configuration()
-            .with_protocol_fee(&[&asset_in, &asset_out], near_sdk::env::block_timestamp());
+        let pool_and_protocol_fees = pool.current_fees(near_sdk::env::block_timestamp());
         let current_fees = match fee_discount {
             Some(fee_discount) => pool_and_protocol_fees.discounted(fee_discount),
             None => pool_and_protocol_fees,
@@ -376,19 +374,23 @@ impl XykDex {
 
         let amount_in = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
-                expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
-                exact_amount_in.0
+                let exact_amount_in = TokenAmount::new(exact_amount_in.0);
+                expect!(!exact_amount_in.is_zero(), "Amount must be greater than 0");
+                exact_amount_in
             }
             SwapRequestAmount::ExactOut(exact_amount_out) => {
-                expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
+                let exact_amount_out = TokenAmount::new(exact_amount_out.0);
+                expect!(!exact_amount_out.is_zero(), "Amount must be greater than 0");
                 expect!(
-                    exact_amount_out.0 < balances[out_index],
+                    exact_amount_out < balances[out_index],
                     "Amount must be less than out balance"
                 );
                 exact_out_amount_in(
-                    exact_amount_out.0,
-                    balances[in_index],
-                    balances[out_index],
+                    exact_amount_out,
+                    SwapReserves {
+                        input: balances[in_index],
+                        output: balances[out_index],
+                    },
                     &current_fees,
                 )
             }
@@ -408,9 +410,9 @@ impl XykDex {
                             ..
                         },
                     ) => payout_groups
-                        .split_pool_fee(fee_amount, total_shares.expect("Pool has no shares"))
+                        .split_pool_fee(fee_amount, *total_shares)
                         .into_iter()
-                        .filter(|(_, paid_out_fee)| *paid_out_fee > 0)
+                        .filter(|(_, paid_out_fee)| !paid_out_fee.is_zero())
                         .collect(),
                     (FeeReceiver::Pool, _) => Vec::new(),
                     (FeeReceiver::Account { .. } | FeeReceiver::Protocol, _) => {
@@ -422,7 +424,7 @@ impl XykDex {
             .collect::<Vec<_>>();
         let total_fees = receiver_fees
             .iter()
-            .try_fold(0u128, |total, (_, fee_amount, _)| {
+            .try_fold(TokenAmount::ZERO, |total, (_, fee_amount, _)| {
                 total.checked_add(*fee_amount)
             })
             .expect("Overflow");
@@ -436,7 +438,7 @@ impl XykDex {
                     })
                     .expect("Paid out more than the fee")
             })
-            .try_fold(0u128, |total, fee_added_to_liquidity| {
+            .try_fold(TokenAmount::ZERO, |total, fee_added_to_liquidity| {
                 total.checked_add(fee_added_to_liquidity)
             })
             .expect("Overflow");
@@ -445,10 +447,12 @@ impl XykDex {
             // in_balance was checked to be positive
             SwapRequestAmount::ExactIn(_) => exact_in_amount_out(
                 amount_in_after_fees,
-                balances[in_index],
-                balances[out_index],
+                SwapReserves {
+                    input: balances[in_index],
+                    output: balances[out_index],
+                },
             ),
-            SwapRequestAmount::ExactOut(exact_amount_out) => exact_amount_out.0,
+            SwapRequestAmount::ExactOut(exact_amount_out) => TokenAmount::new(exact_amount_out.0),
         };
         balances[in_index] = balances[in_index]
             .checked_add(amount_in_after_fees)
@@ -462,7 +466,7 @@ impl XykDex {
         let mut fees_breakdown = Vec::new();
         for (receiver, fee_amount, paid_out_fees) in receiver_fees {
             // What the receiver took in each asset, after converting what its payouts convert
-            let mut fees_taken = PoolAssets([0, 0]);
+            let mut fees_taken = PoolAssets([TokenAmount::ZERO; 2]);
             fees_taken[in_index] = fee_amount;
             for (payout_type, paid_out_fee) in paid_out_fees {
                 let payout_asset_index = payout_type.asset_index(in_index);
@@ -474,8 +478,13 @@ impl XykDex {
                         .expect("Underflow");
                     // The pool swaps the fee into the other asset without fees. in_balance and
                     // out_balance are positive after the swap.
-                    let converted_fee =
-                        exact_in_amount_out(paid_out_fee, balances[in_index], balances[out_index]);
+                    let converted_fee = exact_in_amount_out(
+                        paid_out_fee,
+                        SwapReserves {
+                            input: balances[in_index],
+                            output: balances[out_index],
+                        },
+                    );
                     balances[in_index] = balances[in_index]
                         .checked_add(paid_out_fee)
                         .expect("Overflow");
@@ -517,37 +526,28 @@ impl XykDex {
                         &mut self.fees_collected_by_users,
                     ),
                 };
-                fees_breakdown.push((
-                    receiver.clone(),
-                    payout_asset_id.clone(),
-                    U128(payout_amount),
-                ));
+                fees_breakdown.push((receiver.clone(), payout_asset_id.clone(), payout_amount));
                 fee_balances
                     .entry((account_id, payout_asset_id.clone()))
                     .and_modify(|balance| {
-                        balance.0 = balance.0.checked_add(payout_amount).expect("Overflow")
+                        *balance = balance.checked_add(payout_amount).expect("Overflow")
                     })
                     .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
             }
             // The pool's liquidity and providers took both what they kept of the asset in, and
             // what they converted to the asset out
             if let FeeReceiver::Pool = receiver {
-                fees_breakdown.push((
-                    FeeReceiver::Pool,
-                    asset_in.clone(),
-                    U128(fees_taken[in_index]),
-                ));
-                if fees_taken[out_index] > 0 {
+                fees_breakdown.push((FeeReceiver::Pool, asset_in.clone(), fees_taken[in_index]));
+                if !fees_taken[out_index].is_zero() {
                     fees_breakdown.push((
                         FeeReceiver::Pool,
                         asset_out.clone(),
-                        U128(fees_taken[out_index]),
+                        fees_taken[out_index],
                     ));
                 }
             }
         }
-        let [balance_0, balance_1] = pool.balances_mut();
-        [*balance_0, *balance_1] = balances.0;
+        pool.set_balances(balances);
 
         if let Pool::LaunchV2 {
             quote_asset,
@@ -556,7 +556,7 @@ impl XykDex {
         } = pool
         {
             expect!(
-                quote_asset.balance.0 >= phantom_liquidity.0,
+                quote_asset.balance >= *phantom_liquidity,
                 "Quote asset liquidity can't go lower than the initial phantom liquidity"
             );
         }
@@ -565,15 +565,15 @@ impl XykDex {
             updated_pool_ids.push(pool_id);
         }
         let response = SwapResponse {
-            amount_in: U128(amount_in),
-            amount_out: U128(amount_out),
+            amount_in: U128(amount_in.get()),
+            amount_out: U128(amount_out.get()),
         };
         XykDexEvent::Swap {
             pool_id,
             asset_in,
             asset_out,
-            amount_in: response.amount_in,
-            amount_out: response.amount_out,
+            amount_in,
+            amount_out,
             fees_breakdown,
         }
         .emit();
@@ -584,7 +584,7 @@ impl XykDex {
 /// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
 /// that `payout_type` takes fees in
 fn start_fee_balances(
-    fee_balances: &mut LookupMap<(AccountId, AssetId), U128>,
+    fee_balances: &mut LookupMap<(AccountId, AssetId), TokenAmount>,
     account_id: &AccountId,
     asset_ids: PoolAssets<&AssetId>,
     payout_type: FeePayoutType,
@@ -601,23 +601,23 @@ fn start_fee_balances(
 
 /// Adds pool fees that a liquidity provider earned to the fees it collected
 fn credit_liquidity_fees(
-    fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), U128>,
+    fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), TokenAmount>,
     pool_id: PoolId,
     account_id: &AccountId,
     asset_ids: PoolAssets<&AssetId>,
-    fees: PoolAssets<u128>,
+    fees: PoolAssets<TokenAmount>,
 ) {
-    if fees == PoolAssets([0, 0]) {
+    if fees.0.iter().all(|fee| fee.is_zero()) {
         return;
     }
     for (asset_id, amount) in asset_ids.0.into_iter().zip(fees.0) {
         // The provider's payout doesn't take fees in every asset, which it may not collect
-        if amount == 0 {
+        if amount.is_zero() {
             continue;
         }
         fees_collected_by_users
             .entry((account_id.clone(), asset_id.clone()))
-            .and_modify(|balance| balance.0 = balance.0.checked_add(amount).expect("Overflow"))
+            .and_modify(|balance| *balance = balance.checked_add(amount).expect("Overflow"))
             .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
     }
     XykDexEvent::LiquidityFeesCollected {
@@ -625,8 +625,8 @@ fn credit_liquidity_fees(
         account_id: account_id.clone(),
         asset_0: asset_ids[AssetIndex::First].clone(),
         asset_1: asset_ids[AssetIndex::Second].clone(),
-        amount_0: U128(fees[AssetIndex::First]),
-        amount_1: U128(fees[AssetIndex::Second]),
+        amount_0: fees[AssetIndex::First],
+        amount_1: fees[AssetIndex::Second],
     }
     .emit();
 }
@@ -711,7 +711,10 @@ impl XykDex {
 
         fees.validate(near_sdk::env::block_timestamp())
             .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
-        expect!(self.pools.len() < u32::MAX, "Too many pools");
+        expect!(
+            self.pools.len() < LAST_CREATED_POOL_ID_MARKER.get(),
+            "Too many pools"
+        );
 
         let storage_usage_before = near_sdk::env::storage_usage();
         self.fees_collected_by_users
@@ -748,7 +751,7 @@ impl XykDex {
                     "Launch pools take the launched asset from attached assets, not initial liquidity"
                 );
                 expect!(
-                    initial_amount_0.0 > 0 && initial_amount_1.0 > 0,
+                    !initial_amount_0.is_zero() && !initial_amount_1.is_zero(),
                     "Initial liquidity amounts must be greater than 0"
                 );
                 for (asset_id, amount) in
@@ -756,11 +759,11 @@ impl XykDex {
                 {
                     if *asset_id == AssetId::Near {
                         attached_near = attached_near
-                            .checked_sub(NearToken::from_yoctonear(amount.0))
+                            .checked_sub(NearToken::from_yoctonear(amount.get()))
                             .expect("Not enough NEAR attached for initial liquidity and storage");
                     } else {
                         expect!(
-                            attached_assets.remove(asset_id) == Some(amount),
+                            attached_assets.remove(asset_id) == Some(U128(amount.get())),
                             "Attached {asset_id} must be equal to its initial liquidity"
                         );
                     }
@@ -772,11 +775,11 @@ impl XykDex {
                     !is_public_pool,
                     "Public pools must be created with initial liquidity"
                 );
-                (U128(0), U128(0))
+                (TokenAmount::ZERO, TokenAmount::ZERO)
             }
         };
 
-        let pool_id = self.pools.len();
+        let pool_id = PoolId::new(self.pools.len());
         // Older pool constructors are created as their latest version
         self.pools.push(match pool_type {
             PoolType::PublicLatest
@@ -790,7 +793,9 @@ impl XykDex {
                 // The creator keeps its fees until it chooses another payout
                 let payout_groups = PayoutGroups {
                     keep_both: PayoutGroup {
-                        shares: INITIAL_SHARES.get(),
+                        shares: PayoutGroupShares::NONE
+                            .joined_by(INITIAL_SHARES)
+                            .expect("Overflow"),
                         fee_growth: FeeGrowth::default(),
                     },
                     ..Default::default()
@@ -800,7 +805,7 @@ impl XykDex {
                     caller_id.clone(),
                     LiquidityPosition::new(
                         FeePayoutType::KeepBoth,
-                        INITIAL_SHARES.get(),
+                        INITIAL_SHARES,
                         &payout_groups.keep_both,
                     ),
                 );
@@ -825,7 +830,7 @@ impl XykDex {
                     ),
                     fees: fees.clone(),
                     providers,
-                    total_shares: Some(INITIAL_SHARES),
+                    total_shares: TotalShares::NONE.minted(INITIAL_SHARES).expect("Overflow"),
                     payout_groups: Box::new(payout_groups),
                 }
             }
@@ -863,7 +868,7 @@ impl XykDex {
                     );
                 }
                 expect!(
-                    phantom_liquidity.0 > 0,
+                    !phantom_liquidity.is_zero(),
                     "Phantom liquidity must be greater than 0"
                 );
                 let attached_launched_asset = attached_assets
@@ -884,7 +889,7 @@ impl XykDex {
                     },
                     launched_asset: AssetWithBalance {
                         asset_id: assets.1.clone(),
-                        balance: U128(attached_launched_asset.0),
+                        balance: TokenAmount::new(attached_launched_asset.0),
                     },
                     fees: fees.clone(),
                     phantom_liquidity,
@@ -909,16 +914,16 @@ impl XykDex {
             pool_id,
             pool: self
                 .pools
-                .get(pool_id)
+                .get(pool_id.get())
                 .unwrap()
                 .view(near_sdk::env::block_timestamp()),
         }
         .emit();
         if initial_liquidity.is_some() {
             let minted_shares = if is_public_pool {
-                INITIAL_SHARES.get()
+                INITIAL_SHARES
             } else {
-                0
+                ProviderShares::ZERO
             };
             XykDexEvent::LiquidityAdded {
                 pool_id,
@@ -927,15 +932,15 @@ impl XykDex {
 
                 added_amount_0: initial_balances.0,
                 added_amount_1: initial_balances.1,
-                minted_shares: U128(minted_shares),
+                minted_shares,
 
                 new_owned_asset_0: initial_balances.0,
                 new_owned_asset_1: initial_balances.1,
-                new_owned_shares: U128(minted_shares),
+                new_owned_shares: minted_shares,
 
                 new_total_asset_0: initial_balances.0,
                 new_total_asset_1: initial_balances.1,
-                new_total_shares: U128(minted_shares),
+                new_total_shares: U128(minted_shares.get()),
             }
             .emit();
         }
@@ -975,7 +980,7 @@ impl XykDex {
         let Ok(RegisterLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
         let attached_near =
@@ -1002,7 +1007,11 @@ impl XykDex {
         if !providers.contains_key(&caller_id) {
             providers.insert(
                 caller_id.clone(),
-                LiquidityPosition::new(FeePayoutType::KeepBoth, 0, &payout_groups.keep_both),
+                LiquidityPosition::new(
+                    FeePayoutType::KeepBoth,
+                    ProviderShares::ZERO,
+                    &payout_groups.keep_both,
+                ),
             );
             providers.flush();
             start_fee_balances(
@@ -1061,7 +1070,7 @@ impl XykDex {
         else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
 
@@ -1096,29 +1105,29 @@ impl XykDex {
                     attached_assets.is_empty(),
                     "No assets other than the two pool assets should be attached"
                 );
-                assets.0.balance.0 = assets
+                let attached_amount_0 = TokenAmount::new(attached_amount_0.0);
+                let attached_amount_1 = TokenAmount::new(attached_amount_1.0);
+                assets.0.balance = assets
                     .0
                     .balance
-                    .0
-                    .checked_add(attached_amount_0.0)
+                    .checked_add(attached_amount_0)
                     .expect("Overflow");
-                assets.1.balance.0 = assets
+                assets.1.balance = assets
                     .1
                     .balance
-                    .0
-                    .checked_add(attached_amount_1.0)
+                    .checked_add(attached_amount_1)
                     .expect("Overflow");
 
                 (
                     Vec::new(),
-                    attached_amount_0.0,
-                    attached_amount_1.0,
-                    0,
-                    assets.0.balance.0,
-                    assets.1.balance.0,
-                    0,
-                    assets.0.balance.0,
-                    assets.1.balance.0,
+                    attached_amount_0,
+                    attached_amount_1,
+                    ProviderShares::ZERO,
+                    assets.0.balance,
+                    assets.1.balance,
+                    ProviderShares::ZERO,
+                    assets.0.balance,
+                    assets.1.balance,
                     0,
                     assets,
                 )
@@ -1149,107 +1158,78 @@ impl XykDex {
                     "User has not registered using register_liquidity"
                 );
                 let mut asset_withdraw_requests = Vec::new();
-                let (shares_to_mint, added_amount_0, added_amount_1) = match total_shares {
-                    None => {
-                        expect!(
-                            min_shares_received.is_none(),
-                            "Min shares received must not be specified for new pools"
-                        );
-                        expect!(
-                            position.shares == 0,
-                            "User already has shares but there are no total shares"
-                        );
-                        assets.0.balance.0 = assets
-                            .0
-                            .balance
-                            .0
-                            .checked_add(attached_amount_0.0)
-                            .expect("Overflow");
-                        assets.1.balance.0 = assets
-                            .1
-                            .balance
-                            .0
-                            .checked_add(attached_amount_1.0)
-                            .expect("Overflow");
-                        (INITIAL_SHARES, attached_amount_0.0, attached_amount_1.0)
+                let attached_amount_0 = TokenAmount::new(attached_amount_0.0);
+                let attached_amount_1 = TokenAmount::new(attached_amount_1.0);
+                let (shares_to_mint, added_amount_0, added_amount_1) = if total_shares.is_none() {
+                    expect!(
+                        min_shares_received.is_none(),
+                        "Min shares received must not be specified for new pools"
+                    );
+                    expect!(
+                        position.shares.is_zero(),
+                        "User already has shares but there are no total shares"
+                    );
+                    (INITIAL_SHARES, attached_amount_0, attached_amount_1)
+                } else {
+                    let pool_balance_0 = assets.0.balance;
+                    let pool_balance_1 = assets.1.balance;
+                    let shares_mintable_from_0 = ProviderShares::minted_for(
+                        attached_amount_0
+                            .checked_sub(TokenAmount::new(1))
+                            .expect("Underflow"),
+                        *total_shares,
+                        pool_balance_0,
+                    );
+                    let shares_mintable_from_1 = ProviderShares::minted_for(
+                        attached_amount_1
+                            .checked_sub(TokenAmount::new(1))
+                            .expect("Underflow"),
+                        *total_shares,
+                        pool_balance_1,
+                    );
+                    let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
+                    expect!(!shares_to_mint.is_zero(), "Can't mint zero shares");
+                    if let Some(min_shares_received) = min_shares_received {
+                        expect!(shares_to_mint >= min_shares_received, "Slippage error");
                     }
-                    Some(pool_total_shares) => {
-                        expect!(
-                            let Some(pool_balance_0) = NonZeroU128::new(assets.0.balance.0),
-                            let Some(pool_balance_1) = NonZeroU128::new(assets.1.balance.0),
-                            "Pool is empty"
-                        );
 
-                        let shares_mintable_from_0 = NonZeroU128::new(tokens_to_shares(
-                            attached_amount_0.0.checked_sub(1).expect("Underflow"),
-                            *pool_total_shares,
-                            pool_balance_0,
-                        ))
-                        .expect("Can't mint zero shares");
-                        let shares_mintable_from_1 = NonZeroU128::new(tokens_to_shares(
-                            attached_amount_1.0.checked_sub(1).expect("Underflow"),
-                            *pool_total_shares,
-                            pool_balance_1,
-                        ))
-                        .expect("Can't mint zero shares");
-                        let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
-                        if let Some(min_shares_received) = min_shares_received {
-                            expect!(shares_to_mint >= min_shares_received, "Slippage error");
-                        }
+                    let deposited_amount_0 = shares_to_mint
+                        .worth_in(*total_shares, pool_balance_0)
+                        .checked_add(TokenAmount::new(1))
+                        .expect("Overflow");
+                    let deposited_amount_1 = shares_to_mint
+                        .worth_in(*total_shares, pool_balance_1)
+                        .checked_add(TokenAmount::new(1))
+                        .expect("Overflow");
 
-                        let deposited_amount_0 =
-                            shares_to_tokens(shares_to_mint, *pool_total_shares, pool_balance_0)
-                                .checked_add(1)
-                                .expect("Overflow");
-                        let deposited_amount_1 =
-                            shares_to_tokens(shares_to_mint, *pool_total_shares, pool_balance_1)
-                                .checked_add(1)
-                                .expect("Overflow");
-
-                        assets.0.balance.0 = assets
-                            .0
-                            .balance
-                            .0
-                            .checked_add(deposited_amount_0)
-                            .expect("Overflow");
-                        assets.1.balance.0 = assets
-                            .1
-                            .balance
-                            .0
-                            .checked_add(deposited_amount_1)
-                            .expect("Overflow");
-
-                        let refund_amount_0 = attached_amount_0.0.checked_sub(deposited_amount_0);
-                        if let Some(refund_amount_0) = refund_amount_0 {
+                    for (asset, attached_amount, deposited_amount) in [
+                        (&assets.0, attached_amount_0, deposited_amount_0),
+                        (&assets.1, attached_amount_1, deposited_amount_1),
+                    ] {
+                        if let Some(refund_amount) = attached_amount.checked_sub(deposited_amount) {
                             asset_withdraw_requests.push(AssetWithdrawRequest {
-                                asset_id: assets.0.asset_id.clone(),
-                                amount: U128(refund_amount_0),
+                                asset_id: asset.asset_id.clone(),
+                                amount: U128(refund_amount.get()),
                                 withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                                     caller_id.clone(),
                                 ),
                             });
                         }
-                        let refund_amount_1 = attached_amount_1.0.checked_sub(deposited_amount_1);
-                        if let Some(refund_amount_1) = refund_amount_1 {
-                            asset_withdraw_requests.push(AssetWithdrawRequest {
-                                asset_id: assets.1.asset_id.clone(),
-                                amount: U128(refund_amount_1),
-                                withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                                    caller_id.clone(),
-                                ),
-                            });
-                        }
-                        (shares_to_mint, deposited_amount_0, deposited_amount_1)
                     }
+                    (shares_to_mint, deposited_amount_0, deposited_amount_1)
                 };
-                let collected_fees = payout_groups.add_shares(&mut position, shares_to_mint.get());
-                let total_shares_after = match total_shares {
-                    Some(pool_total_shares) => pool_total_shares
-                        .checked_add(shares_to_mint.get())
-                        .expect("Overflow"),
-                    None => shares_to_mint,
-                };
-                *total_shares = Some(total_shares_after);
+                assets.0.balance = assets
+                    .0
+                    .balance
+                    .checked_add(added_amount_0)
+                    .expect("Overflow");
+                assets.1.balance = assets
+                    .1
+                    .balance
+                    .checked_add(added_amount_1)
+                    .expect("Overflow");
+                let collected_fees = payout_groups.add_shares(&mut position, shares_to_mint);
+                *total_shares = total_shares.minted(shares_to_mint).expect("Overflow");
                 credit_liquidity_fees(
                     &mut self.fees_collected_by_users,
                     pool_id,
@@ -1257,30 +1237,21 @@ impl XykDex {
                     PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
                     collected_fees,
                 );
-                let new_owned_shares = NonZeroU128::new(position.shares)
-                    .expect("User has no shares after adding liquidity");
+                let new_owned_shares = position.shares;
                 providers.insert(caller_id.clone(), position);
-                let new_owned_asset_0 = shares_to_tokens(
-                    new_owned_shares,
-                    total_shares_after,
-                    NonZeroU128::new(assets.0.balance.0).expect("Zero tokens in pool"),
-                );
-                let new_owned_asset_1 = shares_to_tokens(
-                    new_owned_shares,
-                    total_shares_after,
-                    NonZeroU128::new(assets.1.balance.0).expect("Zero tokens in pool"),
-                );
+                let new_owned_asset_0 = new_owned_shares.worth_in(*total_shares, assets.0.balance);
+                let new_owned_asset_1 = new_owned_shares.worth_in(*total_shares, assets.1.balance);
                 (
                     asset_withdraw_requests,
                     added_amount_0,
                     added_amount_1,
-                    shares_to_mint.get(),
+                    shares_to_mint,
                     new_owned_asset_0,
                     new_owned_asset_1,
-                    new_owned_shares.get(),
-                    assets.0.balance.0,
-                    assets.1.balance.0,
-                    total_shares_after.get(),
+                    new_owned_shares,
+                    assets.0.balance,
+                    assets.1.balance,
+                    total_shares.get(),
                     assets,
                 )
             }
@@ -1294,16 +1265,16 @@ impl XykDex {
             asset_0: assets.0.asset_id.clone(),
             asset_1: assets.1.asset_id.clone(),
 
-            added_amount_0: U128(added_amount_0),
-            added_amount_1: U128(added_amount_1),
-            minted_shares: U128(minted_shares),
+            added_amount_0,
+            added_amount_1,
+            minted_shares,
 
-            new_owned_asset_0: U128(new_owned_asset_0),
-            new_owned_asset_1: U128(new_owned_asset_1),
-            new_owned_shares: U128(new_owned_shares),
+            new_owned_asset_0,
+            new_owned_asset_1,
+            new_owned_shares,
 
-            new_total_asset_0: U128(new_total_asset_0),
-            new_total_asset_1: U128(new_total_asset_1),
+            new_total_asset_0,
+            new_total_asset_1,
             new_total_shares: U128(new_total_shares),
         }
         .emit();
@@ -1341,7 +1312,11 @@ impl XykDex {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        expect!(
+            shares_to_remove != Some(ProviderShares::ZERO),
+            "Can't remove zero shares"
+        );
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
 
@@ -1371,42 +1346,40 @@ impl XykDex {
                 );
                 let shares_to_remove = shares_to_remove.unwrap_or(INITIAL_SHARES);
                 expect!(
-                    shares_to_remove.get() <= INITIAL_SHARES.get(),
+                    shares_to_remove <= INITIAL_SHARES,
                     "Shares must be less than {INITIAL_SHARES}. {INITIAL_SHARES} means remove 100% of pool"
                 );
                 let withdrawn_amount_0 =
-                    mul_div(assets.0.balance.0, shares_to_remove.get(), INITIAL_SHARES);
+                    shares_to_remove.worth_in(PRIVATE_POOL_TOTAL_SHARES, assets.0.balance);
                 let withdrawn_amount_1 =
-                    mul_div(assets.1.balance.0, shares_to_remove.get(), INITIAL_SHARES);
+                    shares_to_remove.worth_in(PRIVATE_POOL_TOTAL_SHARES, assets.1.balance);
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
                     expect!(
-                        withdrawn_amount_0 >= min_asset_0_received.0
-                            && withdrawn_amount_1 >= min_asset_1_received.0,
+                        withdrawn_amount_0 >= min_asset_0_received
+                            && withdrawn_amount_1 >= min_asset_1_received,
                         "Slippage error"
                     );
                 }
-                assets.0.balance.0 = assets
+                assets.0.balance = assets
                     .0
                     .balance
-                    .0
                     .checked_sub(withdrawn_amount_0)
                     .expect("Underflow");
-                assets.1.balance.0 = assets
+                assets.1.balance = assets
                     .1
                     .balance
-                    .0
                     .checked_sub(withdrawn_amount_1)
                     .expect("Underflow");
                 (
                     owner_id.clone(),
                     (assets.0.asset_id.clone(), withdrawn_amount_0),
                     (assets.1.asset_id.clone(), withdrawn_amount_1),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
+                    ProviderShares::ZERO,
+                    TokenAmount::ZERO,
+                    TokenAmount::ZERO,
+                    ProviderShares::ZERO,
+                    TokenAmount::ZERO,
+                    TokenAmount::ZERO,
                     0,
                 )
             }
@@ -1421,61 +1394,40 @@ impl XykDex {
                     .get(&caller_id)
                     .cloned()
                     .expect("User has no shares");
-                let user_shares_before =
-                    NonZeroU128::new(position.shares).expect("User has no shares");
-                let shares_to_remove = shares_to_remove.unwrap_or(user_shares_before);
+                expect!(!position.shares.is_zero(), "User has no shares");
+                let shares_to_remove = shares_to_remove.unwrap_or(position.shares);
                 expect!(
-                    shares_to_remove <= user_shares_before,
+                    shares_to_remove <= position.shares,
                     "Not enough shares to remove"
                 );
-                expect!(let Some(pool_total_shares) = *total_shares, "Pool has no shares");
-                let (withdrawn_amount_0, withdrawn_amount_1) =
-                    if shares_to_remove == pool_total_shares {
-                        let withdrawn_amount_0 = assets.0.balance.0;
-                        let withdrawn_amount_1 = assets.1.balance.0;
-                        assets.0.balance.0 = 0;
-                        assets.1.balance.0 = 0;
-                        (withdrawn_amount_0, withdrawn_amount_1)
-                    } else {
-                        let withdrawn_amount_0 = NonZeroU128::new(assets.0.balance.0)
-                            .map(|balance| {
-                                shares_to_tokens(shares_to_remove, pool_total_shares, balance)
-                            })
-                            .unwrap_or_default();
-                        let withdrawn_amount_1 = NonZeroU128::new(assets.1.balance.0)
-                            .map(|balance| {
-                                shares_to_tokens(shares_to_remove, pool_total_shares, balance)
-                            })
-                            .unwrap_or_default();
-                        assets.0.balance.0 = assets
-                            .0
-                            .balance
-                            .0
-                            .checked_sub(withdrawn_amount_0)
-                            .expect("Somehow not enough balance for asset 1 withdrawal");
-                        assets.1.balance.0 = assets
-                            .1
-                            .balance
-                            .0
-                            .checked_sub(withdrawn_amount_1)
-                            .expect("Somehow not enough balance for asset 2 withdrawal");
-                        (withdrawn_amount_0, withdrawn_amount_1)
-                    };
+                let total_shares_after = total_shares.burned(shares_to_remove).expect("Underflow");
+                let (withdrawn_amount_0, withdrawn_amount_1) = if total_shares_after.is_none() {
+                    (assets.0.balance, assets.1.balance)
+                } else {
+                    (
+                        shares_to_remove.worth_in(*total_shares, assets.0.balance),
+                        shares_to_remove.worth_in(*total_shares, assets.1.balance),
+                    )
+                };
+                assets.0.balance = assets
+                    .0
+                    .balance
+                    .checked_sub(withdrawn_amount_0)
+                    .expect("Somehow not enough balance for asset 1 withdrawal");
+                assets.1.balance = assets
+                    .1
+                    .balance
+                    .checked_sub(withdrawn_amount_1)
+                    .expect("Somehow not enough balance for asset 2 withdrawal");
                 if let Some((min_asset_0_received, min_asset_1_received)) = min_assets_received {
                     expect!(
-                        withdrawn_amount_0 >= min_asset_0_received.0
-                            && withdrawn_amount_1 >= min_asset_1_received.0,
+                        withdrawn_amount_0 >= min_asset_0_received
+                            && withdrawn_amount_1 >= min_asset_1_received,
                         "Slippage error"
                     );
                 }
-                let collected_fees =
-                    payout_groups.remove_shares(&mut position, shares_to_remove.get());
-                *total_shares = NonZeroU128::new(
-                    pool_total_shares
-                        .get()
-                        .checked_sub(shares_to_remove.get())
-                        .expect("Underflow"),
-                );
+                let collected_fees = payout_groups.remove_shares(&mut position, shares_to_remove);
+                *total_shares = total_shares_after;
                 credit_liquidity_fees(
                     &mut self.fees_collected_by_users,
                     pool_id,
@@ -1483,32 +1435,27 @@ impl XykDex {
                     PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
                     collected_fees,
                 );
-                let user_shares_after = NonZeroU128::new(position.shares);
+                let new_owned_shares = position.shares;
                 providers.insert(caller_id.clone(), position);
-                let total_shares_after = total_shares.map(|s| s.get()).unwrap_or_default();
-                let (new_owned_asset_0, new_owned_asset_1) = match (
-                    user_shares_after,
-                    *total_shares,
-                    NonZeroU128::new(assets.0.balance.0),
-                    NonZeroU128::new(assets.1.balance.0),
-                ) {
-                    (Some(shares), Some(total), Some(balance_0), Some(balance_1)) => (
-                        shares_to_tokens(shares, total, balance_0),
-                        shares_to_tokens(shares, total, balance_1),
-                    ),
-                    _ => (0, 0),
+                let (new_owned_asset_0, new_owned_asset_1) = if total_shares.is_none() {
+                    (TokenAmount::ZERO, TokenAmount::ZERO)
+                } else {
+                    (
+                        new_owned_shares.worth_in(*total_shares, assets.0.balance),
+                        new_owned_shares.worth_in(*total_shares, assets.1.balance),
+                    )
                 };
                 (
                     caller_id.clone(),
                     (assets.0.asset_id.clone(), withdrawn_amount_0),
                     (assets.1.asset_id.clone(), withdrawn_amount_1),
-                    shares_to_remove.get(),
+                    shares_to_remove,
                     new_owned_asset_0,
                     new_owned_asset_1,
-                    user_shares_after.map(|s| s.get()).unwrap_or_default(),
-                    assets.0.balance.0,
-                    assets.1.balance.0,
-                    total_shares_after,
+                    new_owned_shares,
+                    assets.0.balance,
+                    assets.1.balance,
+                    total_shares.get(),
                 )
             }
             Pool::LaunchV2 { .. } => {
@@ -1521,16 +1468,16 @@ impl XykDex {
             asset_0: asset_id_0.clone(),
             asset_1: asset_id_1.clone(),
 
-            removed_amount_0: U128(withdrawn_amount_0),
-            removed_amount_1: U128(withdrawn_amount_1),
-            burned_shares: U128(burned_shares),
+            removed_amount_0: withdrawn_amount_0,
+            removed_amount_1: withdrawn_amount_1,
+            burned_shares,
 
-            new_owned_asset_0: U128(new_owned_asset_0),
-            new_owned_asset_1: U128(new_owned_asset_1),
-            new_owned_shares: U128(new_owned_shares),
+            new_owned_asset_0,
+            new_owned_asset_1,
+            new_owned_shares,
 
-            new_total_asset_0: U128(new_total_asset_0),
-            new_total_asset_1: U128(new_total_asset_1),
+            new_total_asset_0,
+            new_total_asset_1,
             new_total_shares: U128(new_total_shares),
         }
         .emit();
@@ -1545,14 +1492,14 @@ impl XykDex {
             asset_withdraw_requests: vec![
                 AssetWithdrawRequest {
                     asset_id: asset_id_0,
-                    amount: U128(withdrawn_amount_0),
+                    amount: U128(withdrawn_amount_0.get()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         withdraw_to.clone(),
                     ),
                 },
                 AssetWithdrawRequest {
                     asset_id: asset_id_1,
-                    amount: U128(withdrawn_amount_1),
+                    amount: U128(withdrawn_amount_1.get()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(withdraw_to),
                 },
             ],
@@ -1587,7 +1534,7 @@ impl XykDex {
             attached_assets.is_empty(),
             "No assets other than NEAR should be attached"
         );
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
         let storage_usage_before = near_sdk::env::storage_usage();
@@ -1677,7 +1624,7 @@ impl XykDex {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
         let pool_asset_ids = {
@@ -1724,7 +1671,7 @@ impl XykDex {
         let Ok(EditFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
 
@@ -1753,7 +1700,7 @@ impl XykDex {
 
         let storage_usage_before = near_sdk::env::storage_usage();
         self.register_fee_receivers(&fees, (&assets.0, &assets.1));
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
         let Pool::PrivateV2 {
@@ -1830,14 +1777,14 @@ impl XykDex {
             else {
                 continue;
             };
-            if balance.0 == 0 {
+            if balance.is_zero() {
                 continue;
             }
             self.fees_collected_by_users
-                .insert((caller_id.clone(), asset_id.clone()), U128(0));
+                .insert((caller_id.clone(), asset_id.clone()), TokenAmount::ZERO);
             asset_withdraw_requests.push(AssetWithdrawRequest {
                 asset_id,
-                amount: balance,
+                amount: U128(balance.get()),
                 withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(caller_id.clone()),
             });
         }
@@ -1863,7 +1810,7 @@ impl XykDex {
             near_sdk::env::panic_str("Invalid args");
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
-        let Some(pool) = self.pools.get_mut(pool_id) else {
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool {pool_id} not found");
         };
         match pool {
@@ -1911,7 +1858,7 @@ impl XykDex {
         for asset_id in asset_ids {
             if self
                 .fees_collected_by_users
-                .insert((caller_id.clone(), asset_id.clone()), U128(0))
+                .insert((caller_id.clone(), asset_id.clone()), TokenAmount::ZERO)
                 .is_some()
             {
                 panic!("Asset {asset_id} already registered");
@@ -1965,13 +1912,13 @@ impl XykDex {
             expect!(
                 let Some(balance) = self
                     .fees_claimable_by_anyone
-                    .insert((account_id.clone(), asset_id.clone()), U128(0)),
+                    .insert((account_id.clone(), asset_id.clone()), TokenAmount::ZERO),
                 "{account_id} has no fees in {asset_id} that anyone can claim"
             );
-            if balance.0 > 0 {
+            if !balance.is_zero() {
                 asset_withdraw_requests.push(AssetWithdrawRequest {
                     asset_id,
-                    amount: balance,
+                    amount: U128(balance.get()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         account_id.clone(),
                     ),
@@ -1988,7 +1935,7 @@ impl XykDex {
     pub fn get_pool(&self, #[serializer(borsh)] args: GetPoolArgs) -> Option<PoolView> {
         let GetPoolArgs { pool_id } = args;
         self.pools
-            .get(pool_id)
+            .get(pool_id.get())
             .map(|pool| pool.view(near_sdk::env::block_timestamp()))
     }
 
@@ -1997,7 +1944,7 @@ impl XykDex {
         let GetPoolsArgs { start_index, limit } = args;
         self.pools
             .iter()
-            .skip(start_index as usize)
+            .skip(start_index.get() as usize)
             .take(limit as usize)
             .map(|pool| pool.view(near_sdk::env::block_timestamp()))
             .collect()
@@ -2007,7 +1954,7 @@ impl XykDex {
     pub fn get_pool_shares(
         &self,
         #[serializer(borsh)] args: GetPoolSharesArgs,
-    ) -> Vec<Option<U128>> {
+    ) -> Vec<Option<ProviderShares>> {
         let GetPoolSharesArgs {
             pool_ids,
             account_id,
@@ -2016,10 +1963,9 @@ impl XykDex {
             .into_iter()
             .map(|pool_id| {
                 self.pools
-                    .get(pool_id)
+                    .get(pool_id.get())
                     .unwrap_or_else(|| panic!("Pool {pool_id} not found"))
                     .liquidity_shares(&account_id)
-                    .map(U128)
             })
             .collect()
     }
@@ -2033,7 +1979,7 @@ impl XykDex {
             pool_id,
             account_id,
         } = args;
-        let Some(pool) = self.pools.get(pool_id) else {
+        let Some(pool) = self.pools.get(pool_id.get()) else {
             panic!("Pool {pool_id} not found");
         };
         match pool {
@@ -2047,7 +1993,7 @@ impl XykDex {
                     .uncollected_fees(position);
                 LiquidityPositionView {
                     payout_type: position.payout_type,
-                    uncollected_fees: (U128(uncollected_fee_0), U128(uncollected_fee_1)),
+                    uncollected_fees: (uncollected_fee_0, uncollected_fee_1),
                 }
             }),
             Pool::PrivateV2 { .. } | Pool::LaunchV2 { .. } => None,
@@ -2058,7 +2004,7 @@ impl XykDex {
     pub fn get_pending_fees(
         &self,
         #[serializer(borsh)] args: GetPendingFeesArgs,
-    ) -> HashMap<AssetId, U128> {
+    ) -> HashMap<AssetId, TokenAmount> {
         let GetPendingFeesArgs {
             account_id,
             asset_ids,
@@ -2068,8 +2014,7 @@ impl XykDex {
             .filter_map(|asset_id| {
                 self.fees_collected_by_users
                     .get(&(account_id.clone(), asset_id.clone()))
-                    .cloned()
-                    .map(|balance| (asset_id, balance))
+                    .map(|balance| (asset_id, *balance))
             })
             .collect()
     }
@@ -2078,7 +2023,7 @@ impl XykDex {
     pub fn get_claimable_fees(
         &self,
         #[serializer(borsh)] args: GetClaimableFeesArgs,
-    ) -> HashMap<AssetId, U128> {
+    ) -> HashMap<AssetId, TokenAmount> {
         let GetClaimableFeesArgs {
             account_id,
             asset_ids,
@@ -2088,8 +2033,7 @@ impl XykDex {
             .filter_map(|asset_id| {
                 self.fees_claimable_by_anyone
                     .get(&(account_id.clone(), asset_id.clone()))
-                    .cloned()
-                    .map(|balance| (asset_id, balance))
+                    .map(|balance| (asset_id, *balance))
             })
             .collect()
     }
@@ -2100,7 +2044,7 @@ impl XykDex {
     }
 
     #[result_serializer(borsh)]
-    pub fn get_pool_count(&self) -> PoolId {
+    pub fn get_pool_count(&self) -> u32 {
         self.pools.len()
     }
 }

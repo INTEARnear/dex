@@ -6,7 +6,9 @@ use near_cli_rs::network_view_at_block::{
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
-use xyk_dex_types::{EditFeesArgs, FeePayoutType, LockPoolArgs, PoolAssets, PoolId, PoolView};
+use xyk_dex_types::{
+    EditFeesArgs, FeePayoutType, LockPoolArgs, PROTOCOL_FEE_SHARE, PoolAssets, PoolId, PoolView,
+};
 
 use super::presentation::{
     fee_receiver_label, format_fee_configuration, pool_assets, pool_fees, pool_json, pool_kind,
@@ -140,16 +142,21 @@ impl ShowContext {
                             }
                             PoolView::Public { total_shares, .. } => rows.push((
                                 "Total shares",
-                                total_shares.map_or("none".to_string(), |total_shares| {
-                                    total_shares.0.to_string()
-                                }),
+                                if total_shares.is_none() {
+                                    "none".to_string()
+                                } else {
+                                    total_shares.get().to_string()
+                                },
                             )),
 
                             PoolView::Launch {
                                 phantom_liquidity, ..
                             } => rows.push((
                                 "Phantom liquidity",
-                                display::format_amount(phantom_liquidity.0, metadata_0.as_ref()),
+                                display::format_amount(
+                                    phantom_liquidity.get(),
+                                    metadata_0.as_ref(),
+                                ),
                             )),
                         }
                         rows.push((
@@ -455,7 +462,7 @@ impl EditFeesContext {
                     preflight,
                     &dex_id,
                     format!(
-                        "Change the fees of {pool_label} from {} to {}, plus the protocol fee",
+                        "Change the fees of {pool_label} from {} to {}, of which the protocol takes {PROTOCOL_FEE_SHARE}",
                         format_fee_configuration(
                             current_fee_configuration,
                             [asset_id_0, asset_id_1]
