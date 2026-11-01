@@ -190,7 +190,6 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                             "It needs no initialization. Each trader pays for their records on it, e.g.: {storage_deposit_command}"
                         )
                     }),
-                    migrating_redeploy_command: None,
                 }),
             },
         })

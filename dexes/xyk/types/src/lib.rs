@@ -523,14 +523,6 @@ pub struct FeeDiscountSignaturePayload {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct MigrateArgs {
-    /// Every liquidity provider of the public pools, which stored only their shares and can't
-    /// be listed, by pool, in order of pool id
-    pub providers: Vec<(PoolId, Vec<AccountId>)>,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SetFeeDiscountSignerArgs {
     /// The key that signs fee discounts from now on, or `None` to disable them
     pub fee_discount_signer_public_key: Option<PublicKey>,

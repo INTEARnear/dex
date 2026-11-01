@@ -120,10 +120,6 @@ pub enum PreflightError {
     ReservedDexMethod,
     #[error("{dex_id} is already initialized")]
     XykAlreadyInitialized { dex_id: DexId },
-    #[error("{dex_id} has no state yet, so there's nothing to migrate")]
-    NoStateToMigrate { dex_id: DexId, init_command: String },
-    #[error("{signer_id} can't migrate xyk dexes; only {CAN_MIGRATE} can")]
-    NotAllowedToMigrate { signer_id: AccountId },
     #[error("{signer_id} can't change who signs fee discounts; only {CAN_MIGRATE} can")]
     NotAllowedToSetFeeDiscountSigner { signer_id: AccountId },
     #[error("{dex_id} already has {fee_discounts}")]
@@ -247,14 +243,7 @@ impl PreflightError {
             } => Some(format!(
                 "Rescue to an account that has storage on {token_id}, or pay for {receiver_id}'s storage there with its storage_deposit first"
             )),
-            Self::XykAlreadyInitialized { .. } => Some(
-                "New code that changes its state layout deploys with `xyk deploy … --migrate`"
-                    .to_string(),
-            ),
-            Self::NoStateToMigrate { init_command, .. } => Some(format!(
-                "Deploy without --migrate, then initialize it:\n    {init_command}"
-            )),
-            Self::NotAllowedToMigrate { .. } | Self::NotAllowedToSetFeeDiscountSigner { .. } => {
+            Self::NotAllowedToSetFeeDiscountSigner { .. } => {
                 Some(format!("Sign with {CAN_MIGRATE}"))
             }
             Self::NotPoolOwner { owner_id, .. } => Some(format!("Sign with {owner_id}")),
@@ -298,6 +287,7 @@ impl PreflightError {
             | Self::NothingToRescue { .. }
             | Self::RescueTooLarge { .. }
             | Self::ReservedDexMethod
+            | Self::XykAlreadyInitialized { .. }
             | Self::FeesNotAllowed { .. }
             | Self::SameAssets { .. }
             | Self::UnsupportedPoolAsset { .. }
@@ -374,8 +364,6 @@ pub const DEX_CODE_NOT_FOUND: &str = "Dex code not found";
 pub const NOT_INITIALIZED: &str = "The contract is not initialized";
 /// near-sdk's panic when a contract's code can't read its state
 pub const UNREADABLE_STATE: &str = "Cannot deserialize the contract state.";
-/// How the engine names the migrate method in the panics of a dex call to it
-const MIGRATE_METHOD_FRAGMENT: &str = "function 'migrate'";
 
 struct ContractPanicHint {
     /// Part of the panic message as the contract sources spell it
@@ -477,9 +465,6 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
     ContractPanicHint {
         message_fragment: "Failed to get function",
         hint: |context| {
-            if context.panic_message.contains(MIGRATE_METHOD_FRAGMENT) {
-                return "The new code has no migrate method, so the deploy was reverted with the migration; deploy it without --migrate".to_string();
-            }
             let dex = context
                 .dex_id
                 .map_or("The dex".to_string(), |dex_id| dex_id.to_string());
@@ -614,12 +599,9 @@ const NEAR_SDK_PANIC_HINTS: &[ContractPanicHint] = &[
     },
     ContractPanicHint {
         message_fragment: UNREADABLE_STATE,
-        hint: |context| {
-            if context.panic_message.contains(MIGRATE_METHOD_FRAGMENT) {
-                "The migration couldn't read the state in the layout it converts from, so the deploy was reverted with it; if the state already has the new code's layout, deploy without --migrate".to_string()
-            } else {
-                "The dex's code can't read its state; deploying code that converts it with `xyk deploy … --migrate` fixes that".to_string()
-            }
+        hint: |_| {
+            "The dex's code can't read its state, which was stored by code with another layout"
+                .to_string()
         },
     },
 ];

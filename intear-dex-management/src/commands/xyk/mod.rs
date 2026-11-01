@@ -104,10 +104,8 @@ pub enum XykAction {
     ))]
     /// Create a private, public or launch pool
     CreatePool(self::create_pool::CreatePool),
-    #[strum_discriminants(strum(
-        message = "deploy          - Deploy xyk code as <signer>/<name>; --migrate converts the state too"
-    ))]
-    /// Deploy xyk code as <signer>/<name>; --migrate converts the state too
+    #[strum_discriminants(strum(message = "deploy          - Deploy xyk code as <signer>/<name>"))]
+    /// Deploy xyk code as <signer>/<name>
     Deploy(self::deploy::Deploy),
     #[strum_discriminants(strum(message = "init            - Initialize a newly deployed dex"))]
     /// Initialize a newly deployed dex

@@ -18,7 +18,6 @@ use serde_json::json;
 use xyk_dex_types::{FeePayoutType, XykDexEvent, XykDexEventV1};
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
-use crate::chain::xyk::{self, XykState};
 use crate::commands::xyk::presentation::pool_assets;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
@@ -42,17 +41,6 @@ pub struct ExpectedDeployment {
     pub code_hash: Base58CryptoHash,
     /// What to run once the code is deployed
     pub next_step: Option<String>,
-    /// For an upgrade that keeps the state as it is: the command that
-    /// deploys the code again with a migration, for when the new code can't
-    /// read the state
-    pub migrating_redeploy_command: Option<String>,
-}
-
-/// New code that can't read the dex's state fails every call to the dex
-#[derive(Debug, thiserror::Error)]
-#[error("The new code of {dex_id} can't read its state, so every call to the dex fails")]
-pub struct DeployedCodeCantReadState {
-    dex_id: DexId,
 }
 
 /// ft_transfer_call returns how much the receiver kept, and the token contract
@@ -362,29 +350,6 @@ pub fn report_outcome(
             expected_transfer_call.sender_id
         ));
     }
-    let unreadable_state_after_deploy = match &expected_outcome.deployment {
-        Some(ExpectedDeployment {
-            dex_id,
-            migrating_redeploy_command: Some(migrating_redeploy_command),
-            ..
-        }) if failure_lines.is_empty() => {
-            match xyk::state(
-                network_config,
-                &BlockReference::Finality(Finality::Final),
-                dex_id,
-            )? {
-                XykState::Unreadable => Some((
-                    DeployedCodeCantReadState {
-                        dex_id: dex_id.clone(),
-                    },
-                    migrating_redeploy_command,
-                )),
-                XykState::Readable | XykState::Missing => None,
-            }
-        }
-        _ => None,
-    };
-
     if let OutputFormat::Json = output_format {
         // In quiet mode near-cli-rs prints the returned value without a newline
         if let (near_cli_rs::Verbosity::Quiet, FinalExecutionStatus::SuccessValue(returned_value)) =
@@ -397,15 +362,15 @@ pub fn report_outcome(
             "{}",
             serde_json::to_string(&json!({
                 "transaction_hash": outcome.transaction_outcome.id.to_string(),
-                "status": if failure_lines.is_empty() && unreadable_state_after_deploy.is_none() {
+                "status": if failure_lines.is_empty() {
                     "succeeded"
                 } else {
                     "failed"
                 },
-                "message": match &unreadable_state_after_deploy {
-                    _ if !failure_lines.is_empty() => failure_lines.join("\n"),
-                    Some((unreadable_state, _)) => unreadable_state.to_string(),
-                    None => expected_outcome.success_message.clone(),
+                "message": if failure_lines.is_empty() {
+                    expected_outcome.success_message.clone()
+                } else {
+                    failure_lines.join("\n")
                 },
                 "events": event_values,
             }))?
@@ -449,11 +414,6 @@ pub fn report_outcome(
         lines.push(next_step);
     }
     tracing::info!("{}", lines.join("\n│  "));
-    if let Some((unreadable_state, migrating_redeploy_command)) = unreadable_state_after_deploy {
-        return Err(Report::new(unreadable_state).suggestion(format!(
-            "Deploy the code again with --migrate, which converts the state in the same receipt:\n    {migrating_redeploy_command}"
-        )));
-    }
     Ok(())
 }
 

@@ -1,13 +1,8 @@
-use color_eyre::eyre::{Context, Report, bail, eyre};
+use color_eyre::eyre::eyre;
 use intear_dex_types::DexId;
-use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
-use near_jsonrpc_client::methods::query::RpcQueryRequest;
-use near_jsonrpc_primitives::types::query::QueryResponseKind;
-use near_primitives::types::{BlockReference, StoreKey};
-use near_primitives::views::QueryRequest;
-use std::collections::{BTreeMap, HashMap};
-use std::num::{NonZeroU32, NonZeroU128};
+use near_primitives::types::BlockReference;
+use std::collections::HashMap;
 
 use intear_dex_types::AssetId;
 use near_primitives::types::AccountId;
@@ -20,7 +15,6 @@ use xyk_dex_types::{
 
 use super::ViewPanicked;
 use super::engine::dex_view;
-use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors;
 
 /// Whether an xyk dex has state, and whether its code can read it
@@ -201,71 +195,4 @@ pub fn fee_discount_signer(
         "get_fee_discount_signer",
         &(),
     )
-}
-
-/// The liquidity providers of public pools that are still stored as their shares, the way
-/// public pools stored them before the migration that gave them positions, by pool. The dex
-/// can't list a map's entries, so this reads them from the engine's state, a page at a time.
-pub fn providers_from_before_migration(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-    dex_id: &DexId,
-) -> color_eyre::eyre::Result<BTreeMap<PoolId, Vec<AccountId>>> {
-    // The engine keeps the storage of every dex under this prefix, keyed by the dex id and the
-    // dex's key as a byte vector, with the dex's value as a byte vector
-    const ENGINE_DEX_STORAGE_PREFIX: u8 = 1;
-    // The dex's key of a public pool's provider: this, the pool id, and the account id
-    const PUBLIC_POOL_PROVIDERS_PREFIX: u8 = 1;
-    // Nodes return fewer when the page would be too big
-    const PAGE_LIMIT: NonZeroU32 = NonZeroU32::new(1000).unwrap();
-    let dex_prefix = [
-        vec![ENGINE_DEX_STORAGE_PREFIX],
-        near_sdk::borsh::to_vec(dex_id)?,
-    ]
-    .concat();
-    let mut providers: BTreeMap<PoolId, Vec<AccountId>> = BTreeMap::new();
-    let mut after_key = None;
-    loop {
-        let response = network_config
-            .json_rpc_client()
-            .blocking_call(RpcQueryRequest {
-                block_reference: block_reference.clone(),
-                request: QueryRequest::ViewState {
-                    account_id: ENGINE_ACCOUNT_ID.to_owned(),
-                    prefix: StoreKey::from(dex_prefix.clone()),
-                    after_key,
-                    limit: Some(PAGE_LIMIT),
-                    include_proof: false,
-                },
-            })
-            .map_err(Report::new)
-            .wrap_err_with(|| {
-                format!(
-                    "Couldn't read the state of {dex_id} on network {} (RPC {})",
-                    network_config.network_name, network_config.rpc_url
-                )
-            })?;
-        let QueryResponseKind::ViewState(state) = response.kind else {
-            bail!(
-                "RPC {} answered a state query with something other than state",
-                network_config.rpc_url
-            );
-        };
-        for item in state.values {
-            let dex_key: Vec<u8> = near_sdk::borsh::from_slice(&item.key[dex_prefix.len()..])?;
-            let dex_value: Vec<u8> = near_sdk::borsh::from_slice(&item.value)?;
-            // A position doesn't read as shares
-            if dex_key.first() == Some(&PUBLIC_POOL_PROVIDERS_PREFIX)
-                && near_sdk::borsh::from_slice::<Option<NonZeroU128>>(&dex_value).is_ok()
-            {
-                let (_, pool_id, account_id): (u8, PoolId, AccountId) =
-                    near_sdk::borsh::from_slice(&dex_key)?;
-                providers.entry(pool_id).or_default().push(account_id);
-            }
-        }
-        match state.last_key {
-            Some(last_key) => after_key = Some(last_key),
-            None => return Ok(providers),
-        }
-    }
 }

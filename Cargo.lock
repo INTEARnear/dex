@@ -2310,7 +2310,6 @@ dependencies = [
  "lz4_flex",
  "near-contract-standards",
  "near-crypto 0.34.7",
- "near-sandbox",
  "near-sdk",
  "near-workspaces",
  "otc-dex-types",

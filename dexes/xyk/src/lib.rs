@@ -28,8 +28,6 @@ use xyk_dex_types::{
     math::{exact_in_amount_out, exact_out_amount_in},
 };
 
-mod migration;
-
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
     const MEMORY_SIZE: usize = 0x10000; // 64KB
