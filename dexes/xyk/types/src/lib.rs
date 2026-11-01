@@ -526,6 +526,9 @@ pub struct CreatePoolArgs {
     /// ratio before the creator does. Optional for private pools, not accepted
     /// for launch pools.
     pub initial_liquidity: Option<(TokenAmount, TokenAmount)>,
+    /// How the creator takes its part of the pool's fees, as the provider of the first
+    /// liquidity. Required for public pools, not accepted for others, which have no providers.
+    pub creator_fee_payout_type: Option<FeePayoutType>,
 }
 
 #[near(serializers=[borsh])]

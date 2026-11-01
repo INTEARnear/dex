@@ -438,6 +438,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type,
+                            creator_fee_payout_type: None,
                             initial_liquidity: None,
                         })
                         .unwrap(),
@@ -698,6 +699,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
                             pool_type,
+                            creator_fee_payout_type: Some(FeePayoutType::KeepBoth),
                             initial_liquidity: Some((
                                 TokenAmount::new(add_liquidity_ft1_deployer),
                                 TokenAmount::new(add_liquidity_ft2_deployer),
@@ -1511,6 +1513,7 @@ async fn test_xyk_lock_pool() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -1724,6 +1727,7 @@ async fn test_xyk_multi_user_liquidity() {
                             AssetId::Nep141(ft2.id().clone()),
                         ),
                         fees: FeeConfigurationV2 { receivers: vec![] },
+                        creator_fee_payout_type: Some(FeePayoutType::KeepBoth),
                         pool_type: PoolType::PublicLatest,
                         initial_liquidity: Some((
                             TokenAmount::new(ft1_amount),
@@ -1918,6 +1922,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
 
     // NEAR is both a pool asset and the storage deposit, so the attached NEAR covers both
     let create_pool = |initial_liquidity: Option<(TokenAmount, TokenAmount)>,
+                       creator_fee_payout_type: Option<FeePayoutType>,
                        attached_ft1: u128| {
         deployer
             .call(dex_engine_contract.id(), "execute_operations")
@@ -1934,6 +1939,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                                 fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(3_000)))] },
                                 pool_type: PoolType::PublicLatest,
                                 initial_liquidity,
+                                creator_fee_payout_type,
                             })
                             .unwrap(),
                         ),
@@ -1953,6 +1959,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
     let rejected_creations = [
         (
             None,
+            Some(FeePayoutType::KeepBoth),
             initial_liquidity_ft1,
             "Public pools must be created with initial liquidity",
         ),
@@ -1961,6 +1968,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                 TokenAmount::new(initial_liquidity_near),
                 TokenAmount::new(initial_liquidity_ft1),
             )),
+            Some(FeePayoutType::KeepBoth),
             initial_liquidity_ft1 - 1,
             "must be equal to its initial liquidity",
         ),
@@ -1971,6 +1979,7 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                 ),
                 TokenAmount::new(initial_liquidity_ft1),
             )),
+            Some(FeePayoutType::KeepBoth),
             initial_liquidity_ft1,
             "Not enough NEAR attached for initial liquidity and storage",
         ),
@@ -1979,12 +1988,25 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                 TokenAmount::new(initial_liquidity_near),
                 TokenAmount::new(0),
             )),
+            Some(FeePayoutType::KeepBoth),
             0,
             "Initial liquidity amounts must be greater than 0",
         ),
+        (
+            Some((
+                TokenAmount::new(initial_liquidity_near),
+                TokenAmount::new(initial_liquidity_ft1),
+            )),
+            None,
+            initial_liquidity_ft1,
+            "Public pools must be created with the creator's fee payout",
+        ),
     ];
-    for (initial_liquidity, attached_ft1, expected_error) in rejected_creations {
-        let result = create_pool(initial_liquidity, attached_ft1).await.unwrap();
+    for (initial_liquidity, creator_fee_payout_type, attached_ft1, expected_error) in rejected_creations
+    {
+        let result = create_pool(initial_liquidity, creator_fee_payout_type, attached_ft1)
+            .await
+            .unwrap();
         assert!(
             format!("{result:?}").contains(expected_error),
             "Expected \"{expected_error}\", got {result:#?}"
@@ -1997,11 +2019,18 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
             TokenAmount::new(initial_liquidity_near),
             TokenAmount::new(initial_liquidity_ft1),
         )),
+        Some(FeePayoutType::ConvertToFirstAsset),
         initial_liquidity_ft1,
     )
     .await
     .unwrap();
     assert_success(&result).unwrap();
+    assert_eq!(
+        get_liquidity_position(&dex_engine_contract, &dex_id, first_pool_id, deployer.id())
+            .await
+            .map(|position| position.payout_type),
+        Some(FeePayoutType::ConvertToFirstAsset)
+    );
 
     match get_pool(&dex_engine_contract, &dex_id, first_pool_id)
         .await
@@ -2133,6 +2162,7 @@ async fn test_xyk_fees() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -2359,6 +2389,7 @@ async fn test_xyk_scheduled_fees() {
                                     },
                                 )],
                             },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateV2,
                             initial_liquidity: None,
                         })
@@ -2611,6 +2642,7 @@ async fn test_xyk_exact_output() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -2825,6 +2857,7 @@ async fn test_xyk_pool_fees() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Pool, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: Some(FeePayoutType::KeepBoth),
                             pool_type: PoolType::PublicLatest,
                             initial_liquidity: Some((TokenAmount::new(add_liquidity_ft1), TokenAmount::new(add_liquidity_ft2))),
                         })
@@ -3060,6 +3093,7 @@ async fn test_xyk_launch_pool_flow() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -3285,6 +3319,7 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -3419,6 +3454,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -3564,6 +3600,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::ConvertToFirstAsset, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -3833,6 +3870,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                             near_sdk::borsh::to_vec(&CreatePoolArgs {
                                 assets: (quote_asset_id.clone(), launched_asset_id.clone()),
                                 fees: FeeConfigurationV2 { receivers: vec![(fee_receiver, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                                creator_fee_payout_type: None,
                                 pool_type: PoolType::LaunchLatest {
                                     phantom_liquidity: TokenAmount::new(phantom_liquidity_ft1),
                                 },
@@ -4087,6 +4125,7 @@ async fn test_xyk_launch_pool_restrictions() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -4256,6 +4295,7 @@ async fn test_xyk_launch_pool_community_fees() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Near, AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![(community_receiver.clone(), FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::LaunchLatest {
                                 phantom_liquidity: TokenAmount::new(phantom_liquidity_near),
                             },
@@ -4585,6 +4625,7 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (AssetId::Nep141(ft1.id().clone()), AssetId::Nep141(ft2.id().clone())),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::Anyone }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -4959,6 +5000,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: (ft1_asset_id.clone(), ft2_asset_id.clone()),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(fee_fraction)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: None,
                         })
@@ -5529,6 +5571,7 @@ async fn test_xyk_route_fee_discount() {
                         near_sdk::borsh::to_vec(&CreatePoolArgs {
                             assets: assets.clone(),
                             fees: FeeConfigurationV2 { receivers: vec![(FeeReceiver::Account { account_id: user2.id().clone(), payout_type: FeePayoutType::KeepBoth, claim_mode: ClaimMode::OnlyOwner }, FeeAmount::Fixed(FeeFraction::new(10_000)))] },
+                            creator_fee_payout_type: None,
                             pool_type: PoolType::PrivateLatest,
                             initial_liquidity: Some((TokenAmount::new(liquidity), TokenAmount::new(liquidity))),
                         })

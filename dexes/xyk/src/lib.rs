@@ -16,15 +16,15 @@ use near_sdk::{
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
     ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
-    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeeDiscountSignaturePayload, FeeGrowth,
+    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeeDiscountSignaturePayload,
     FeePayoutType, FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs,
     GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
     LiquidityPosition, LiquidityPositionView, LockPoolArgs, PRIVATE_POOL_TOTAL_SHARES,
-    PROTOCOL_FEE_RECEIVER_ID, PayoutGroup, PayoutGroupShares, PayoutGroups, Pool, PoolAssets,
-    PoolId, PoolType, PoolView, ProviderShares, RegisterFeeAssetsArgs, RegisterLiquidityArgs,
-    RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction, SetFeeDiscountSignerArgs,
-    SetLiquidityFeePayoutArgs, SignedFeeDiscount, SwapArgs, SwapReserves, SwapRoute, TokenAmount,
-    TotalShares, WithdrawFeesArgs, XykDexEvent,
+    PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolType,
+    PoolView, ProviderShares, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RemoveLiquidityResponse, RouteFraction, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
+    SignedFeeDiscount, SwapArgs, SwapReserves, SwapRoute, TokenAmount, TotalShares,
+    WithdrawFeesArgs, XykDexEvent,
     math::{exact_in_amount_out, exact_out_amount_in},
 };
 
@@ -693,6 +693,7 @@ impl XykDex {
             fees,
             pool_type,
             initial_liquidity,
+            creator_fee_payout_type,
         }) = near_sdk::borsh::from_slice(&args)
         else {
             near_sdk::env::panic_str("Invalid args");
@@ -748,6 +749,10 @@ impl XykDex {
             | PoolType::LaunchV1 { .. }
             | PoolType::LaunchV2 { .. } => false,
         };
+        expect!(
+            is_public_pool || creator_fee_payout_type.is_none(),
+            "Only public pools have liquidity providers that take fees"
+        );
         let initial_balances = match initial_liquidity {
             Some((initial_amount_0, initial_amount_1)) => {
                 expect!(
@@ -794,23 +799,21 @@ impl XykDex {
                     attached_assets.is_empty(),
                     "No assets other than NEAR and initial liquidity should be attached"
                 );
-                // The creator keeps its fees until it chooses another payout
-                let payout_groups = PayoutGroups {
-                    keep_both: PayoutGroup {
-                        shares: PayoutGroupShares::NONE
-                            .joined_by(INITIAL_SHARES)
-                            .expect("Overflow"),
-                        fee_growth: FeeGrowth::default(),
-                    },
-                    ..Default::default()
-                };
+                expect!(
+                    let Some(creator_fee_payout_type) = creator_fee_payout_type,
+                    "Public pools must be created with the creator's fee payout type specified"
+                );
+                let mut payout_groups = PayoutGroups::default();
+                payout_groups.group_mut(creator_fee_payout_type).shares = PayoutGroupShares::NONE
+                    .joined_by(INITIAL_SHARES)
+                    .expect("Overflow");
                 let mut providers = LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
                 providers.insert(
                     caller_id.clone(),
                     LiquidityPosition::new(
-                        FeePayoutType::KeepBoth,
+                        creator_fee_payout_type,
                         INITIAL_SHARES,
-                        &payout_groups.keep_both,
+                        payout_groups.group(creator_fee_payout_type),
                     ),
                 );
                 providers.flush();
@@ -818,7 +821,7 @@ impl XykDex {
                     &mut self.fees_collected_by_users,
                     &caller_id,
                     PoolAssets([&assets.0, &assets.1]),
-                    FeePayoutType::KeepBoth,
+                    creator_fee_payout_type,
                 );
                 self.fees_collected_by_users.flush();
                 Pool::PublicV3 {

@@ -249,6 +249,41 @@ pub enum PayoutArg {
     ConvertTo(AssetId),
 }
 
+impl PayoutArg {
+    /// The payout of a pool of `pool_assets`, which can only convert fees to one of them
+    pub fn payout_type(&self, pool_assets: [&AssetId; 2]) -> Result<FeePayoutType, String> {
+        match self {
+            Self::Keep => Ok(FeePayoutType::KeepBoth),
+            Self::ConvertTo(asset_id) if asset_id == pool_assets[0] => {
+                Ok(FeePayoutType::ConvertToFirstAsset)
+            }
+            Self::ConvertTo(asset_id) if asset_id == pool_assets[1] => {
+                Ok(FeePayoutType::ConvertToSecondAsset)
+            }
+            Self::ConvertTo(asset_id) => Err(format!(
+                "Fees can't be converted to {asset_id}, which the pool doesn't hold"
+            )),
+        }
+    }
+}
+
+impl FromStr for PayoutArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "keep" => Ok(Self::Keep),
+            asset_id => AssetId::from_str(asset_id)
+                .map(Self::ConvertTo)
+                .map_err(|error| format!("{error}. Expected 'keep' or an asset")),
+        }
+    }
+}
+
+impl interactive_clap::ToCli for PayoutArg {
+    type CliVariant = PayoutArg;
+}
+
 impl std::fmt::Display for PayoutArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -301,13 +336,8 @@ impl FromStr for PayoutsArg {
             {
                 return Err(format!("{} is listed twice", fee_receiver_text(&receiver)));
             }
-            let payout_type = match payout_type {
-                "keep" => PayoutArg::Keep,
-                _ => PayoutArg::ConvertTo(
-                    AssetId::from_str(payout_type)
-                        .map_err(|error| format!("{error}. Expected {PAYOUTS_FORMAT}"))?,
-                ),
-            };
+            let payout_type = PayoutArg::from_str(payout_type)
+                .map_err(|error| format!("{error}. Expected {PAYOUTS_FORMAT}"))?;
             payouts.push((receiver, payout_type));
         }
         Ok(Self(payouts))
@@ -348,19 +378,9 @@ impl FeesArg {
                 .find(|(payout_receiver, _)| payout_receiver == receiver)
             {
                 None => default_payout_type,
-                Some((_, PayoutArg::Keep)) => FeePayoutType::KeepBoth,
-                Some((_, PayoutArg::ConvertTo(asset_id))) if asset_id == pool_assets[0] => {
-                    FeePayoutType::ConvertToFirstAsset
-                }
-                Some((_, PayoutArg::ConvertTo(asset_id))) if asset_id == pool_assets[1] => {
-                    FeePayoutType::ConvertToSecondAsset
-                }
-                Some((_, PayoutArg::ConvertTo(asset_id))) => {
-                    return Err(format!(
-                        "{} can't convert its fees to {asset_id}, which the pool doesn't hold",
-                        fee_receiver_text(receiver)
-                    ));
-                }
+                Some((_, payout)) => payout
+                    .payout_type(pool_assets)
+                    .map_err(|error| format!("{}: {error}", fee_receiver_text(receiver)))?,
             };
             let receiver = match receiver {
                 FeeReceiverArg::Account(account_id) => FeeReceiver::Account {
