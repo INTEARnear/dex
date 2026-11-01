@@ -294,6 +294,59 @@ async fn test_storage_actions() {
 }
 
 #[tokio::test]
+async fn test_register_no_assets() {
+    let TestContext {
+        dex_engine_contract,
+        user1,
+        ..
+    } = setup_test_environment().await;
+
+    let result = user1
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(NearToken::from_millinear(10))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let expected_error = "No assets to register";
+    let result = user1
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": Vec::<AssetId>::new(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains(expected_error),
+        "Expected \"{expected_error}\", got {result:#?}"
+    );
+
+    let result = user1
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": vec![Operation::RegisterAssets {
+                asset_ids: Vec::new(),
+                r#for: Some(AccountOrDexId::Account(user1.id().clone())),
+            }],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains(expected_error),
+        "Expected \"{expected_error}\", got {result:#?}"
+    );
+}
+
+#[tokio::test]
 async fn test_dex_storage_actions() {
     let min_storage_bound = NearToken::from_millinear(5);
 

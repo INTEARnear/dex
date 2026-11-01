@@ -708,6 +708,7 @@ impl DexEngine {
         r#for: Option<AccountOrDexId>,
         storage_payer: AccountId,
     ) {
+        expect!(!asset_ids.is_empty(), "No assets to register");
         let r#for = r#for.unwrap_or_else(|| AccountOrDexId::Account(storage_payer.clone()));
         let storage_usage_before = near_sdk::env::storage_usage();
         let asset_balances = self.asset_balances_or_new(&r#for);
