@@ -10,7 +10,7 @@ use near_sdk::{
 use xyk_dex_types::{
     AssetWithBalance, CAN_MIGRATE, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2,
     FeeGrowth, FeePayoutType, FeeReceiver, LiquidityPosition, MigrateArgs, Pool, PoolAssets,
-    PoolId, PoolType, ProviderShares, TokenAmount, TotalShares,
+    PoolId, PoolType, ProviderShares, ShareGrowth, TokenAmount, TotalShares,
 };
 
 use crate::{StorageKey, XykDex, XykDexExt, start_fee_balances};
@@ -229,7 +229,6 @@ impl XykDex {
             community_owned_fees.flush();
 
             if let Pool::PublicV3 {
-                assets,
                 providers: pool_providers,
                 total_shares,
                 payout_groups,
@@ -241,8 +240,6 @@ impl XykDex {
                     .map_or(Vec::new(), |(_, account_ids)| account_ids);
                 let shares_before_migration: LookupMap<AccountId, Option<NonZeroU128>> =
                     LookupMap::new(StorageKey::PublicPoolUserShares { pool_id });
-                // A map of its own for each pool, as the dex's would keep every balance it reads
-                let mut fees_collected_by_users = LookupMap::new(StorageKey::FeesCollectedByUsers);
                 let mut providers_total_shares = TotalShares::NONE;
                 for account_id in account_ids {
                     expect!(
@@ -252,27 +249,23 @@ impl XykDex {
                     let shares = ProviderShares::new(shares.map_or(0, NonZeroU128::get));
                     providers_total_shares =
                         providers_total_shares.minted(shares).expect("Overflow");
-                    // Every share keeps its fees from now on, from fee growth zero, where the
-                    // providers' positions start
-                    payout_groups.keep_both.shares = payout_groups
-                        .keep_both
+                    // Every share reinvests its fees, as the pool fee stayed in the pool before,
+                    // from share growth one, where the providers' positions start, so the
+                    // providers need no fee balances
+                    payout_groups.reinvest.shares = payout_groups
+                        .reinvest
                         .shares
                         .joined_by(shares)
                         .expect("Overflow");
                     // Unlike insert, set doesn't read the entry it replaces, which is shares
                     pool_providers.set(
-                        account_id.clone(),
+                        account_id,
                         Some(LiquidityPosition {
-                            payout_type: FeePayoutType::KeepBoth,
+                            payout_type: FeePayoutType::Reinvest,
                             shares,
                             fee_growth_collected: FeeGrowth::default(),
+                            share_growth_collected: ShareGrowth::default(),
                         }),
-                    );
-                    start_fee_balances(
-                        &mut fees_collected_by_users,
-                        &account_id,
-                        PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
-                        FeePayoutType::KeepBoth,
                     );
                 }
                 // A provider left out would have shares and no position
@@ -281,7 +274,6 @@ impl XykDex {
                     "The providers of pool {pool_id} don't have all of its shares"
                 );
                 pool_providers.flush();
-                fees_collected_by_users.flush();
             }
             near_sdk::env::storage_write(&pool_key, &near_sdk::borsh::to_vec(&pool).unwrap());
         }

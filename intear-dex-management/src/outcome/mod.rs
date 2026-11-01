@@ -556,6 +556,7 @@ fn xyk_event_line(
                 FeePayoutType::KeepBoth => ("keeps", ""),
                 FeePayoutType::ConvertToFirstAsset => ("takes", " in its first asset"),
                 FeePayoutType::ConvertToSecondAsset => ("takes", " in its second asset"),
+                FeePayoutType::Reinvest => ("reinvests", ""),
             };
             format!(
                 "{account_id} now {verb} its part of the fees of pool #{pool_id} of {dex_id}{asset}"

@@ -409,7 +409,7 @@ fn deploy_action_context(
             )?;
             let provider_count: usize = providers.values().map(Vec::len).sum();
             steps.push(format!(
-                "Migrate the state of {dex_id} to the new code's layout in the same receipt, with the gas the rest of the transaction leaves: upgrade every pool, and give positions to the {provider_count} liquidity providers of {} public pools; if the migration fails, the deploy is reverted too",
+                "Migrate the state of {dex_id} to the new code's layout in the same receipt, with the gas the rest of the transaction leaves: upgrade every pool, and give positions that reinvest their fees to the {provider_count} liquidity providers of {} public pools; if the migration fails, the deploy is reverted too",
                 providers.len()
             ));
             let other_calls_gas = function_calls

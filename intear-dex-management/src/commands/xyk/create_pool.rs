@@ -178,7 +178,7 @@ pub struct PublicPool {
     /// How much of the other asset, which sets the pool's price, e.g. '30 USDT'
     amount_1: AmountArg,
     #[interactive_clap(skip_default_input_arg)]
-    /// How the signer takes its part of the pool's fees: 'keep' to keep both assets, or the asset to take them in
+    /// How the signer takes its part of the pool's fees: 'keep' to keep both assets, 'reinvest' to put them back into the pool for more shares, or the asset to take them in
     creator_payout: PayoutArg,
     #[interactive_clap(named_arg)]
     /// The fees of the pool
@@ -222,7 +222,7 @@ impl PublicPool {
         _context: &CreatePoolKindContext,
     ) -> color_eyre::eyre::Result<Option<PayoutArg>> {
         crate::inputs::prompt(
-            "How do you take your part of the pool's fees? 'keep' to keep both assets, or the asset to take them in",
+            "How do you take your part of the pool's fees? 'keep' to keep both assets, 'reinvest' to put them back into the pool for more shares, or the asset to take them in",
         )
     }
 }
@@ -511,6 +511,9 @@ impl PoolFeesContext {
                             PayoutArg::Keep => format!(
                                 "{signer_id} takes its part of the pool's fees in both assets"
                             ),
+                            PayoutArg::Reinvest => format!(
+                                "{signer_id} reinvests its part of the pool's fees into the pool for more shares"
+                            ),
                             PayoutArg::ConvertTo(asset_id) => format!(
                                 "{signer_id} takes its part of the pool's fees in {}",
                                 display::asset_label(
@@ -619,8 +622,10 @@ impl PoolFeesContext {
                     PoolAssets([&assets.0, &assets.1]),
                 ));
                 // The creator of a public pool takes its part of the pool
-                // fees out, and keeps them until it chooses another payout
-                if matches!(pool_type, PoolType::PublicLatest) {
+                // fees out, unless it reinvests them
+                if let Some(creator_fee_payout_type) = creator_fee_payout_type
+                    && creator_fee_payout_type != FeePayoutType::Reinvest
+                {
                     fee_balances.push(FeeBalances {
                         kind: FeeBalanceKind::CollectedByOwner,
                         account_id: signer_id.clone(),

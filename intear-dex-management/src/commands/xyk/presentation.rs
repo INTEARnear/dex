@@ -84,11 +84,12 @@ pub fn fee_receiver_label(receiver: &FeeReceiver) -> String {
     }
 }
 
-/// How a receiver takes its fees, as `--payouts` takes it: keep, or the asset
-/// of the pool that its fees are converted to
+/// How a receiver takes its fees, as `--payouts` takes it: keep, reinvest, or
+/// the asset of the pool that its fees are converted to
 fn payout_text(payout_type: FeePayoutType, pool_asset_ids: [&AssetId; 2]) -> String {
     match payout_type {
         FeePayoutType::KeepBoth => "keep".to_string(),
+        FeePayoutType::Reinvest => "reinvest".to_string(),
         FeePayoutType::ConvertToFirstAsset => pool_asset_ids[0].to_string(),
         FeePayoutType::ConvertToSecondAsset => pool_asset_ids[1].to_string(),
     }

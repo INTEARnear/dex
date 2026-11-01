@@ -396,9 +396,10 @@ impl XykDex {
                 )
             }
         };
-        // The parts of each receiver's fee that are paid out, and with which payout type. The rest
-        // of the pool's fee goes into its liquidity: all of it in pools without providers that
-        // take it out, and what rounding leaves in the others.
+        // The parts of each receiver's fee that are paid out, and with which payout type, which
+        // pays the providers that reinvest in shares. The rest of the pool's fee goes into its
+        // liquidity: all of it in pools without providers that take it out, and what rounding
+        // leaves in the others.
         let receiver_fees = current_fees
             .amounts(amount_in)
             .map(|(receiver, fee_amount)| {
@@ -501,14 +502,33 @@ impl XykDex {
                 let (account_id, fee_balances) = match receiver {
                     FeeReceiver::Pool => {
                         expect!(
-                            let Pool::PublicV3 { payout_groups, .. } = &mut *pool,
+                            let Pool::PublicV3 {
+                                payout_groups,
+                                total_shares,
+                                ..
+                            } = &mut *pool,
                             "Only public pools pay out pool fees; this is a bug"
                         );
-                        let fee_left_in_pool = payout_groups
-                            .group_mut(payout_type)
-                            .share_fee(payout_asset_index, payout_amount);
+                        let fee_added_to_liquidity = match payout_type {
+                            FeePayoutType::Reinvest => {
+                                let reinvested_shares = ProviderShares::minted_for_reinvested(
+                                    payout_amount,
+                                    *total_shares,
+                                    balances[payout_asset_index],
+                                );
+                                *total_shares =
+                                    total_shares.minted(reinvested_shares).expect("Overflow");
+                                payout_groups.reinvest.reinvest(reinvested_shares);
+                                payout_amount
+                            }
+                            FeePayoutType::KeepBoth
+                            | FeePayoutType::ConvertToFirstAsset
+                            | FeePayoutType::ConvertToSecondAsset => payout_groups
+                                .group_mut(payout_type)
+                                .share_fee(payout_asset_index, payout_amount),
+                        };
                         balances[payout_asset_index] = balances[payout_asset_index]
-                            .checked_add(fee_left_in_pool)
+                            .checked_add(fee_added_to_liquidity)
                             .expect("Overflow");
                         continue;
                     }
@@ -583,13 +603,16 @@ impl XykDex {
 }
 
 /// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
-/// that `payout_type` takes fees in
+/// that `payout_type` takes fees in, which reinvesting takes in none
 fn start_fee_balances(
     fee_balances: &mut LookupMap<(AccountId, AssetId), TokenAmount>,
     account_id: &AccountId,
     asset_ids: PoolAssets<&AssetId>,
     payout_type: FeePayoutType,
 ) {
+    if payout_type == FeePayoutType::Reinvest {
+        return;
+    }
     for fee_asset_index in AssetIndex::BOTH {
         fee_balances
             .entry((
@@ -1401,10 +1424,13 @@ impl XykDex {
                     .get(&caller_id)
                     .cloned()
                     .expect("User has no shares");
-                expect!(!position.shares.is_zero(), "User has no shares");
-                let shares_to_remove = shares_to_remove.unwrap_or(position.shares);
+                let current_shares = payout_groups
+                    .group(position.payout_type)
+                    .current_shares(&position);
+                expect!(!current_shares.is_zero(), "User has no shares");
+                let shares_to_remove = shares_to_remove.unwrap_or(current_shares);
                 expect!(
-                    shares_to_remove <= position.shares,
+                    shares_to_remove <= current_shares,
                     "Not enough shares to remove"
                 );
                 let total_shares_after = total_shares.burned(shares_to_remove).expect("Underflow");

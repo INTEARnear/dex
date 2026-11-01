@@ -10,7 +10,7 @@ use xyk_dex_types::{
 use super::percent::PercentArg;
 
 const FEES_FORMAT: &str = "<RECEIVER>=<FEE>, comma-separated, where RECEIVER is pool, an account or community:<account>, and FEE is a percentage like 0.25% or a linear schedule like 1%..0.25%@now..now+7d; or none";
-const PAYOUTS_FORMAT: &str = "<RECEIVER>=<PAYOUT>, comma-separated, where RECEIVER is an account or community:<account> of the fees, and PAYOUT is keep or the pool asset to convert its fees to, like near";
+const PAYOUTS_FORMAT: &str = "<RECEIVER>=<PAYOUT>, comma-separated, where RECEIVER is an account or community:<account> of the fees, and PAYOUT is keep or the pool asset to convert its fees to, like near; only liquidity providers can reinvest";
 const TIME_FORMAT: &str = "now, now+<N><s|m|h|d|w> or an RFC 3339 time like 2026-01-01T00:00:00Z";
 
 /// A point in time for a fee schedule. `now` is the time of the block the
@@ -242,10 +242,13 @@ impl interactive_clap::ToCli for FeesArg {
     type CliVariant = FeesArg;
 }
 
-/// How the account and community receivers of fees take them
+/// How the account and community receivers of fees take them, or how a
+/// liquidity provider, which can also reinvest them, takes its part of the
+/// pool's fees
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayoutArg {
     Keep,
+    Reinvest,
     ConvertTo(AssetId),
 }
 
@@ -254,6 +257,7 @@ impl PayoutArg {
     pub fn payout_type(&self, pool_assets: [&AssetId; 2]) -> Result<FeePayoutType, String> {
         match self {
             Self::Keep => Ok(FeePayoutType::KeepBoth),
+            Self::Reinvest => Ok(FeePayoutType::Reinvest),
             Self::ConvertTo(asset_id) if asset_id == pool_assets[0] => {
                 Ok(FeePayoutType::ConvertToFirstAsset)
             }
@@ -273,9 +277,10 @@ impl FromStr for PayoutArg {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
             "keep" => Ok(Self::Keep),
+            "reinvest" => Ok(Self::Reinvest),
             asset_id => AssetId::from_str(asset_id)
                 .map(Self::ConvertTo)
-                .map_err(|error| format!("{error}. Expected 'keep' or an asset")),
+                .map_err(|error| format!("{error}. Expected 'keep', 'reinvest' or an asset")),
         }
     }
 }
@@ -288,6 +293,7 @@ impl std::fmt::Display for PayoutArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Keep => write!(f, "keep"),
+            Self::Reinvest => write!(f, "reinvest"),
             Self::ConvertTo(asset_id) => write!(f, "{asset_id}"),
         }
     }
@@ -338,6 +344,12 @@ impl FromStr for PayoutsArg {
             }
             let payout_type = PayoutArg::from_str(payout_type)
                 .map_err(|error| format!("{error}. Expected {PAYOUTS_FORMAT}"))?;
+            if payout_type == PayoutArg::Reinvest {
+                return Err(format!(
+                    "{} can't reinvest its fees, which only liquidity providers can",
+                    fee_receiver_text(&receiver)
+                ));
+            }
             payouts.push((receiver, payout_type));
         }
         Ok(Self(payouts))
@@ -537,6 +549,19 @@ mod tests {
             .is_err()
         );
         assert!("pool=keep".parse::<PayoutsArg>().is_err());
+    }
+
+    #[test]
+    fn only_liquidity_providers_reinvest() {
+        let creator_payout: PayoutArg = "reinvest".parse().unwrap();
+        assert_eq!(creator_payout.to_string(), "reinvest");
+        let token = AssetId::Nep141("token.near".parse().unwrap());
+        assert_eq!(
+            creator_payout.payout_type([&token, &AssetId::Near]),
+            Ok(FeePayoutType::Reinvest)
+        );
+        assert!("alice.near=reinvest".parse::<PayoutsArg>().is_err());
+        assert!("community:dao.near=reinvest".parse::<PayoutsArg>().is_err());
     }
 
     #[test]

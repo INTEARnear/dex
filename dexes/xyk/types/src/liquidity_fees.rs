@@ -1,3 +1,5 @@
+use std::num::NonZeroU128;
+
 use ethnum::U256;
 use near_sdk::near;
 
@@ -109,6 +111,57 @@ impl FeeGrowth {
     }
 }
 
+/// The pool shares that one share grew into with the fees it reinvested, times
+/// [`ShareGrowth::SCALE`], as a 256-bit number stored as its high and low halves
+#[near(serializers=[borsh])]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ShareGrowth([u128; 2]);
+
+impl Default for ShareGrowth {
+    /// A share that hasn't reinvested is still one share
+    fn default() -> Self {
+        Self::from_scaled(U256::from(Self::SCALE))
+    }
+}
+
+impl ShareGrowth {
+    const SCALE: u128 = 10u128.pow(18);
+
+    fn scaled(self) -> U256 {
+        let [high, low] = self.0;
+        U256::from_words(high, low)
+    }
+
+    fn from_scaled(growth: U256) -> Self {
+        let (high, low) = growth.into_words();
+        Self([high, low])
+    }
+
+    /// The growth after the shares of a group grew from `shares_before` to `shares_after`,
+    /// rounded down
+    fn grown(self, shares_before: NonZeroU128, shares_after: PayoutGroupShares) -> Self {
+        let shares_after = U256::from(shares_after.non_zero().expect("Shares only grow").get());
+        Self::from_scaled(
+            self.scaled()
+                .checked_mul(shares_after)
+                .and_then(|scaled_growth| {
+                    scaled_growth.checked_div(U256::from(shares_before.get()))
+                })
+                .expect("Share growth overflow"),
+        )
+    }
+
+    /// What `shares` grew into since the growth was `collected`, rounded down
+    fn shares_grown_since(self, collected: ShareGrowth, shares: ProviderShares) -> ProviderShares {
+        let grown_shares = U256::from(shares.get())
+            .checked_mul(self.scaled())
+            .and_then(|scaled_shares| scaled_shares.checked_div(collected.scaled()))
+            .expect("Share growth overflow");
+        ProviderShares::new(u128::try_from(grown_shares).expect("Shares overflow"))
+    }
+}
+
 /// The payout group of each payout
 #[near(serializers=[borsh])]
 #[derive(Clone, Default)]
@@ -117,6 +170,7 @@ pub struct PayoutGroups {
     pub keep_both: PayoutGroup,
     pub convert_to_first_asset: PayoutGroup,
     pub convert_to_second_asset: PayoutGroup,
+    pub reinvest: PayoutGroup,
 }
 
 /// The liquidity providers that take their fees with one payout
@@ -124,8 +178,12 @@ pub struct PayoutGroups {
 #[derive(Clone, Default)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct PayoutGroup {
+    /// The pool shares of the group, with the ones it reinvested its fees for
     pub shares: PayoutGroupShares,
+    /// Only grows in groups that take their fees out
     pub fee_growth: FeeGrowth,
+    /// Only grows in the group that reinvests its fees
+    pub share_growth: ShareGrowth,
 }
 
 /// A registered liquidity provider of a public pool
@@ -134,9 +192,12 @@ pub struct PayoutGroup {
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct LiquidityPosition {
     pub payout_type: FeePayoutType,
+    /// The shares when the position last collected, without what they grew into since
     pub shares: ProviderShares,
     /// The fee growth of the payout's group when the position last collected
     pub fee_growth_collected: FeeGrowth,
+    /// The share growth of the payout's group when the position last collected
+    pub share_growth_collected: ShareGrowth,
 }
 
 impl PayoutGroups {
@@ -145,6 +206,7 @@ impl PayoutGroups {
             FeePayoutType::KeepBoth => &self.keep_both,
             FeePayoutType::ConvertToFirstAsset => &self.convert_to_first_asset,
             FeePayoutType::ConvertToSecondAsset => &self.convert_to_second_asset,
+            FeePayoutType::Reinvest => &self.reinvest,
         }
     }
 
@@ -153,6 +215,7 @@ impl PayoutGroups {
             FeePayoutType::KeepBoth => &mut self.keep_both,
             FeePayoutType::ConvertToFirstAsset => &mut self.convert_to_first_asset,
             FeePayoutType::ConvertToSecondAsset => &mut self.convert_to_second_asset,
+            FeePayoutType::Reinvest => &mut self.reinvest,
         }
     }
 
@@ -192,8 +255,9 @@ impl PayoutGroups {
         position: &mut LiquidityPosition,
         payout_type: FeePayoutType,
     ) -> PoolAssets<TokenAmount> {
+        let collected_fees = position.collect(self.group(position.payout_type));
         let shares = position.shares;
-        let collected_fees = self.remove_shares(position, shares);
+        self.remove_shares(position, shares);
         *position =
             LiquidityPosition::new(payout_type, ProviderShares::ZERO, self.group(payout_type));
         self.add_shares(position, shares);
@@ -206,7 +270,7 @@ impl PayoutGroups {
         &self,
         pool_fee: TokenAmount,
         total_shares: TotalShares,
-    ) -> [(FeePayoutType, TokenAmount); 3] {
+    ) -> [(FeePayoutType, TokenAmount); 4] {
         FeePayoutType::ALL.map(|payout_type| {
             (
                 payout_type,
@@ -226,10 +290,27 @@ impl PayoutGroup {
             .expect("Paid out more than the fee")
     }
 
+    /// Gives the group `reinvested_shares`, minted for the part of a fee that it put back into
+    /// the pool, which each of its shares grows by a part of
+    pub fn reinvest(&mut self, reinvested_shares: ProviderShares) {
+        let shares_before = self
+            .shares
+            .non_zero()
+            .expect("Only a group with shares takes a part of the fee");
+        self.shares = self.shares.joined_by(reinvested_shares).expect("Overflow");
+        self.share_growth = self.share_growth.grown(shares_before, self.shares);
+    }
+
     /// What `position` earned since it last collected, in each asset of the pool
     pub fn uncollected_fees(&self, position: &LiquidityPosition) -> PoolAssets<TokenAmount> {
         self.fee_growth
             .earned_since(position.fee_growth_collected, position.shares)
+    }
+
+    /// The shares of `position`, with what they grew into since it last collected
+    pub fn current_shares(&self, position: &LiquidityPosition) -> ProviderShares {
+        self.share_growth
+            .shares_grown_since(position.share_growth_collected, position.shares)
     }
 }
 
@@ -239,13 +320,17 @@ impl LiquidityPosition {
             payout_type,
             shares,
             fee_growth_collected: group.fee_growth,
+            share_growth_collected: group.share_growth,
         }
     }
 
-    /// Returns what the position earned since it last collected, which it collects now
+    /// Returns what the position earned since it last collected, which it collects now, along
+    /// with the shares its shares grew into
     pub fn collect(&mut self, group: &PayoutGroup) -> PoolAssets<TokenAmount> {
         let uncollected_fees = group.uncollected_fees(self);
+        self.shares = group.current_shares(self);
         self.fee_growth_collected = group.fee_growth;
+        self.share_growth_collected = group.share_growth;
         uncollected_fees
     }
 }

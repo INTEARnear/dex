@@ -28,7 +28,7 @@ mod pool;
 
 pub use legacy_deserialization::XykDexEventV1;
 pub use liquidity_fees::{
-    FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup, PayoutGroups,
+    FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup, PayoutGroups, ShareGrowth,
 };
 pub use pool::Pool;
 
@@ -281,6 +281,27 @@ impl ProviderShares {
 
     pub fn worth_in(self, total_shares: TotalShares, reserve: TokenAmount) -> TokenAmount {
         TokenAmount::new(mul_div(reserve.get(), self.0, total_shares.non_zero()))
+    }
+
+    /// The shares for `fee` put back into one side of a pool with `reserve` of its asset, rounded
+    /// down. After it goes in, the pool is worth twice its new reserve of that asset at its
+    /// price, so shares worth the fee own `fee / (2 * (reserve + fee))` of the pool.
+    pub fn minted_for_reinvested(
+        fee: TokenAmount,
+        total_shares: TotalShares,
+        reserve: TokenAmount,
+    ) -> Self {
+        let pool_value_before_minting = reserve
+            .get()
+            .checked_mul(2)
+            .and_then(|double_reserve| double_reserve.checked_add(fee.get()))
+            .and_then(NonZeroU128::new)
+            .expect("Pool value overflow");
+        Self(mul_div(
+            fee.get(),
+            total_shares.0,
+            pool_value_before_minting,
+        ))
     }
 }
 
@@ -771,19 +792,21 @@ pub enum FeePayoutType {
     KeepBoth,
     ConvertToFirstAsset,
     ConvertToSecondAsset,
+    Reinvest,
 }
 
 impl FeePayoutType {
-    pub const ALL: [FeePayoutType; 3] = [
+    pub const ALL: [FeePayoutType; 4] = [
         FeePayoutType::KeepBoth,
         FeePayoutType::ConvertToFirstAsset,
         FeePayoutType::ConvertToSecondAsset,
+        FeePayoutType::Reinvest,
     ];
 
     /// Which asset of the pool the payout takes a fee paid in `fee_asset_index` in
     pub fn asset_index(self, fee_asset_index: AssetIndex) -> AssetIndex {
         match self {
-            FeePayoutType::KeepBoth => fee_asset_index,
+            FeePayoutType::KeepBoth | FeePayoutType::Reinvest => fee_asset_index,
             FeePayoutType::ConvertToFirstAsset => AssetIndex::First,
             FeePayoutType::ConvertToSecondAsset => AssetIndex::Second,
         }
@@ -1093,6 +1116,17 @@ impl FeeConfigurationV2 {
         }) {
             return Err(FeeConfigurationError::ProtocolFeeReceiverSet);
         }
+        if receivers.iter().any(|(receiver, _)| {
+            matches!(
+                receiver,
+                FeeReceiver::Account {
+                    payout_type: FeePayoutType::Reinvest,
+                    ..
+                }
+            )
+        }) {
+            return Err(FeeConfigurationError::AccountReinvests);
+        }
         Ok(())
     }
 
@@ -1194,6 +1228,7 @@ pub enum FeeConfigurationError {
     ReceiverFeeTooHigh,
     TotalFeeTooHigh,
     ProtocolFeeReceiverSet,
+    AccountReinvests,
 }
 
 impl fmt::Display for FeeConfigurationError {
@@ -1209,6 +1244,9 @@ impl fmt::Display for FeeConfigurationError {
             }
             Self::ProtocolFeeReceiverSet => {
                 write!(f, "Protocol fee receiver can't be set by users")
+            }
+            Self::AccountReinvests => {
+                write!(f, "Only liquidity providers can reinvest their fees")
             }
         }
     }

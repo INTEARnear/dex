@@ -100,9 +100,15 @@ impl Pool {
     /// The shares of a liquidity provider of a public pool, `None` if it isn't registered
     pub fn liquidity_shares(&self, account_id: &AccountId) -> Option<ProviderShares> {
         match self {
-            Pool::PublicV3 { providers, .. } => {
-                providers.get(account_id).map(|position| position.shares)
-            }
+            Pool::PublicV3 {
+                providers,
+                payout_groups,
+                ..
+            } => providers.get(account_id).map(|position| {
+                payout_groups
+                    .group(position.payout_type)
+                    .current_shares(position)
+            }),
             Pool::PrivateV2 { .. } | Pool::LaunchV2 { .. } => None,
         }
     }

@@ -23,10 +23,13 @@ const BOOL_BYTES: usize = 1;
 const SHARE_MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES + POOL_ID_BYTES;
 // A 256-bit fee growth in both assets
 const FEE_GROWTH_BYTES: usize = U128_BYTES * 4;
-// The shares and fee growth of each of the three payout groups
-const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES) * 3;
-// A provider's payout, shares, and the fee growth it last collected at
-const LIQUIDITY_POSITION_BYTES: usize = ENUM_TAG_BYTES + U128_BYTES + FEE_GROWTH_BYTES;
+// A 256-bit share growth
+const SHARE_GROWTH_BYTES: usize = U128_BYTES * 2;
+// The shares, fee growth and share growth of each of the four payout groups
+const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES + SHARE_GROWTH_BYTES) * 4;
+// A provider's payout, shares, and the fee and share growth it last collected at
+const LIQUIDITY_POSITION_BYTES: usize =
+    ENUM_TAG_BYTES + U128_BYTES + FEE_GROWTH_BYTES + SHARE_GROWTH_BYTES;
 
 // near-sdk keeps a contract's state under the key STATE
 const STATE_KEY_BYTES: usize = 5;

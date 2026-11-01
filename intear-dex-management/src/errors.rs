@@ -354,6 +354,9 @@ pub fn fee_configuration_problem(error: FeeConfigurationError) -> String {
         FeeConfigurationError::ProtocolFeeReceiverSet => format!(
             "{PROTOCOL_FEE_RECEIVER_ID} collects the protocol fee, so it can't be a fee receiver"
         ),
+        FeeConfigurationError::AccountReinvests => {
+            "only liquidity providers can reinvest their fees".to_string()
+        }
     }
 }
 
