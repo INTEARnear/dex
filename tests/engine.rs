@@ -2976,6 +2976,59 @@ async fn test_dex_code_deployment_permissions() {
 }
 
 #[tokio::test]
+async fn test_deploy_invalid_dex_code() {
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    // Parses, but its only function returns an i64 where its type says i32
+    let invalid_code = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic and version
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: () -> i32
+        0x03, 0x02, 0x01, 0x00, // function of the type
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x42, 0x00, 0x0b, // body: i64.const 0
+    ];
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_storage_deposit")
+        .max_gas()
+        .deposit(engine_dex_storage_deposit())
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": "dex",
+            "code_base64": BASE64_STANDARD.encode(invalid_code),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Invalid dex code"));
+
+    let result = dex_engine_contract
+        .view("dex_code")
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_total_storage_balances() {
     let storage_deposit_amount = NearToken::from_millinear(500);
     let registration_deposit_amount = NearToken::from_millinear(10);
