@@ -575,6 +575,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunked-upgrade"
+version = "0.1.0"
+dependencies = [
+ "intear-dex-types",
+ "near-sdk",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

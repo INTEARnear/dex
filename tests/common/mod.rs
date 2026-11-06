@@ -19,6 +19,7 @@ use tokio::sync::OnceCell;
 
 pub struct CompiledWasms {
     pub contract_wasm: Vec<u8>,
+    pub chunked_upgrade_wasm: Vec<u8>,
     pub simple_amm_dex_wasm: Vec<u8>,
     pub minimal_dex_wasm: Vec<u8>,
     pub otc_dex_wasm: Vec<u8>,
@@ -66,6 +67,26 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 }
             };
 
+            println!("Compiling chunked-upgrade");
+            assert!(
+                Command::new("cargo")
+                    .current_dir(workspace_root)
+                    .args([
+                        "near",
+                        "build",
+                        "non-reproducible-wasm",
+                        "--manifest-path",
+                        "chunked-upgrade/Cargo.toml",
+                    ])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let chunked_upgrade_wasm =
+                std::fs::read(target_directory.join("near/chunked_upgrade/chunked_upgrade.wasm"))
+                    .unwrap();
+
             let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
 
             let simple_amm_dex_wasm =
@@ -83,6 +104,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
 
             CompiledWasms {
                 contract_wasm,
+                chunked_upgrade_wasm,
                 simple_amm_dex_wasm,
                 minimal_dex_wasm,
                 otc_dex_wasm,
@@ -390,20 +412,70 @@ pub async fn setup_test_environment() -> TestContext {
 pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> TestContext {
     let wasms = get_compiled_wasms().await;
     let sandbox = near_workspaces::sandbox().await.unwrap();
-    let dex_engine_contract = sandbox.dev_deploy(&wasms.contract_wasm).await.unwrap();
-    let deployer = sandbox.dev_create_account().await.unwrap();
-
-    let result = dex_engine_contract
-        .call("new")
-        .args_json(json!({
-            "trusted_code_deployer": deployer.id(),
-        }))
-        .transact()
+    let dex_engine_contract = sandbox
+        .dev_deploy(&wasms.chunked_upgrade_wasm)
         .await
         .unwrap();
+    let deployer = sandbox.dev_create_account().await.unwrap();
+
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        &wasms.contract_wasm,
+        700_000,
+        "new",
+        json!({
+            "trusted_code_deployer": deployer.id(),
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .await;
     assert_success(&result).unwrap();
 
     setup_test_environment_around_engine(sandbox, dex_engine_contract, deployer, config).await
+}
+
+/// Upload `code` in chunks with the chunked upgrade methods of the engine or
+/// of chunked-upgrade, and deploy it
+pub async fn deploy_code_in_chunks(
+    dex_engine_contract: &Contract,
+    code: &[u8],
+    chunk_size: usize,
+    then_call: &str,
+    then_call_args: &[u8],
+) -> ExecutionFinalResult {
+    let chunks = code.chunks(chunk_size).collect::<Vec<_>>();
+    let (last_chunk, chunks_before_last) = chunks.split_last().unwrap();
+    let mut offset = 0;
+    for chunk in chunks_before_last {
+        let end = offset + chunk.len();
+        let result = dex_engine_contract
+            .call("store_code_chunk")
+            .args_borsh((
+                offset as u32,
+                chunk.to_vec(),
+                near_sdk::env::sha256_array(&code[..end]),
+            ))
+            .max_gas()
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        offset = end;
+    }
+    dex_engine_contract
+        .call("deploy_code_chunks")
+        .args_borsh((
+            offset as u32,
+            last_chunk.to_vec(),
+            near_sdk::env::sha256_array(code),
+            then_call.to_string(),
+            then_call_args.to_vec(),
+        ))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap()
 }
 
 /// Set up the test environment around dex.intear.near with its mainnet state.

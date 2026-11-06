@@ -14,7 +14,6 @@ use near_sdk::{
     near,
 };
 use near_workspaces::Contract;
-use near_workspaces::result::ExecutionFinalResult;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -4725,47 +4724,6 @@ fn with_padding_section(code: &[u8], padding_length: usize) -> Vec<u8> {
     }
     padded_code.extend(padding_section);
     padded_code
-}
-
-async fn deploy_code_in_chunks(
-    dex_engine_contract: &Contract,
-    code: &[u8],
-    chunk_size: usize,
-    then_call: &str,
-    then_call_args: &[u8],
-) -> ExecutionFinalResult {
-    let chunks = code.chunks(chunk_size).collect::<Vec<_>>();
-    let (last_chunk, chunks_before_last) = chunks.split_last().unwrap();
-    let mut offset = 0;
-    for chunk in chunks_before_last {
-        let end = offset + chunk.len();
-        let result = dex_engine_contract
-            .call("store_code_chunk")
-            .args_borsh((
-                offset as u32,
-                chunk.to_vec(),
-                near_sdk::env::sha256_array(&code[..end]),
-            ))
-            .max_gas()
-            .transact()
-            .await
-            .unwrap();
-        assert_success(&result).unwrap();
-        offset = end;
-    }
-    dex_engine_contract
-        .call("deploy_code_chunks")
-        .args_borsh((
-            offset as u32,
-            last_chunk.to_vec(),
-            near_sdk::env::sha256_array(code),
-            then_call.to_string(),
-            then_call_args.to_vec(),
-        ))
-        .max_gas()
-        .transact()
-        .await
-        .unwrap()
 }
 
 #[tokio::test]

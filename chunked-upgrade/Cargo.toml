@@ -1,0 +1,12 @@
+[package]
+name = "chunked-upgrade"
+description = "The chunked upgrade methods of the dex engine, to deploy it in tests"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
+intear-dex-types = { path = "../intear-dex-types" }

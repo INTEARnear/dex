@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "intear-dex-types",
+    "chunked-upgrade",
     "dexes/simple-amm",
     "dexes/minimal",
     "dexes/otc",
