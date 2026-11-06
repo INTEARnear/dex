@@ -20,8 +20,7 @@ use tokio::sync::OnceCell;
 pub struct CompiledWasms {
     pub contract_wasm: Vec<u8>,
     pub chunked_upgrade_wasm: Vec<u8>,
-    pub simple_amm_dex_wasm: Vec<u8>,
-    pub minimal_dex_wasm: Vec<u8>,
+    pub test_dex_wasm: Vec<u8>,
     pub otc_dex_wasm: Vec<u8>,
     pub xyk_dex_wasm: Vec<u8>,
     pub ft_wasm: Vec<u8>,
@@ -89,10 +88,8 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
 
             let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
 
-            let simple_amm_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "simple-amm-dex").await;
-            let minimal_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "minimal-dex").await;
+            let test_dex_wasm =
+                compile_dex(workspace_root, &release_wasm_directory, "test-dex").await;
             let otc_dex_wasm =
                 compile_dex(workspace_root, &release_wasm_directory, "otc-dex").await;
             let xyk_dex_wasm = match prebuilt_wasm("INTEAR_DEX_XYK_WASM") {
@@ -105,8 +102,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             CompiledWasms {
                 contract_wasm,
                 chunked_upgrade_wasm,
-                simple_amm_dex_wasm,
-                minimal_dex_wasm,
+                test_dex_wasm,
                 otc_dex_wasm,
                 xyk_dex_wasm,
                 ft_wasm: include_bytes!("../assets/ft.wasm").to_vec(),

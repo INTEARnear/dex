@@ -15,9 +15,13 @@ use near_sdk::{
 };
 use near_workspaces::Contract;
 use std::collections::HashMap;
+use test_dex_types::{
+    AddLiquidityArgs, AssetWithBalance, CreatePoolArgs, CreatePoolResponse, PoolId,
+    RemoveLiquidityArgs, SimplePool, SwapMessage,
+};
 
 #[tokio::test]
-async fn test_minimal() {
+async fn test_minimal_flow() {
     let storage_deposit_amount = NearToken::from_near(5);
     let initial_near_deposit = NearToken::from_near(20);
     let transfer_amount = 1000u128;
@@ -30,7 +34,7 @@ async fn test_minimal() {
         ..
     } = setup_test_environment().await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.minimal_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -67,6 +71,21 @@ async fn test_minimal() {
         .args_json(json!({
             "last_part_of_id": dex_id_string,
             "code_base64": BASE64_STANDARD.encode(dex_wasm),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id.clone(),
+            "method": "new",
+            "args": BASE64_STANDARD.encode([]),
+            "attached_assets": {},
         }))
         .transact()
         .await
@@ -193,7 +212,7 @@ async fn test_minimal() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(vec![]),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Near,
             "amount": SwapRequestAmount::ExactIn(U128(swap_amount)),
@@ -819,7 +838,7 @@ async fn test_execute_operations() {
     } = setup_test_environment().await;
     set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.minimal_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -884,6 +903,15 @@ async fn test_execute_operations() {
             last_part_of_id: dex_id_string.clone(),
             code_base64: Base64VecU8(dex_wasm.to_vec()),
         },
+        Operation::DexCall {
+            dex_id: DexId {
+                deployer: user1.id().clone(),
+                id: dex_id_string.clone(),
+            },
+            method: "new".to_string(),
+            args: Base64VecU8(vec![]),
+            attached_assets: HashMap::new(),
+        },
         Operation::TransferAsset {
             to: AccountOrDexId::Dex(DexId {
                 deployer: user1.id().clone(),
@@ -897,7 +925,7 @@ async fn test_execute_operations() {
                 deployer: user1.id().clone(),
                 id: dex_id_string.clone(),
             },
-            message: Base64VecU8(vec![]),
+            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             asset_in: AssetId::Near,
             asset_out: AssetId::Near,
             amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
@@ -1134,7 +1162,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
     } = setup_test_environment().await;
     set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.simple_amm_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -1261,19 +1289,6 @@ async fn test_execute_operations_liquidity_and_swaps() {
         assert_success(&result).unwrap();
     }
 
-    #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: u64,
-    }
-
     let operations = vec![
         Operation::DexCall {
             dex_id: DexId {
@@ -1350,7 +1365,9 @@ async fn test_execute_operations_liquidity_and_swaps() {
                 deployer: user1.id().clone(),
                 id: dex_id_string.clone(),
             },
-            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            message: Base64VecU8(
+                near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap(),
+            ),
             asset_in: AssetId::Near,
             asset_out: AssetId::Nep141(ft1.id().clone()),
             amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
@@ -1363,7 +1380,9 @@ async fn test_execute_operations_liquidity_and_swaps() {
                 deployer: user1.id().clone(),
                 id: dex_id_string.clone(),
             },
-            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 1 }).unwrap()),
+            message: Base64VecU8(
+                near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 1 }).unwrap(),
+            ),
             asset_in: AssetId::Nep141(ft1.id().clone()),
             asset_out: AssetId::Nep141(ft2.id().clone()),
             amount: SwapOperationAmount::OutputOfLastIn,
@@ -1490,7 +1509,7 @@ async fn test_operations_with_ft_deposit() {
     } = setup_test_environment().await;
     set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.minimal_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -1577,6 +1596,24 @@ async fn test_operations_with_ft_deposit() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    let result = user1
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": DexId {
+                deployer: user1.id().clone(),
+                id: dex_id_string.clone(),
+            },
+            "method": "new",
+            "args": BASE64_STANDARD.encode([]),
+            "attached_assets": {},
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
     ft_storage_deposit_for(&ft1, &user1, dex_engine_contract.id()).await;
 
     let operations = vec![
@@ -1593,7 +1630,7 @@ async fn test_operations_with_ft_deposit() {
                 deployer: user1.id().clone(),
                 id: dex_id_string.clone(),
             },
-            message: Base64VecU8(vec![]),
+            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             asset_in: AssetId::Nep141(ft1.id().clone()),
             asset_out: AssetId::Nep141(ft1.id().clone()),
             amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(ft_swap_amount))),
@@ -1671,7 +1708,7 @@ async fn test_regular_flow() {
         ..
     } = setup_test_environment().await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.simple_amm_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -1847,15 +1884,6 @@ async fn test_regular_flow() {
     .await
     .unwrap();
 
-    #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    type PoolId = u64;
-    #[near(serializers=[borsh])]
-    struct CreatePoolResponse {
-        pool_id: PoolId,
-    }
     assert_inner_asset_balance(
         &dex_engine_contract,
         AccountOrDexId::Account(deployer.id().clone()),
@@ -1985,10 +2013,6 @@ async fn test_regular_flow() {
     .unwrap();
 
     #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: PoolId,
-    }
-    #[near(serializers=[borsh])]
     struct AddLiquidityResponse;
     assert_inner_asset_balance(
         &dex_engine_contract,
@@ -2050,10 +2074,6 @@ async fn test_regular_flow() {
     .await
     .unwrap();
 
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: PoolId,
-    }
     assert_inner_asset_balance(
         &dex_engine_contract,
         AccountOrDexId::Account(deployer.id().clone()),
@@ -2068,7 +2088,7 @@ async fn test_regular_flow() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs {
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool {
                 pool_id,
             }).unwrap()),
             "asset_in": AssetId::Near,
@@ -2113,11 +2133,6 @@ async fn test_regular_flow() {
     .await
     .unwrap();
 
-    #[near(serializers=[borsh])]
-    struct RemoveLiquidityArgs {
-        pool_id: PoolId,
-        assets_to_remove: (U128, U128),
-    }
     #[near(serializers=[borsh])]
     struct RemoveLiquidityResponse;
     let result = deployer
@@ -2243,18 +2258,6 @@ async fn test_regular_flow() {
     struct GetPoolArgs {
         pool_id: PoolId,
     }
-    #[derive(PartialEq, Debug)]
-    #[near(serializers=[borsh])]
-    struct SimplePool {
-        assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
-    }
-    #[derive(PartialEq, Debug)]
-    #[near(serializers=[borsh])]
-    struct AssetWithBalance {
-        asset_id: AssetId,
-        balance: U128,
-    }
     let result = dex_engine_contract
         .view("dex_view")
         .args_json(json!({
@@ -2309,7 +2312,7 @@ async fn test_swap_constraints() {
     } = setup_test_environment().await;
     set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.simple_amm_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -2418,19 +2421,6 @@ async fn test_swap_constraints() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-
-    #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: u64,
-    }
 
     let result = user1
         .call(dex_engine_contract.id(), "dex_call")
@@ -2492,7 +2482,7 @@ async fn test_swap_constraints() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
@@ -2512,7 +2502,7 @@ async fn test_swap_constraints() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
@@ -2531,7 +2521,7 @@ async fn test_swap_constraints() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactOut(U128(exact_output)),
@@ -2553,7 +2543,7 @@ async fn test_swap_constraints() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactOut(U128(exact_output)),
@@ -2585,7 +2575,7 @@ async fn test_simulate_swap_simple() {
     } = setup_test_environment().await;
     set_trusted_code_deployer(&dex_engine_contract, &deployer, &user1).await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.simple_amm_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id_string = "dex".to_string();
     let dex_id = DexId {
@@ -2695,19 +2685,6 @@ async fn test_simulate_swap_simple() {
         .unwrap();
     assert_success(&result).unwrap();
 
-    #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: u64,
-    }
-
     let result = user1
         .call(dex_engine_contract.id(), "dex_call")
         .max_gas()
@@ -2764,7 +2741,7 @@ async fn test_simulate_swap_simple() {
         .view("simulate_swap_simple")
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "trader": user1.id().clone(),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
@@ -2781,7 +2758,7 @@ async fn test_simulate_swap_simple() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "dex_id": dex_id.clone(),
-            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap()),
+            "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
             "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
@@ -2914,7 +2891,7 @@ async fn test_dex_code_deployment_permissions() {
         ..Default::default()
     })
     .await;
-    let dex_wasm = &get_compiled_wasms().await.minimal_dex_wasm;
+    let dex_wasm = &get_compiled_wasms().await.test_dex_wasm;
 
     let deploy = |account: &near_workspaces::Account| {
         account
@@ -3021,8 +2998,8 @@ async fn test_total_storage_balances() {
     } = setup_test_environment_with_config(TestSetupConfig {
         dex: Some(DexSetupConfig {
             id: "dex".to_string(),
-            code: get_compiled_wasms().await.minimal_dex_wasm.clone(),
-            init_method: None,
+            code: get_compiled_wasms().await.test_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
         }),
         register_assets_for_all: true,
         ..Default::default()
@@ -3241,7 +3218,7 @@ async fn test_total_storage_balances() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "last_part_of_id": "dex",
-            "code_base64": BASE64_STANDARD.encode(&wasms.simple_amm_dex_wasm),
+            "code_base64": BASE64_STANDARD.encode(with_padding_section(&wasms.test_dex_wasm, 1000)),
         }))
         .transact()
         .await
@@ -3805,7 +3782,7 @@ async fn test_dex_code_view() {
         ..
     } = setup_test_environment().await;
     let wasms = get_compiled_wasms().await;
-    let dex_wasm = &wasms.minimal_dex_wasm;
+    let dex_wasm = &wasms.test_dex_wasm;
 
     let dex_id = DexId {
         deployer: deployer.id().clone(),
@@ -3893,7 +3870,7 @@ async fn test_referral_fees() {
     } = setup_test_environment_with_config(TestSetupConfig {
         dex: Some(DexSetupConfig {
             id: "dex".to_string(),
-            code: wasms.simple_amm_dex_wasm.clone(),
+            code: wasms.test_dex_wasm.clone(),
             init_method: Some(("new".to_string(), vec![])),
         }),
         register_assets_for_all: true,
@@ -3904,19 +3881,6 @@ async fn test_referral_fees() {
         deployer: deployer.id().clone(),
         id: "dex".to_string(),
     };
-
-    #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: u64,
-    }
 
     let result = deployer
         .call(dex_engine_contract.id(), "deposit_near")
@@ -4012,7 +3976,8 @@ async fn test_referral_fees() {
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
     let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
     let unregistered_referrer: AccountId = "unregistered.test.near".parse().unwrap();
-    let swap_message = Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id: 0 }).unwrap());
+    let swap_message =
+        Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap());
     let ft1_to_ft2 = |amount: SwapRequestAmount, constraint: Option<U128>| Operation::SwapSimple {
         dex_id: dex_id.clone(),
         message: swap_message.clone(),
@@ -4283,7 +4248,7 @@ async fn test_swap_advanced() {
     } = setup_test_environment_with_config(TestSetupConfig {
         dex: Some(DexSetupConfig {
             id: "dex".to_string(),
-            code: wasms.simple_amm_dex_wasm.clone(),
+            code: wasms.test_dex_wasm.clone(),
             init_method: Some(("new".to_string(), vec![])),
         }),
         register_assets_for_all: true,
@@ -4296,30 +4261,8 @@ async fn test_swap_advanced() {
     };
 
     #[near(serializers=[borsh])]
-    struct CreatePoolArgs {
-        assets: (AssetId, AssetId),
-    }
-    #[near(serializers=[borsh])]
-    struct AddLiquidityArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SwapArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
     struct GetPoolArgs {
-        pool_id: u64,
-    }
-    #[near(serializers=[borsh])]
-    struct SimplePool {
-        assets: (AssetWithBalance, AssetWithBalance),
-        owner_id: AccountId,
-    }
-    #[near(serializers=[borsh])]
-    struct AssetWithBalance {
-        asset_id: AssetId,
-        balance: U128,
+        pool_id: PoolId,
     }
 
     let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
@@ -4427,7 +4370,7 @@ async fn test_swap_advanced() {
 
     let option = |pool_id: u64| SwapOption {
         dex_id: dex_id.clone(),
-        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs { pool_id }).unwrap()),
+        message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id }).unwrap()),
     };
     let swap_advanced = |amount: SwapRequestAmount,
                          constraint: Option<U128>,

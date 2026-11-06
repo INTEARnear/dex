@@ -2428,6 +2428,7 @@ dependencies = [
  "near-sdk",
  "near-workspaces",
  "otc-dex-types",
+ "test-dex-types",
  "tokio",
  "wasmi",
  "xyk-dex-types",
@@ -2931,16 +2932,6 @@ name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
-
-[[package]]
-name = "minimal-dex"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "intear-dex-types",
- "near-sdk",
- "talc",
-]
 
 [[package]]
 name = "miniz_oxide"
@@ -5210,16 +5201,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "simple-amm-dex"
-version = "0.1.0"
-dependencies = [
- "crypto-bigint 0.6.1",
- "intear-dex-types",
- "near-sdk",
- "talc",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5491,6 +5472,25 @@ dependencies = [
  "dirs-next",
  "rustversion",
  "winapi",
+]
+
+[[package]]
+name = "test-dex"
+version = "0.1.0"
+dependencies = [
+ "crypto-bigint 0.6.1",
+ "intear-dex-types",
+ "near-sdk",
+ "talc",
+ "test-dex-types",
+]
+
+[[package]]
+name = "test-dex-types"
+version = "0.1.0"
+dependencies = [
+ "intear-dex-types",
+ "near-sdk",
 ]
 
 [[package]]

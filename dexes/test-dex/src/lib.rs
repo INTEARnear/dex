@@ -1,5 +1,3 @@
-#![deny(clippy::arithmetic_side_effects)]
-
 use std::collections::HashMap;
 
 use crypto_bigint::U256;
@@ -8,7 +6,11 @@ use intear_dex_types::{
     SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, json_types::U128, near, store::LookupMap,
+    BorshStorageKey, NearToken, PanicOnDefault, json_types::U128, near, store::LookupMap,
+};
+use test_dex_types::{
+    AddLiquidityArgs, AssetWithBalance, CreatePoolArgs, CreatePoolResponse, PoolId,
+    RemoveLiquidityArgs, SimplePool, SwapMessage,
 };
 
 #[global_allocator]
@@ -18,15 +20,12 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
     talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
 };
 
-type PoolId = u64;
-
-/// The simplest possible x*y=k pool, with just one
-/// liquidity provider. Demonstrates the basic functionality
-/// of swaps, adding / withdrawing liquidity, storage
-/// management, and event emission.
+/// The dex that the engine's tests run: the simplest possible x*y=k pools,
+/// with just one liquidity provider each, and swaps of an asset for itself.
+/// See [`SwapMessage`].
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
-pub struct SimpleAmmDex {
+pub struct TestDex {
     pools: LookupMap<PoolId, SimplePool>,
     pool_counter: PoolId,
 }
@@ -38,17 +37,35 @@ enum StorageKey {
 }
 
 #[near]
-impl Dex for SimpleAmmDex {
+impl Dex for TestDex {
     #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        #[near(serializers=[borsh])]
-        struct SwapArgs {
-            pool_id: PoolId,
-        }
-        let Ok(SwapArgs { pool_id }) = near_sdk::borsh::from_slice(&request.message.0) else {
+        let Ok(message) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
+        match message {
+            SwapMessage::Same => {
+                expect!(
+                    request.asset_in == request.asset_out,
+                    "Asset in and asset out must be the same"
+                );
+                let amount = match request.amount {
+                    SwapRequestAmount::ExactIn(amount) => amount,
+                    SwapRequestAmount::ExactOut(amount) => amount,
+                };
+                SwapResponse {
+                    amount_in: amount,
+                    amount_out: amount,
+                }
+            }
+            SwapMessage::Pool { pool_id } => self.swap_on_pool(request, pool_id),
+        }
+    }
+}
+
+impl TestDex {
+    fn swap_on_pool(&mut self, request: SwapRequest, pool_id: PoolId) -> SwapResponse {
         let Some(pool) = self.pools.get_mut(&pool_id) else {
             panic!("Pool not found");
         };
@@ -76,7 +93,6 @@ impl Dex for SimpleAmmDex {
                 } else {
                     (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
                 };
-                #[allow(clippy::arithmetic_side_effects)]
                 let amount_out = u128::from_le_bytes(
                     *(U256::from(exact_amount_in.0) * U256::from(*out_balance)
                         / (U256::from(*in_balance) + U256::from(exact_amount_in.0)))
@@ -102,7 +118,6 @@ impl Dex for SimpleAmmDex {
                     exact_amount_out.0 < *out_balance,
                     "Amount must be less than out balance"
                 );
-                #[allow(clippy::arithmetic_side_effects)]
                 let amount_in = u128::from_le_bytes(
                     *((U256::from(*in_balance) * U256::from(exact_amount_out.0))
                         / (U256::from(*out_balance) - U256::from(exact_amount_out.0)))
@@ -125,7 +140,7 @@ impl Dex for SimpleAmmDex {
 }
 
 #[near]
-impl SimpleAmmDex {
+impl TestDex {
     #[init]
     #[payable]
     pub fn new() -> Self {
@@ -152,10 +167,6 @@ impl SimpleAmmDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct CreatePoolArgs {
-            assets: (AssetId, AssetId),
-        }
         let Ok(CreatePoolArgs { assets }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -212,10 +223,6 @@ impl SimpleAmmDex {
             "No assets other than NEAR should be attached"
         );
 
-        #[near(serializers=[borsh])]
-        struct CreatePoolResponse {
-            pool_id: PoolId,
-        }
         let response = CreatePoolResponse { pool_id };
         DexCallResponse {
             asset_withdraw_requests: if let Some(leftover) = attached_near.checked_sub(storage_cost)
@@ -246,10 +253,6 @@ impl SimpleAmmDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct AddLiquidityArgs {
-            pool_id: PoolId,
-        }
         let Ok(AddLiquidityArgs { pool_id }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
@@ -305,11 +308,6 @@ impl SimpleAmmDex {
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
         );
-        #[near(serializers=[borsh])]
-        struct RemoveLiquidityArgs {
-            pool_id: PoolId,
-            assets_to_remove: (U128, U128),
-        }
         let Ok(RemoveLiquidityArgs {
             pool_id,
             assets_to_remove,
@@ -369,16 +367,4 @@ impl SimpleAmmDex {
     pub fn get_pool(&self, #[serializer(borsh)] pool_id: PoolId) -> Option<&SimplePool> {
         self.pools.get(&pool_id)
     }
-}
-
-#[near(serializers=[borsh])]
-pub struct SimplePool {
-    assets: (AssetWithBalance, AssetWithBalance),
-    owner_id: AccountId,
-}
-
-#[near(serializers=[borsh])]
-pub struct AssetWithBalance {
-    asset_id: AssetId,
-    balance: U128,
 }
