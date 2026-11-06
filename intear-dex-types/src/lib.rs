@@ -245,7 +245,7 @@ impl near_sdk::schemars::JsonSchema for DexId {
 
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
+#[near(serializers=[borsh, json])]
 pub enum Caller {
     /// The account called the engine directly, so the call is fully authorized
     Direct(AccountId),
@@ -270,7 +270,7 @@ impl Caller {
 
 #[cfg(feature = "dex")]
 pub mod env {
-    use near_sdk::{AccountId, borsh::BorshSerialize};
+    use near_sdk::{AccountId, PublicKeyHandle, borsh::BorshSerialize};
 
     use crate::{Caller, DexId};
 
@@ -281,6 +281,13 @@ pub mod env {
             pub fn dex_event(len: u64, ptr: u64);
             pub fn dex_id(register_id: u64);
             pub fn engine_contract_id(register_id: u64);
+            pub fn oracle_request(
+                oracle_key_len: u64,
+                oracle_key_ptr: u64,
+                request_len: u64,
+                request_ptr: u64,
+                register_id: u64,
+            ) -> u64;
         }
     }
 
@@ -311,6 +318,25 @@ pub mod env {
             .ok()
             .and_then(|engine_contract_id| engine_contract_id.parse().ok())
             .expect("Invalid engine contract ID")
+    }
+
+    /// The response of the oracle that has `oracle_key` to `request` for this
+    /// dex, if the operations started with an `OracleRequest` of it. Anyone
+    /// can be an oracle, so this must be the key of an oracle that the dex trusts.
+    pub fn oracle_request(oracle_key: &PublicKeyHandle, request: Vec<u8>) -> Option<Vec<u8>> {
+        let oracle_key = near_sdk::borsh::to_vec(oracle_key).expect("Failed to serialize key");
+        let responded = unsafe {
+            sys::oracle_request(
+                oracle_key.len() as u64,
+                oracle_key.as_ptr() as u64,
+                request.len() as u64,
+                request.as_ptr() as u64,
+                REGISTER_ID,
+            )
+        };
+        (responded == 1).then(|| {
+            near_sdk::env::read_register(REGISTER_ID).expect("Oracle response not returned")
+        })
     }
 }
 

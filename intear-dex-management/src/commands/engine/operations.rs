@@ -167,7 +167,8 @@ impl RunContext {
                             to: AccountOrDexId::Dex(dex_id),
                             ..
                         }
-                        | Operation::SwapSimple { dex_id, .. } => referenced_dexes.push(dex_id),
+                        | Operation::SwapSimple { dex_id, .. }
+                        | Operation::OracleRequest { dex_id, .. } => referenced_dexes.push(dex_id),
                         Operation::SwapAdvanced { options, .. } => {
                             referenced_dexes.extend(options.iter().map(|option| &option.dex_id))
                         }
@@ -483,6 +484,14 @@ fn operation_step(
             "Move {} from {signer_id}'s NEAR balance to the storage balance of {}",
             amount_label(&AssetId::Near, *amount)?,
             owner_label(r#for)
+        ),
+        Operation::OracleRequest {
+            oracle_key,
+            dex_id,
+            request,
+        } => format!(
+            "Wait for oracle {oracle_key} to respond to {} bytes of request for {dex_id}",
+            request.0.len()
         ),
     })
 }

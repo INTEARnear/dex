@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Display};
 
 use near_sdk::{
-    AccountId,
+    AccountId, PublicKeyHandle,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
     serde::Deserialize,
@@ -224,6 +224,16 @@ pub enum Operation {
         amount: U128,
         r#for: Option<AccountOrDexId>,
     },
+    /// Ask the oracle that has `oracle_key` to respond to `request`, which
+    /// `dex_id` reads with the `oracle_request` host function. Only allowed
+    /// at the start of the operations. The operations after the requests run
+    /// once all of them are responded to, and deposited assets are held until
+    /// then, or refunded if the oracles don't respond in time.
+    OracleRequest {
+        oracle_key: PublicKeyHandle,
+        dex_id: DexId,
+        request: Base64VecU8,
+    },
 }
 
 #[near(serializers=[json])]
@@ -372,6 +382,14 @@ mod deprecation_warning_workaround {
             referrer: Option<AccountId>,
             #[serde(default)]
             referral_fees_paid: Vec<(AccountId, U128)>,
+        },
+        /// Operations wait for the oracle that has `oracle_key` to respond to
+        /// `request` with `oracle_respond`, under the sha256 of the request
+        #[event_version("1.0.0")]
+        OracleRequest {
+            oracle_key: PublicKeyHandle,
+            dex_id: DexId,
+            request: Base64VecU8,
         },
     }
 }

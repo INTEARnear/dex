@@ -35,6 +35,7 @@ container_build_command = [
 [dependencies]
 near-sdk = { version = "5.30", default-features = false, features = [
     "unstable",
+    "deterministic-account-ids",
 ] }
 wasmi = { version = "1", default-features = false }
 intear-dex-types = { path = "./intear-dex-types" }

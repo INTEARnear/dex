@@ -13,7 +13,7 @@ use crate::{
 
 #[near]
 impl DexEngine {
-    /// Adds `uploaded_code`
+    /// Adds `oracle_requests` and `oracle_responses`
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
@@ -28,6 +28,7 @@ impl DexEngine {
             total_in_custody: IterableMap<AssetId, U128>,
             paused: bool,
             trusted_code_deployer: AccountId,
+            uploaded_code: LazyOption<Vec<u8>>,
         }
         let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
         Self {
@@ -40,7 +41,9 @@ impl DexEngine {
             total_in_custody: old_state.total_in_custody,
             paused: old_state.paused,
             trusted_code_deployer: old_state.trusted_code_deployer,
-            uploaded_code: LazyOption::new(StorageKey::UploadedCode, None),
+            uploaded_code: old_state.uploaded_code,
+            oracle_requests: LookupMap::new(StorageKey::OracleRequests),
+            oracle_responses: LookupMap::new(StorageKey::OracleResponses),
         }
     }
 }

@@ -7,7 +7,7 @@ use near_contract_standards::{
 };
 use near_sdk::{AccountId, PromiseOrValue, json_types::U128, near};
 
-use crate::{DexEngine, DexEngineExt, IntearDexEvent, call_events::CallEvents};
+use crate::{DexEngine, DexEngineExt, IntearDexEvent, OracleResponses, call_events::CallEvents};
 
 #[near]
 impl DexEngine {
@@ -35,7 +35,7 @@ impl DexEngine {
             });
 
         if let Some(message) = operations {
-            self.internal_execute_operations(
+            if let Some(waiting_for_oracles) = self.internal_execute_operations(
                 &mut events,
                 message.operations(),
                 Caller::OnTransfer {
@@ -45,7 +45,10 @@ impl DexEngine {
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
                 message.referrer(),
                 message.referral_fees(),
-            );
+                &OracleResponses::new(),
+            ) {
+                waiting_for_oracles.as_return().detach();
+            }
         } else {
             self.internal_increase_assets(
                 &mut events,
@@ -97,7 +100,7 @@ impl FungibleTokenReceiver for DexEngine {
                 panic!("Failed to deposit assets to contract tracked balance: asset not registered")
             });
 
-        if let Some(message) = operations {
+        let waiting_for_oracles = if let Some(message) = operations {
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
@@ -108,7 +111,8 @@ impl FungibleTokenReceiver for DexEngine {
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
                 message.referrer(),
                 message.referral_fees(),
-            );
+                &OracleResponses::new(),
+            )
         } else {
             self.internal_increase_assets(
                 &mut events,
@@ -122,10 +126,11 @@ impl FungibleTokenReceiver for DexEngine {
                 amount,
             }
             .emit();
-        }
+            None
+        };
 
         events.emit();
-        PromiseOrValue::Value(U128(0))
+        waiting_for_oracles.map_or(PromiseOrValue::Value(U128(0)), PromiseOrValue::Promise)
     }
 }
 
@@ -167,7 +172,7 @@ impl NonFungibleTokenReceiver for DexEngine {
                 panic!("Failed to deposit assets to contract tracked balance: asset not registered")
             });
 
-        if let Some(message) = message {
+        let waiting_for_oracles = if let Some(message) = message {
             self.internal_execute_operations(
                 &mut events,
                 message.operations(),
@@ -181,7 +186,8 @@ impl NonFungibleTokenReceiver for DexEngine {
                 )])),
                 message.referrer(),
                 message.referral_fees(),
-            );
+                &OracleResponses::new(),
+            )
         } else {
             self.internal_increase_assets(
                 &mut events,
@@ -195,10 +201,11 @@ impl NonFungibleTokenReceiver for DexEngine {
                 amount: U128(1),
             }
             .emit();
-        }
+            None
+        };
 
         events.emit();
-        PromiseOrValue::Value(false)
+        waiting_for_oracles.map_or(PromiseOrValue::Value(false), PromiseOrValue::Promise)
     }
 }
 
@@ -270,7 +277,7 @@ impl DexEngine {
                 .or_insert(*amount);
         }
 
-        if let Some(message) = message {
+        let waiting_for_oracles = if let Some(message) = message {
             expect!(
                 let [token_id] = token_ids.as_slice(),
                 "Operations can only follow a transfer of one token"
@@ -285,7 +292,8 @@ impl DexEngine {
                 Some(attached_assets),
                 message.referrer(),
                 message.referral_fees(),
-            );
+                &OracleResponses::new(),
+            )
         } else {
             for ((token_id, previous_owner_id), amount) in token_ids
                 .iter()
@@ -305,9 +313,13 @@ impl DexEngine {
                 }
                 .emit();
             }
-        }
+            None
+        };
 
         events.emit();
-        PromiseOrValue::Value(vec![U128(0); token_ids.len()])
+        waiting_for_oracles.map_or_else(
+            || PromiseOrValue::Value(vec![U128(0); token_ids.len()]),
+            PromiseOrValue::Promise,
+        )
     }
 }

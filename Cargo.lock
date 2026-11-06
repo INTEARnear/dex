@@ -3452,6 +3452,7 @@ dependencies = [
  "borsh",
  "bs58 0.5.1",
  "ed25519-dalek",
+ "hex",
  "hex-literal",
  "near-abi",
  "near-account-id",

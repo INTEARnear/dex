@@ -298,6 +298,7 @@ pub fn report_outcome(
             | IntearDexEvent::UserDeposit { .. }
             | IntearDexEvent::Withdraw { .. }
             | IntearDexEvent::Swap { .. }
+            | IntearDexEvent::OracleRequest { .. }
             | IntearDexEvent::DexBalanceUpdate { .. } => {}
         }
     }

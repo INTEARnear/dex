@@ -2,7 +2,7 @@ use wasmi::Caller;
 
 use crate::{CallType, RunnerData};
 use intear_dex_types::DexEventData;
-use near_sdk::AccountId;
+use near_sdk::{AccountId, PublicKeyHandle};
 
 #[macro_export]
 macro_rules! declare_unimplemented_host_functions {
@@ -84,6 +84,7 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, p256_verify);
         $crate::impl_host_function!($var, ml_dsa_verify);
         $crate::impl_host_function!($var, dex_event);
+        $crate::impl_host_function!($var, oracle_request);
     };
 }
 
@@ -802,6 +803,49 @@ pub fn dex_event(
     };
     caller.data_mut().dex_events.push(dex_event);
     Ok(())
+}
+
+pub fn oracle_request(
+    mut caller: Caller<'_, RunnerData>,
+    oracle_key_len: u64,
+    oracle_key_ptr: u64,
+    request_len: u64,
+    request_ptr: u64,
+    register_id: u64,
+) -> Result<u64, wasmi::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut oracle_key = vec![0; oracle_key_len as usize];
+    memory
+        .read(&caller, oracle_key_ptr as usize, &mut oracle_key)
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read oracle key from guest memory: {err}"
+            ))
+        })?;
+    let oracle_key: PublicKeyHandle = near_sdk::borsh::from_slice(&oracle_key)
+        .map_err(|err| wasmi::Error::new(format!("Invalid oracle key: {err}")))?;
+    let mut request = vec![0; request_len as usize];
+    memory
+        .read(&caller, request_ptr as usize, &mut request)
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read oracle request from guest memory: {err}"
+            ))
+        })?;
+    let dex_id = caller.data().dex_id.clone();
+    let Some(response) = caller
+        .data()
+        .oracle_responses
+        .get(&(oracle_key, dex_id, request))
+        .cloned()
+    else {
+        return Ok(0);
+    };
+    caller.data_mut().registers.insert(register_id, response);
+    Ok(1)
 }
 
 fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {

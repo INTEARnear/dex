@@ -17,8 +17,8 @@ use near_sdk::{
 use wasmi::{Engine, Func, Linker, Module, Store};
 
 use crate::{
-    CallType, DexEngine, DexEngineExt, IntearDexEvent, PendingStorageUpdates, RunnerData,
-    call_events::CallEvents,
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, OracleResponses, PendingStorageUpdates,
+    RunnerData, call_events::CallEvents,
 };
 
 pub enum TradeAccount<'a> {
@@ -124,6 +124,7 @@ impl DexEngine {
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
         referrer: Option<AccountId>,
+        oracle_responses: &'a OracleResponses,
     ) -> Result<DexRun, String> {
         let engine = Engine::default();
         // SAFETY: already validated in internal_deploy_dex_code
@@ -145,6 +146,7 @@ impl DexEngine {
                 dex_storage_usage_before_transaction: storage_usage_before,
                 referrer,
                 dex_events: Vec::new(),
+                oracle_responses,
             },
         );
         let mut linker = Linker::new(&engine);
@@ -185,6 +187,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<U128>,
+        oracle_responses: &OracleResponses,
     ) -> (U128, U128) {
         let swap = self
             .internal_simulate_swap_simple(
@@ -196,6 +199,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees,
+                oracle_responses,
             )
             .unwrap_or_else(|err| panic!("{err}"));
         self.internal_commit_swap(events, swap, trader, referrer, constraint)
@@ -330,6 +334,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<U128>,
+        oracle_responses: &OracleResponses,
     ) -> (U128, U128) {
         expect!(!options.is_empty(), "At least one swap option is required");
         let mut best: Option<SimulatedSwap> = None;
@@ -343,6 +348,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees.clone(),
+                oracle_responses,
             );
             let simulation = match simulation {
                 Ok(simulation) => simulation,
@@ -451,6 +457,7 @@ impl DexEngine {
         trader: intear_dex_types::Caller,
         anon_swap_available_assets: Option<&mut HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
+        oracle_responses: &OracleResponses,
     ) -> Base64VecU8 {
         expect!(
             method != "swap",
@@ -484,6 +491,7 @@ impl DexEngine {
             &method,
             &self.dex_storage_balances,
             referrer,
+            oracle_responses,
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
         events.extend_dex_events(dex_run.dex_events);
@@ -609,6 +617,7 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
+        oracle_responses: &OracleResponses,
     ) -> Result<SimulatedSwap, String> {
         let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
         let swap_request = SwapRequest {
@@ -637,6 +646,7 @@ impl DexEngine {
             "swap",
             &self.dex_storage_balances,
             referrer,
+            oracle_responses,
         )
         .map_err(|err| format!("Running wasm failed: {err}"))?;
         let response: SwapResponse =
@@ -692,6 +702,7 @@ impl DexEngine {
             &method,
             &self.dex_storage_balances,
             None,
+            &OracleResponses::new(),
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
 
@@ -850,7 +861,17 @@ impl DexEngine {
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
         mut referral_fees_of_first_swap: ReferralFees,
-    ) {
+        oracle_responses: &OracleResponses,
+    ) -> Option<Promise> {
+        if let Some(Operation::OracleRequest { .. }) = operations.first() {
+            return Some(self.internal_wait_for_oracles(
+                operations,
+                trader,
+                anon_swap_available_assets,
+                referrer,
+                referral_fees_of_first_swap,
+            ));
+        }
         let by = trader.alleged_account_id().clone();
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
         near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
@@ -1018,6 +1039,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
+                        oracle_responses,
                     );
                     last_output = Some((asset_out, amount_out));
                 }
@@ -1053,6 +1075,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
+                        oracle_responses,
                     );
                     last_output = Some((asset_out, amount_out));
                 }
@@ -1071,6 +1094,7 @@ impl DexEngine {
                         trader.clone(),
                         anon_swap_available_assets.as_mut(),
                         referrer.clone(),
+                        oracle_responses,
                     );
                 }
                 Operation::TransferAsset {
@@ -1152,6 +1176,9 @@ impl DexEngine {
                         }
                     }
                 }
+                Operation::OracleRequest { .. } => {
+                    panic!("Oracle requests are only allowed at the start of operations");
+                }
             }
         }
         for (asset_id, amount) in anon_swap_available_assets.unwrap_or_default() {
@@ -1161,6 +1188,7 @@ impl DexEngine {
                 amount.0
             );
         }
+        None
     }
 }
 
