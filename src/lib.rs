@@ -318,7 +318,7 @@ impl DexEngine {
 
     /// Upload the last chunk and deploy the code. `then_call` is called with
     /// `then_call_args` in the same receipt, so if the new code doesn't compile
-    /// or the call fails, the old code stays and `then_c.
+    /// or the call fails, the old code stays and `then_call` doesn't run.
     #[private]
     pub fn deploy_code_chunks(
         &mut self,
