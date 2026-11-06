@@ -4429,6 +4429,11 @@ async fn test_xyk_fee_discount_secp256k1() {
     check_xyk_fee_discount(KeyType::SECP256K1).await;
 }
 
+#[tokio::test]
+async fn test_xyk_fee_discount_ml_dsa_65() {
+    check_xyk_fee_discount(KeyType::MLDSA65).await;
+}
+
 async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     let initial_near_deposit = NearToken::from_near(20);
     let storage_deposit_for_pool = NearToken::from_millinear(50);

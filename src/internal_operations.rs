@@ -150,10 +150,6 @@ impl DexEngine {
         let mut linker = Linker::new(&engine);
 
         crate::impl_supported_host_functions!(linker);
-        // might be needed for some near-sdk features that are actually never called,
-        // but not for any of the dexes in this workspace, and this helps reduce wasm
-        // size by 4kb.
-        // crate::impl_unsupported_host_functions!(linker);
 
         let instance = linker
             .instantiate_and_start(&mut store, &module)

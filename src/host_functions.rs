@@ -40,191 +40,6 @@ macro_rules! unimplemented_host_functions_return_type {
 }
 
 #[macro_export]
-macro_rules! impl_unsupported_host_functions {
-    ($var: ident) => {
-        $crate::declare_unimplemented_host_functions! {
-            $var:
-
-            // ####################
-            // # Unsupported APIs #
-            // ####################
-            pub fn current_account_id(register_id: u64);
-            pub fn current_contract_code(register_id: u64) -> u64;
-            pub fn refund_to_account_id(register_id: u64);
-            pub fn signer_account_id(register_id: u64);
-            pub fn signer_account_pk(register_id: u64);
-            pub fn account_balance(balance_ptr: u64);
-            pub fn account_locked_balance(balance_ptr: u64);
-            pub fn validator_stake(account_id_len: u64, account_id_ptr: u64, stake_ptr: u64);
-            pub fn validator_total_stake(stake_ptr: u64);
-            // ################
-            // # Promises API #
-            // ################
-            pub fn promise_create(
-                account_id_len: u64,
-                account_id_ptr: u64,
-                function_name_len: u64,
-                function_name_ptr: u64,
-                arguments_len: u64,
-                arguments_ptr: u64,
-                amount_ptr: u64,
-                gas: u64,
-            ) -> u64;
-            pub fn promise_then(
-                promise_index: u64,
-                account_id_len: u64,
-                account_id_ptr: u64,
-                function_name_len: u64,
-                function_name_ptr: u64,
-                arguments_len: u64,
-                arguments_ptr: u64,
-                amount_ptr: u64,
-                gas: u64,
-            ) -> u64;
-            pub fn promise_and(promise_idx_ptr: u64, promise_idx_count: u64) -> u64;
-            pub fn promise_batch_create(account_id_len: u64, account_id_ptr: u64) -> u64;
-            pub fn promise_batch_then(promise_index: u64, account_id_len: u64, account_id_ptr: u64) -> u64;
-            pub fn promise_set_refund_to(promise_index: u64, account_id_len: u64, account_id_ptr: u64);
-            pub fn promise_batch_action_state_init(
-                promise_index: u64,
-                code_len: u64,
-                code_ptr: u64,
-                amount_ptr: u64,
-            ) -> u64;
-            pub fn promise_batch_action_state_init_by_account_id(
-                promise_index: u64,
-                account_id_len: u64,
-                account_id_ptr: u64,
-                amount_ptr: u64,
-            ) -> u64;
-            pub fn set_state_init_data_entry(
-                promise_index: u64,
-                action_index: u64,
-                key_len: u64,
-                key_ptr: u64,
-                value_len: u64,
-                value_ptr: u64,
-            );
-            pub fn promise_batch_action_create_account(promise_index: u64);
-            pub fn promise_batch_action_deploy_contract(promise_index: u64, code_len: u64, code_ptr: u64);
-            pub fn promise_batch_action_function_call(
-                promise_index: u64,
-                function_name_len: u64,
-                function_name_ptr: u64,
-                arguments_len: u64,
-                arguments_ptr: u64,
-                amount_ptr: u64,
-                gas: u64,
-            );
-            pub fn promise_batch_action_function_call_weight(
-                promise_index: u64,
-                function_name_len: u64,
-                function_name_ptr: u64,
-                arguments_len: u64,
-                arguments_ptr: u64,
-                amount_ptr: u64,
-                gas: u64,
-                weight: u64,
-            );
-            pub fn promise_batch_action_transfer(promise_index: u64, amount_ptr: u64);
-            pub fn promise_batch_action_stake(
-                promise_index: u64,
-                amount_ptr: u64,
-                public_key_len: u64,
-                public_key_ptr: u64,
-            );
-            pub fn promise_batch_action_add_key_with_full_access(
-                promise_index: u64,
-                public_key_len: u64,
-                public_key_ptr: u64,
-                nonce: u64,
-            );
-            pub fn promise_batch_action_add_key_with_function_call(
-                promise_index: u64,
-                public_key_len: u64,
-                public_key_ptr: u64,
-                nonce: u64,
-                allowance_ptr: u64,
-                receiver_id_len: u64,
-                receiver_id_ptr: u64,
-                function_names_len: u64,
-                function_names_ptr: u64,
-            );
-            pub fn promise_batch_action_delete_key(
-                promise_index: u64,
-                public_key_len: u64,
-                public_key_ptr: u64,
-            );
-            pub fn promise_batch_action_delete_account(
-                promise_index: u64,
-                beneficiary_id_len: u64,
-                beneficiary_id_ptr: u64,
-            );
-            pub fn promise_batch_action_deploy_global_contract(
-                promise_index: u64,
-                code_len: u64,
-                code_ptr: u64,
-            );
-            pub fn promise_batch_action_deploy_global_contract_by_account_id(
-                promise_index: u64,
-                code_len: u64,
-                code_ptr: u64,
-            );
-            pub fn promise_batch_action_use_global_contract(
-                promise_index: u64,
-                code_hash_len: u64,
-                code_hash_ptr: u64,
-            );
-            pub fn promise_batch_action_use_global_contract_by_account_id(
-                promise_index: u64,
-                account_id_len: u64,
-                account_id_ptr: u64,
-            );
-            pub fn promise_yield_create(
-                function_name_len: u64,
-                function_name_ptr: u64,
-                arguments_len: u64,
-                arguments_ptr: u64,
-                gas: u64,
-                gas_weight: u64,
-                register_id: u64,
-            ) -> u64;
-            pub fn promise_yield_resume(
-                data_id_len: u64,
-                data_id_ptr: u64,
-                payload_len: u64,
-                payload_ptr: u64,
-            ) -> u32;
-            pub fn promise_results_count() -> u64;
-            pub fn promise_result(result_idx: u64, register_id: u64) -> u64;
-            pub fn promise_return(promise_id: u64);
-            // ##########################
-            // # Deprecated Storage API #
-            // ##########################
-            pub fn storage_iter_prefix(prefix_len: u64, prefix_ptr: u64) -> u64;
-            pub fn storage_iter_range(start_len: u64, start_ptr: u64, end_len: u64, end_ptr: u64) -> u64;
-            pub fn storage_iter_next(iterator_id: u64, key_register_id: u64, value_register_id: u64)
-                -> u64;
-            // ###########################################
-            // # Math that is not used by most contracts #
-            // ###########################################
-            pub fn alt_bn128_g1_multiexp(value_len: u64, value_ptr: u64, register_id: u64);
-            pub fn alt_bn128_g1_sum(value_len: u64, value_ptr: u64, register_id: u64);
-            pub fn alt_bn128_pairing_check(value_len: u64, value_ptr: u64) -> u64;
-            pub fn bls12381_p1_sum(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_p2_sum(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_g1_multiexp(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_g2_multiexp(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_map_fp_to_g1(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_map_fp2_to_g2(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_pairing_check(value_len: u64, value_ptr: u64) -> u64;
-            pub fn bls12381_p1_decompress(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-            pub fn bls12381_p2_decompress(value_len: u64, value_ptr: u64, register_id: u64) -> u64;
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! impl_host_function {
     ($var: ident, $name: ident) => {
         $var.func_wrap("env", stringify!($name), $crate::host_functions::$name)
@@ -260,9 +75,14 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, sha256);
         $crate::impl_host_function!($var, keccak256);
         $crate::impl_host_function!($var, keccak512);
+        $crate::impl_host_function!($var, sha3_256);
+        $crate::impl_host_function!($var, sha3_384);
+        $crate::impl_host_function!($var, sha3_512);
         $crate::impl_host_function!($var, ripemd160);
         $crate::impl_host_function!($var, ecrecover);
         $crate::impl_host_function!($var, ed25519_verify);
+        $crate::impl_host_function!($var, p256_verify);
+        $crate::impl_host_function!($var, ml_dsa_verify);
         $crate::impl_host_function!($var, dex_event);
     };
 }
@@ -659,6 +479,78 @@ pub fn keccak512(
     Ok(())
 }
 
+pub fn sha3_256(
+    mut caller: Caller<'_, RunnerData>,
+    value_len: u64,
+    value_ptr: u64,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut value_buf = vec![0; value_len as usize];
+    memory
+        .read(&caller, value_ptr as usize, &mut value_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
+    let hash = near_sdk::env::sha3_256(&value_buf);
+    caller
+        .data_mut()
+        .registers
+        .insert(register_id, hash.to_vec());
+    Ok(())
+}
+
+pub fn sha3_384(
+    mut caller: Caller<'_, RunnerData>,
+    value_len: u64,
+    value_ptr: u64,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut value_buf = vec![0; value_len as usize];
+    memory
+        .read(&caller, value_ptr as usize, &mut value_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
+    let hash = near_sdk::env::sha3_384(&value_buf);
+    caller
+        .data_mut()
+        .registers
+        .insert(register_id, hash.to_vec());
+    Ok(())
+}
+
+pub fn sha3_512(
+    mut caller: Caller<'_, RunnerData>,
+    value_len: u64,
+    value_ptr: u64,
+    register_id: u64,
+) -> Result<(), wasmi::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut value_buf = vec![0; value_len as usize];
+    memory
+        .read(&caller, value_ptr as usize, &mut value_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read value from guest memory: {err}"))
+        })?;
+    let hash = near_sdk::env::sha3_512(&value_buf);
+    caller
+        .data_mut()
+        .registers
+        .insert(register_id, hash.to_vec());
+    Ok(())
+}
+
 pub fn ripemd160(
     mut caller: Caller<'_, RunnerData>,
     value_len: u64,
@@ -698,6 +590,11 @@ pub fn ecrecover(
         return Err(wasmi::Error::new(format!(
             "Invalid recovery ID passed to ecrecover: {v}"
         )));
+    }
+    if hash_len != 32 || sig_len != 64 {
+        return Err(wasmi::Error::new(
+            "ecrecover takes a 32-byte hash and a 64-byte signature",
+        ));
     }
     let memory = caller
         .get_export("memory")
@@ -778,6 +675,102 @@ pub fn ed25519_verify(
             ))
         })?;
     if near_sdk::env::ed25519_verify(&sig_buf, &msg_buf, &pub_key_buf) {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn p256_verify(
+    caller: Caller<'_, RunnerData>,
+    signature_len: u64,
+    signature_ptr: u64,
+    message_len: u64,
+    message_ptr: u64,
+    public_key_len: u64,
+    public_key_ptr: u64,
+) -> Result<u64, wasmi::Error> {
+    if signature_len != 64 || public_key_len != 33 {
+        return Err(wasmi::Error::new(
+            "p256_verify takes a 64-byte signature and a 33-byte compressed public key",
+        ));
+    }
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut sig_buf = [0u8; 64];
+    memory
+        .read(&caller, signature_ptr as usize, &mut sig_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read signature from guest memory: {err}"))
+        })?;
+    let mut msg_buf = vec![0; message_len as usize];
+    memory
+        .read(&caller, message_ptr as usize, &mut msg_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read message from guest memory: {err}"))
+        })?;
+    let mut pub_key_buf = [0u8; 33];
+    memory
+        .read(&caller, public_key_ptr as usize, &mut pub_key_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read public key from guest memory: {err}"
+            ))
+        })?;
+    Ok(unsafe {
+        near_sdk::sys::p256_verify(
+            sig_buf.len() as u64,
+            sig_buf.as_ptr() as u64,
+            msg_buf.len() as u64,
+            msg_buf.as_ptr() as u64,
+            pub_key_buf.len() as u64,
+            pub_key_buf.as_ptr() as u64,
+        )
+    })
+}
+
+pub fn ml_dsa_verify(
+    caller: Caller<'_, RunnerData>,
+    signature_len: u64,
+    signature_ptr: u64,
+    message_len: u64,
+    message_ptr: u64,
+    public_key_len: u64,
+    public_key_ptr: u64,
+) -> Result<u64, wasmi::Error> {
+    // NEAR would abort the whole call
+    if signature_len != 3309 || public_key_len != 1952 {
+        return Err(wasmi::Error::new(
+            "ml_dsa_verify takes a 3309-byte signature and a 1952-byte public key",
+        ));
+    }
+    let memory = caller
+        .get_export("memory")
+        .and_then(|m| m.into_memory())
+        .ok_or_else(|| wasmi::Error::new("Failed to get memory"))?;
+    let mut sig_buf = [0u8; 3309];
+    memory
+        .read(&caller, signature_ptr as usize, &mut sig_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read signature from guest memory: {err}"))
+        })?;
+    let mut msg_buf = vec![0; message_len as usize];
+    memory
+        .read(&caller, message_ptr as usize, &mut msg_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!("Failed to read message from guest memory: {err}"))
+        })?;
+    let mut pub_key_buf = [0u8; 1952];
+    memory
+        .read(&caller, public_key_ptr as usize, &mut pub_key_buf)
+        .map_err(|err| {
+            wasmi::Error::new(format!(
+                "Failed to read public key from guest memory: {err}"
+            ))
+        })?;
+    if near_sdk::env::ml_dsa_verify(&sig_buf, &msg_buf, &pub_key_buf) {
         Ok(1)
     } else {
         Ok(0)

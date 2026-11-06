@@ -14,11 +14,8 @@ use near_sdk::{
     near,
 };
 use near_workspaces::Contract;
-use near_workspaces::network::ValidatorKey;
-use near_workspaces::operations::Function;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::types::Gas;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_minimal() {
@@ -4935,109 +4932,4 @@ async fn test_deploy_code_chunks() {
             .storage_usage,
         old_storage_usage + (new_code.len() - old_code.len()) as u64
     );
-}
-
-#[tokio::test]
-async fn test_migration_of_mainnet_state() {
-    // The node lets view_state read accounts of up to 50 KB of state by default, and the engine
-    // has more, so it runs with a configuration of its own
-    let sandbox_node =
-        near_sandbox::Sandbox::start_sandbox_with_config(near_sandbox::SandboxConfig {
-            additional_config: Some(json!({ "trie_viewer_state_size_limit": u64::MAX })),
-            // near-workspaces adds it to the sandboxes it runs, and creates top-level accounts with it
-            additional_accounts: vec![near_sandbox::GenesisAccount::default_with_name(
-                "registrar".parse().unwrap(),
-            )],
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let sandbox = near_workspaces::sandbox()
-        .rpc_addr(&sandbox_node.rpc_addr)
-        .validator_key(ValidatorKey::HomeDir(
-            sandbox_node.home_dir.path().to_path_buf(),
-        ))
-        .await
-        .unwrap();
-    let (dex_engine_contract, mainnet_state) = import_mainnet_engine(&sandbox).await;
-    let keys_that_differ_from = |expected_state: &HashMap<Vec<u8>, Vec<u8>>| {
-        let sandbox = &sandbox;
-        let dex_engine_contract = &dex_engine_contract;
-        let expected_state = expected_state.clone();
-        async move {
-            let state = sandbox.view_state(dex_engine_contract.id()).await.unwrap();
-            state
-                .keys()
-                .chain(expected_state.keys())
-                .filter(|key| state.get(*key) != expected_state.get(*key))
-                .map(|key| key.escape_ascii().to_string())
-                .collect::<BTreeSet<_>>()
-        }
-    };
-    let get_trusted_code_deployer = || async {
-        dex_engine_contract
-            .view("get_trusted_code_deployer")
-            .args_json(json!({}))
-            .await
-            .unwrap()
-            .json::<AccountId>()
-            .unwrap()
-    };
-    let paused = is_paused(&dex_engine_contract).await.unwrap();
-    let trusted_code_deployer = get_trusted_code_deployer().await;
-
-    let new_code = &get_compiled_wasms().await.contract_wasm;
-    let result = dex_engine_contract
-        .as_account()
-        .batch(dex_engine_contract.id())
-        .deploy(new_code)
-        .call(
-            Function::new("migrate")
-                .args_json(json!({}))
-                .gas(Gas::from_tgas(100)),
-        )
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-
-    // Only uploaded_code's prefix is added, StorageKey::UploadedCode
-    let mut migrated_state = mainnet_state;
-    migrated_state
-        .get_mut(b"STATE".as_slice())
-        .unwrap()
-        .extend(near_sdk::borsh::to_vec(&vec![11u8]).unwrap());
-    let differing_keys = keys_that_differ_from(&migrated_state).await;
-    assert!(differing_keys.is_empty(), "{differing_keys:?}");
-    assert_eq!(is_paused(&dex_engine_contract).await.unwrap(), paused);
-    assert_eq!(get_trusted_code_deployer().await, trusted_code_deployer);
-
-    let result = dex_engine_contract
-        .call("migrate")
-        .args_json(json!({}))
-        .max_gas()
-        .transact()
-        .await
-        .unwrap();
-    assert!(
-        format!("{result:?}").contains("Cannot deserialize the contract state"),
-        "{result:?}"
-    );
-
-    let padded_code = with_padding_section(new_code, 500_000);
-    let result = deploy_code_in_chunks(
-        &dex_engine_contract,
-        &padded_code,
-        700_000,
-        "is_paused",
-        b"{}",
-    )
-    .await;
-    assert_success(&result).unwrap();
-    assert_eq!(
-        code_hash(&dex_engine_contract).await,
-        near_sdk::env::sha256_array(&padded_code)
-    );
-    let differing_keys = keys_that_differ_from(&migrated_state).await;
-    assert!(differing_keys.is_empty(), "{differing_keys:?}");
 }

@@ -188,9 +188,13 @@ impl XykDex {
                             .unwrap(),
                     )
                 }
-                CurveType::MLDSA65 => {
-                    unimplemented!()
-                }
+                CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
+                    &signature.try_into().unwrap(),
+                    hash,
+                    fee_discount_signer_public_key.as_bytes()[1..]
+                        .try_into()
+                        .unwrap(),
+                ),
             },
             "Fee discount signature verification failed"
         );

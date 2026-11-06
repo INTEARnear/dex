@@ -624,9 +624,15 @@ impl OtcDex {
                             .expect("Invalid signature");
                             actual_public_key == expected_public_key.as_bytes()[1..]
                         }
-                        CurveType::MLDSA65 => {
-                            panic!("Intent not authorized: MLDSA65 keys are not supported")
-                        }
+                        CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
+                            signature
+                                .0
+                                .as_slice()
+                                .try_into()
+                                .expect("Invalid signature length"),
+                            hash,
+                            expected_public_key.as_bytes()[1..].try_into().unwrap(),
+                        ),
                     };
                     expect!(
                         is_verified,

@@ -2169,7 +2169,16 @@ async fn test_otc_nonces() {
 }
 
 #[tokio::test]
-async fn test_otc_swap() {
+async fn test_otc_swap_ed25519() {
+    check_otc_swap(KeyType::ED25519).await;
+}
+
+#[tokio::test]
+async fn test_otc_swap_ml_dsa_65() {
+    check_otc_swap(KeyType::MLDSA65).await;
+}
+
+async fn check_otc_swap(maker_key_type: KeyType) {
     // Each filled intent stores its nonce until it expires, paid from this
     let maker_otc_storage_deposit = NearToken::from_millinear(50);
     let maker_otc_near = NearToken::from_near(5);
@@ -2270,7 +2279,7 @@ async fn test_otc_swap() {
     .await
     .unwrap();
     assert_success(&result).unwrap();
-    let maker_key = SecretKey::from_random(KeyType::ED25519);
+    let maker_key = SecretKey::from_random(maker_key_type);
     let result = dex_call(
         &maker,
         "set_authorized_key",
