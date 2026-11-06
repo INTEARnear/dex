@@ -96,6 +96,7 @@ fn sign_trade_intent(
     Base64VecU8(match key.sign(&hash) {
         Signature::ED25519(sig) => sig.to_bytes().to_vec(),
         Signature::SECP256K1(sig) => <[u8; 65]>::from(sig).to_vec(),
+        Signature::MLDSA65(sig) => sig.0.to_vec(),
     })
 }
 

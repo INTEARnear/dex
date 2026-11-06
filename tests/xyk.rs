@@ -219,6 +219,7 @@ fn sign_fee_discount(
     )) {
         Signature::ED25519(signature) => signature.to_bytes().to_vec(),
         Signature::SECP256K1(signature) => <[u8; 65]>::from(signature).to_vec(),
+        Signature::MLDSA65(signature) => signature.0.to_vec(),
     };
     SignedFeeDiscount {
         discount,
