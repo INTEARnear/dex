@@ -96,9 +96,7 @@ impl DexEngine {
             near_sdk::env::predecessor_account_id() == self.trusted_code_deployer,
             "Only the trusted code deployer can deploy dex code"
         );
-        // SAFETY: can only be deployed by trusted callers. Currently only slimedragon.near
-        // can deploy, later another smart contract will validate and deploy permissionlessly.
-        if let Err(err) = unsafe { Module::new_unchecked(&Engine::default(), &code_base64.0) } {
+        if let Err(err) = Module::new(&Engine::default(), &code_base64.0) {
             near_sdk::env::panic_str(&format!("Invalid dex code: {err}"));
         }
         self.dex_codes.insert(dex_id.clone(), code_base64.0);
