@@ -130,6 +130,7 @@ impl RegisterAssetsContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

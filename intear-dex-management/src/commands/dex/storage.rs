@@ -231,7 +231,7 @@ impl DepositContext {
                     steps: vec![format!("Deposit {description}")],
                     function_calls: vec![FunctionCall {
                         method_name: "dex_storage_deposit",
-                        args: json!({ "dex_id": dex_id }),
+                        args: json!({ "dex_id": dex_id }).into(),
                         deposit: amount,
                         gas: ENGINE_STORAGE_DEPOSIT_GAS,
                     }],
@@ -242,6 +242,7 @@ impl DepositContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))
@@ -362,7 +363,7 @@ impl WithdrawContext {
                     steps: vec![format!("Withdraw {description}")],
                     function_calls: vec![FunctionCall {
                         method_name: "dex_storage_withdraw",
-                        args: json!({ "dex_id": dex_id, "amount": amount_arg }),
+                        args: json!({ "dex_id": dex_id, "amount": amount_arg }).into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas: DEX_STORAGE_WITHDRAW_GAS,
                     }],
@@ -373,6 +374,7 @@ impl WithdrawContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

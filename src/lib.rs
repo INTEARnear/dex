@@ -6,6 +6,7 @@ pub mod call_events;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
+pub mod migration;
 pub mod rescue;
 pub mod storage_management;
 
@@ -19,10 +20,11 @@ use intear_dex_types::{
     IntearDexEvent, Operation, ReferralFees, SwapRequestAmount, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, IntoStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
+    AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
+    PanicOnDefault, Promise, PromiseOrValue,
     json_types::{Base64VecU8, U128},
     near,
-    store::{IterableMap, LookupMap},
+    store::{IterableMap, LazyOption, LookupMap},
 };
 
 pub type AssetBalances = IterableMap<AssetId, U128>;
@@ -65,6 +67,9 @@ pub struct DexEngine {
     /// The only account that can deploy dex code. Dex code isn't
     /// validated when it's loaded, so it must come from a trusted source.
     trusted_code_deployer: AccountId,
+    /// New engine code that's uploaded in chunks, since it may not
+    /// fit in one transaction.
+    uploaded_code: LazyOption<Vec<u8>>,
 }
 
 #[derive(BorshStorageKey)]
@@ -87,6 +92,7 @@ enum StorageKey {
     DexBalancesOf {
         dex_id: DexId,
     },
+    UploadedCode,
 }
 
 enum CallType<'a> {
@@ -283,7 +289,60 @@ impl DexEngine {
             total_in_custody: IterableMap::new(StorageKey::ContractTrackedBalance),
             paused: false,
             trusted_code_deployer,
+            uploaded_code: LazyOption::new(StorageKey::UploadedCode, None),
         }
+    }
+
+    /// Upload a chunk of new engine code at `offset`, replacing everything
+    /// after it. `code_hash_so_far` is the hash of the code up to the chunk's end.
+    #[private]
+    pub fn store_code_chunk(
+        &mut self,
+        #[serializer(borsh)] offset: u32,
+        #[serializer(borsh)] chunk: Vec<u8>,
+        #[serializer(borsh)] code_hash_so_far: CryptoHash,
+    ) {
+        let code = self.uploaded_code.get_mut().get_or_insert_with(Vec::new);
+        expect!(
+            offset as usize <= code.len(),
+            "Only {} bytes of the code are stored, so a chunk can't start at byte {offset}",
+            code.len()
+        );
+        code.truncate(offset as usize);
+        code.extend(chunk);
+        expect!(
+            near_sdk::env::sha256_array(code) == code_hash_so_far,
+            "The code stored so far doesn't have the hash it should have"
+        );
+    }
+
+    /// Upload the last chunk and deploy the code. `then_call` is called with
+    /// `then_call_args` in the same receipt, so if the new code doesn't compile
+    /// or the call fails, the old code stays and `then_c.
+    #[private]
+    pub fn deploy_code_chunks(
+        &mut self,
+        #[serializer(borsh)] offset: u32,
+        #[serializer(borsh)] last_chunk: Vec<u8>,
+        #[serializer(borsh)] code_hash: CryptoHash,
+        #[serializer(borsh)] then_call: String,
+        #[serializer(borsh)] then_call_args: Vec<u8>,
+    ) -> Promise {
+        self.store_code_chunk(offset, last_chunk, code_hash);
+        let code = self
+            .uploaded_code
+            .get_mut()
+            .take()
+            .expect("The code was just stored");
+        Promise::new(near_sdk::env::current_account_id())
+            .deploy_contract(code)
+            .function_call_weight(
+                then_call,
+                then_call_args,
+                NearToken::from_yoctonear(0),
+                Gas::from_gas(0),
+                GasWeight(1),
+            )
     }
 
     /// Transfer the permission to deploy dex code to another account

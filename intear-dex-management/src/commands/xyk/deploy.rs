@@ -195,6 +195,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                         .then(|| format!("Next, initialize it: {init_command}")),
                 }),
             },
+            deploy_code: None,
         })
     })
 }

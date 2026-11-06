@@ -201,7 +201,8 @@ pub fn plan_code_deployment(
         args: json!({
             "last_part_of_id": dex_id.id,
             "code_base64": Base64VecU8(code.to_vec()),
-        }),
+        })
+        .into(),
         deposit: ONE_YOCTO_NEAR,
         gas: DEPLOY_DEX_CODE_GAS,
     });

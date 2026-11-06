@@ -317,7 +317,8 @@ impl WithdrawContext {
                                 },
                                 &[],
                             )?],
-                        }),
+                        })
+                        .into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas,
                     }],
@@ -330,6 +331,7 @@ impl WithdrawContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

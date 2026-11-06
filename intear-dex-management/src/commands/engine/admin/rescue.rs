@@ -198,7 +198,8 @@ impl RescueReceiverContext {
                             "asset_id": asset_id,
                             "amount": requested_amount,
                             "to": receiver_id,
-                        }),
+                        })
+                        .into(),
                         deposit: NearToken::from_yoctonear(0),
                         gas: RESCUE_GAS,
                     }],
@@ -209,6 +210,7 @@ impl RescueReceiverContext {
                         dex_id: None,
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

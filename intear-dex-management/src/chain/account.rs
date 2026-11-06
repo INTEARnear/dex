@@ -44,3 +44,32 @@ pub fn view_account(
         }),
     }
 }
+
+pub fn view_code_size(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    account_id: &AccountId,
+) -> color_eyre::eyre::Result<usize> {
+    let response = network_config
+        .json_rpc_client()
+        .blocking_call(RpcQueryRequest {
+            block_reference: block_reference.clone(),
+            request: QueryRequest::ViewCode {
+                account_id: account_id.clone(),
+            },
+        })
+        .map_err(color_eyre::eyre::Report::new)
+        .wrap_err_with(|| {
+            format!(
+                "Couldn't read the code of {account_id} (RPC {})",
+                network_config.rpc_url
+            )
+        })?;
+    match response.kind {
+        QueryResponseKind::ViewCode(code) => Ok(code.code.len()),
+        _ => Err(eyre!(
+            "RPC {} answered the code lookup of {account_id} with something other than code",
+            network_config.rpc_url
+        )),
+    }
+}

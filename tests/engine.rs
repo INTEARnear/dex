@@ -13,7 +13,12 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near,
 };
-use std::collections::HashMap;
+use near_workspaces::Contract;
+use near_workspaces::network::ValidatorKey;
+use near_workspaces::operations::Function;
+use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::types::Gas;
+use std::collections::{BTreeSet, HashMap};
 
 #[tokio::test]
 async fn test_minimal() {
@@ -4691,4 +4696,348 @@ async fn test_swap_advanced() {
     assert_ft_balance(&user1, ft2.clone(), better_amount_out)
         .await
         .unwrap();
+}
+
+async fn code_hash(contract: &Contract) -> [u8; 32] {
+    let near_workspaces::ContractState::LocalHash(code_hash) =
+        contract.view_account().await.unwrap().contract_state
+    else {
+        panic!("{} should have code of its own", contract.id());
+    };
+    code_hash.0
+}
+
+/// Adds a custom section to make the code larger
+fn with_padding_section(code: &[u8], padding_length: usize) -> Vec<u8> {
+    let section_name = b"padding";
+    let mut padding_section = vec![section_name.len() as u8];
+    padding_section.extend(section_name);
+    padding_section.extend(vec![0; padding_length]);
+    let custom_section_id = 0;
+    let mut padded_code = [code, &[custom_section_id]].concat();
+    // The section's length in LEB128
+    let mut section_length = padding_section.len();
+    loop {
+        let low_bits = (section_length & 0x7f) as u8;
+        section_length >>= 7;
+        if section_length == 0 {
+            padded_code.push(low_bits);
+            break;
+        }
+        padded_code.push(low_bits | 0x80);
+    }
+    padded_code.extend(padding_section);
+    padded_code
+}
+
+async fn deploy_code_in_chunks(
+    dex_engine_contract: &Contract,
+    code: &[u8],
+    chunk_size: usize,
+    then_call: &str,
+    then_call_args: &[u8],
+) -> ExecutionFinalResult {
+    let chunks = code.chunks(chunk_size).collect::<Vec<_>>();
+    let (last_chunk, chunks_before_last) = chunks.split_last().unwrap();
+    let mut offset = 0;
+    for chunk in chunks_before_last {
+        let end = offset + chunk.len();
+        let result = dex_engine_contract
+            .call("store_code_chunk")
+            .args_borsh((
+                offset as u32,
+                chunk.to_vec(),
+                near_sdk::env::sha256_array(&code[..end]),
+            ))
+            .max_gas()
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        offset = end;
+    }
+    dex_engine_contract
+        .call("deploy_code_chunks")
+        .args_borsh((
+            offset as u32,
+            last_chunk.to_vec(),
+            near_sdk::env::sha256_array(code),
+            then_call.to_string(),
+            then_call_args.to_vec(),
+        ))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_deploy_code_chunks() {
+    let TestContext {
+        dex_engine_contract,
+        user1,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        register_assets_for_all: true,
+        ..Default::default()
+    })
+    .await;
+    let old_code = &get_compiled_wasms().await.contract_wasm;
+    let new_code = with_padding_section(old_code, 500_000);
+    assert!(new_code.len() > 1_572_864);
+    let chunk_size = 700_000;
+    let [first_chunk, second_chunk, last_chunk] =
+        new_code.chunks(chunk_size).collect::<Vec<_>>()[..]
+    else {
+        panic!("The new code should take 3 chunks");
+    };
+    let new_code_hash = near_sdk::env::sha256_array(&new_code);
+    let hash_up_to = |end: usize| near_sdk::env::sha256_array(&new_code[..end]);
+    let store_chunk = |offset: usize, chunk: &[u8], code_hash_so_far: [u8; 32]| {
+        dex_engine_contract
+            .call("store_code_chunk")
+            .args_borsh((offset as u32, chunk.to_vec(), code_hash_so_far))
+            .max_gas()
+            .transact()
+    };
+    let deploy = |offset: usize, last_chunk: &[u8], code_hash: [u8; 32], then_call: &str| {
+        dex_engine_contract
+            .call("deploy_code_chunks")
+            .args_borsh((
+                offset as u32,
+                last_chunk.to_vec(),
+                code_hash,
+                then_call.to_string(),
+                b"{}".to_vec(),
+            ))
+            .max_gas()
+            .transact()
+    };
+    let old_code_hash = code_hash(&dex_engine_contract).await;
+    let old_storage_usage = dex_engine_contract
+        .view_account()
+        .await
+        .unwrap()
+        .storage_usage;
+
+    // Only the engine's account can store chunks
+    let result = user1
+        .call(dex_engine_contract.id(), "store_code_chunk")
+        .args_borsh((0u32, first_chunk.to_vec(), hash_up_to(chunk_size)))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("is private"), "{result:?}");
+
+    // A chunk with a wrong hash isn't stored
+    let result = store_chunk(0, first_chunk, [0; 32]).await.unwrap();
+    assert!(
+        format!("{result:?}")
+            .contains("The code stored so far doesn't have the hash it should have"),
+        "{result:?}"
+    );
+    let result = store_chunk(chunk_size, second_chunk, hash_up_to(2 * chunk_size))
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}")
+            .contains("Only 0 bytes of the code are stored, so a chunk can't start at byte 700000"),
+        "{result:?}"
+    );
+
+    // A chunk sent again replaces itself
+    for (offset, chunk) in [
+        (0, first_chunk),
+        (chunk_size, second_chunk),
+        (chunk_size, second_chunk),
+    ] {
+        let result = store_chunk(offset, chunk, hash_up_to(offset + chunk.len()))
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+
+    // Code with a wrong hash isn't deployed
+    let result = deploy(2 * chunk_size, last_chunk, [0; 32], "is_paused")
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}")
+            .contains("The code stored so far doesn't have the hash it should have"),
+        "{result:?}"
+    );
+
+    // If the call fails, the old code stays, and the uploaded code is gone
+    let result = deploy(2 * chunk_size, last_chunk, new_code_hash, "no_such_method")
+        .await
+        .unwrap();
+    assert!(result.is_failure(), "{result:?}");
+    assert_eq!(code_hash(&dex_engine_contract).await, old_code_hash);
+    let result = deploy(2 * chunk_size, last_chunk, new_code_hash, "is_paused")
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains(
+            "Only 0 bytes of the code are stored, so a chunk can't start at byte 1400000"
+        ),
+        "{result:?}"
+    );
+
+    // NEAR deploys code that doesn't compile, but the call fails
+    let broken_code = [b"\0asm".as_slice(), &[0xff; 100]].concat();
+    let broken_code_hash = near_sdk::env::sha256_array(&broken_code);
+    let result = deploy(0, &broken_code, broken_code_hash, "is_paused")
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("CompilationError"),
+        "{result:?}"
+    );
+    assert_eq!(code_hash(&dex_engine_contract).await, old_code_hash);
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+
+    // Offset 0 starts over, and then_call gets then_call_args
+    let result = store_chunk(0, &broken_code, broken_code_hash)
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        &new_code,
+        chunk_size,
+        "storage_balance_of",
+        json!({ "account_id": user1.id() }).to_string().as_bytes(),
+    )
+    .await;
+    assert_success(&result).unwrap();
+    println!(
+        "Deployed {} bytes from chunks of {chunk_size} bytes with {:.1} TGas",
+        new_code.len(),
+        result.total_gas_burnt.as_gas() as f64 / 1e12
+    );
+    let storage_balance = get_storage_balance(&dex_engine_contract, user1.id())
+        .await
+        .unwrap();
+    assert!(storage_balance.is_some());
+    assert_eq!(
+        result.json::<near_sdk::serde_json::Value>().unwrap(),
+        near_sdk::serde_json::to_value(storage_balance).unwrap()
+    );
+    assert_eq!(code_hash(&dex_engine_contract).await, new_code_hash);
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+    // Nothing stays in storage
+    assert_eq!(
+        dex_engine_contract
+            .view_account()
+            .await
+            .unwrap()
+            .storage_usage,
+        old_storage_usage + (new_code.len() - old_code.len()) as u64
+    );
+}
+
+#[tokio::test]
+async fn test_migration_of_mainnet_state() {
+    // The node lets view_state read accounts of up to 50 KB of state by default, and the engine
+    // has more, so it runs with a configuration of its own
+    let sandbox_node =
+        near_sandbox::Sandbox::start_sandbox_with_config(near_sandbox::SandboxConfig {
+            additional_config: Some(json!({ "trie_viewer_state_size_limit": u64::MAX })),
+            // near-workspaces adds it to the sandboxes it runs, and creates top-level accounts with it
+            additional_accounts: vec![near_sandbox::GenesisAccount::default_with_name(
+                "registrar".parse().unwrap(),
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sandbox = near_workspaces::sandbox()
+        .rpc_addr(&sandbox_node.rpc_addr)
+        .validator_key(ValidatorKey::HomeDir(
+            sandbox_node.home_dir.path().to_path_buf(),
+        ))
+        .await
+        .unwrap();
+    let (dex_engine_contract, mainnet_state) = import_mainnet_engine(&sandbox).await;
+    let keys_that_differ_from = |expected_state: &HashMap<Vec<u8>, Vec<u8>>| {
+        let sandbox = &sandbox;
+        let dex_engine_contract = &dex_engine_contract;
+        let expected_state = expected_state.clone();
+        async move {
+            let state = sandbox.view_state(dex_engine_contract.id()).await.unwrap();
+            state
+                .keys()
+                .chain(expected_state.keys())
+                .filter(|key| state.get(*key) != expected_state.get(*key))
+                .map(|key| key.escape_ascii().to_string())
+                .collect::<BTreeSet<_>>()
+        }
+    };
+    let get_trusted_code_deployer = || async {
+        dex_engine_contract
+            .view("get_trusted_code_deployer")
+            .args_json(json!({}))
+            .await
+            .unwrap()
+            .json::<AccountId>()
+            .unwrap()
+    };
+    let paused = is_paused(&dex_engine_contract).await.unwrap();
+    let trusted_code_deployer = get_trusted_code_deployer().await;
+
+    let new_code = &get_compiled_wasms().await.contract_wasm;
+    let result = dex_engine_contract
+        .as_account()
+        .batch(dex_engine_contract.id())
+        .deploy(new_code)
+        .call(
+            Function::new("migrate")
+                .args_json(json!({}))
+                .gas(Gas::from_tgas(100)),
+        )
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    // Only uploaded_code's prefix is added, StorageKey::UploadedCode
+    let mut migrated_state = mainnet_state;
+    migrated_state
+        .get_mut(b"STATE".as_slice())
+        .unwrap()
+        .extend(near_sdk::borsh::to_vec(&vec![11u8]).unwrap());
+    let differing_keys = keys_that_differ_from(&migrated_state).await;
+    assert!(differing_keys.is_empty(), "{differing_keys:?}");
+    assert_eq!(is_paused(&dex_engine_contract).await.unwrap(), paused);
+    assert_eq!(get_trusted_code_deployer().await, trusted_code_deployer);
+
+    let result = dex_engine_contract
+        .call("migrate")
+        .args_json(json!({}))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("Cannot deserialize the contract state"),
+        "{result:?}"
+    );
+
+    let padded_code = with_padding_section(new_code, 500_000);
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        &padded_code,
+        700_000,
+        "is_paused",
+        b"{}",
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert_eq!(
+        code_hash(&dex_engine_contract).await,
+        near_sdk::env::sha256_array(&padded_code)
+    );
+    let differing_keys = keys_that_differ_from(&migrated_state).await;
+    assert!(differing_keys.is_empty(), "{differing_keys:?}");
 }

@@ -29,6 +29,10 @@ pub enum PreflightError {
     #[error("{ENGINE_ACCOUNT_ID} isn't paused")]
     NotPaused,
     #[error(
+        "{ENGINE_ACCOUNT_ID} has {available} that it doesn't owe anyone, but the storage this transaction adds needs {needed}"
+    )]
+    UntrackedNearShort { available: String, needed: String },
+    #[error(
         "{account_id} can spend {available} from its wallet, but this transaction needs up to {needed}"
     )]
     InsufficientWalletBalance {
@@ -258,6 +262,9 @@ impl PreflightError {
                 CAN_PAUSE.join(" or ")
             )),
             Self::NotAllowedToPause { .. } => Some(format!("Sign with {}", CAN_PAUSE.join(" or "))),
+            Self::UntrackedNearShort { .. } => Some(format!(
+                "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
+            )),
             Self::AssetNotRegisteredForSigner {
                 register_command, ..
             } => Some(format!("Register it first:\n    {register_command}")),

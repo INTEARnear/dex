@@ -87,7 +87,8 @@ impl InitContext {
                         "args": Base64VecU8(Vec::new()),
                         "attached_assets": {},
                         "referrer": null,
-                    }),
+                    })
+                    .into(),
                     deposit: ONE_YOCTO_NEAR,
                     gas: INIT_GAS,
                 });
@@ -102,6 +103,7 @@ impl InitContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

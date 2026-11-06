@@ -520,7 +520,7 @@ impl AddMaxSlippageContext {
                 }
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
-                    args: json!({ "operations": operations }),
+                    args: json!({ "operations": operations }).into(),
                     deposit: if storage_near.is_zero() {
                         ONE_YOCTO_NEAR
                     } else {
@@ -539,6 +539,7 @@ impl AddMaxSlippageContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))
@@ -842,7 +843,8 @@ impl RemoveMaxSlippageContext {
                             },
                             &[],
                         )?],
-                    }),
+                    })
+                    .into(),
                     deposit: ONE_YOCTO_NEAR,
                     gas: REMOVE_LIQUIDITY_GAS,
                 });
@@ -857,6 +859,7 @@ impl RemoveMaxSlippageContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

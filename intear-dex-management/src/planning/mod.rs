@@ -11,7 +11,7 @@ use near_cli_rs::commands::{ActionContext, PrepopulatedTransaction};
 use near_cli_rs::config::{Config, NetworkConfig};
 use near_cli_rs::transaction_signature_options::SignedTransactionOrSignedDelegateAction;
 use near_primitives::gas::Gas;
-use near_primitives::transaction::{Action, FunctionCallAction};
+use near_primitives::transaction::{Action, DeployContractAction, FunctionCallAction};
 use near_primitives::types::{AccountId, BlockId, BlockReference, Finality};
 use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
@@ -39,9 +39,29 @@ pub fn register_assets_gas(asset_count: usize) -> color_eyre::eyre::Result<Gas> 
 
 pub struct FunctionCall {
     pub method_name: &'static str,
-    pub args: serde_json::Value,
+    pub args: CallArgs,
     pub deposit: NearToken,
     pub gas: Gas,
+}
+
+pub enum CallArgs {
+    Json(serde_json::Value),
+    Borsh(Vec<u8>),
+}
+
+impl From<serde_json::Value> for CallArgs {
+    fn from(args: serde_json::Value) -> Self {
+        Self::Json(args)
+    }
+}
+
+impl CallArgs {
+    fn bytes(&self) -> color_eyre::eyre::Result<Vec<u8>> {
+        Ok(match self {
+            Self::Json(args) => serde_json::to_vec(args)?,
+            Self::Borsh(args) => args.clone(),
+        })
+    }
 }
 
 /// One transaction to one contract
@@ -50,6 +70,8 @@ pub struct TransactionPlan {
     /// What the transaction does, one plain sentence per step, shown before
     /// signing
     pub steps: Vec<String>,
+    /// Deployed before the function calls
+    pub deploy_code: Option<Vec<u8>>,
     pub function_calls: Vec<FunctionCall>,
     pub expected_outcome: ExpectedOutcome,
 }
@@ -202,7 +224,7 @@ impl StorageTopUp {
     pub fn function_call(&self) -> FunctionCall {
         FunctionCall {
             method_name: "storage_deposit",
-            args: serde_json::json!({}),
+            args: serde_json::json!({}).into(),
             deposit: self.deposit,
             gas: ENGINE_STORAGE_DEPOSIT_GAS,
         }
@@ -287,7 +309,7 @@ impl DexStorageTopUp {
     pub fn function_call(&self) -> FunctionCall {
         FunctionCall {
             method_name: "dex_storage_deposit",
-            args: serde_json::json!({ "dex_id": self.dex_id }),
+            args: serde_json::json!({ "dex_id": self.dex_id }).into(),
             deposit: self.deposit,
             gas: ENGINE_STORAGE_DEPOSIT_GAS,
         }
@@ -405,7 +427,7 @@ impl Preflight {
             };
             function_calls.push(FunctionCall {
                 method_name: "register_assets",
-                args: serde_json::json!({ "asset_ids": asset_ids, "for": register_for }),
+                args: serde_json::json!({ "asset_ids": asset_ids, "for": register_for }).into(),
                 deposit: ONE_YOCTO_NEAR,
                 gas: register_assets_gas(asset_ids.len())?,
             });
@@ -506,17 +528,21 @@ fn prepopulated_transaction(
         }
         .into_report());
     }
-    let actions = plan
-        .function_calls
-        .iter()
-        .map(|call| {
+    let deploy_action = plan.deploy_code.as_ref().map(|code| {
+        Ok(Action::DeployContract(DeployContractAction {
+            code: code.clone(),
+        }))
+    });
+    let actions = deploy_action
+        .into_iter()
+        .chain(plan.function_calls.iter().map(|call| {
             Ok(Action::FunctionCall(Box::new(FunctionCallAction {
                 method_name: call.method_name.to_string(),
-                args: serde_json::to_vec(&call.args)?,
+                args: call.args.bytes()?,
                 gas: call.gas,
                 deposit: call.deposit,
             })))
-        })
+        }))
         .collect::<color_eyre::eyre::Result<Vec<_>>>()?;
     Ok(PrepopulatedTransaction {
         signer_id: preflight.signer_id.clone(),
@@ -536,10 +562,13 @@ fn print_summary(plan: &TransactionPlan, preflight: &Preflight) {
         preflight.signer_id, plan.receiver_id
     )];
     lines.extend(plan.steps.iter().cloned());
-    let actions = plan
-        .function_calls
-        .iter()
-        .map(|call| {
+    let deploy_action = plan
+        .deploy_code
+        .as_ref()
+        .map(|code| format!("deploy ({} bytes of code)", code.len()));
+    let actions = deploy_action
+        .into_iter()
+        .chain(plan.function_calls.iter().map(|call| {
             let deposit = if call.deposit == ONE_YOCTO_NEAR {
                 "1 yoctoNEAR".to_string()
             } else {
@@ -550,7 +579,7 @@ fn print_summary(plan: &TransactionPlan, preflight: &Preflight) {
                 call.method_name,
                 call.gas.as_teragas()
             )
-        })
+        }))
         .collect::<Vec<_>>();
     lines.push(format!("Actions: {}", actions.join(", ")));
     tracing::info!("{}", lines.join("\n│  "));
@@ -558,8 +587,8 @@ fn print_summary(plan: &TransactionPlan, preflight: &Preflight) {
 
 /// near-cli-rs prints the transaction it is about to sign with every
 /// argument in full, which for a deploy is all of the code as base64. This
-/// prints the same with long strings shortened, and main hides near-cli-rs's
-/// copy.
+/// prints the same with long strings and borsh arguments shortened, and main
+/// hides near-cli-rs's copy.
 fn print_unsigned_transaction(
     plan: &TransactionPlan,
     preflight: &Preflight,
@@ -575,19 +604,29 @@ fn print_unsigned_transaction(
             _ => {}
         }
     }
-    let actions = plan
-        .function_calls
-        .iter()
-        .map(|call| {
-            let mut shown_args = call.args.clone();
-            shorten_long_strings(&mut shown_args);
+    let deploy_action = plan.deploy_code.as_ref().map(|code| {
+        Ok(Action::DeployContract(DeployContractAction {
+            code: code.clone(),
+        }))
+    });
+    let actions = deploy_action
+        .into_iter()
+        .chain(plan.function_calls.iter().map(|call| {
+            let shown_args = match &call.args {
+                CallArgs::Json(args) => {
+                    let mut shown_args = args.clone();
+                    shorten_long_strings(&mut shown_args);
+                    serde_json::to_vec(&shown_args)?
+                }
+                CallArgs::Borsh(args) => format!("<{} bytes of borsh>", args.len()).into_bytes(),
+            };
             Ok(Action::FunctionCall(Box::new(FunctionCallAction {
                 method_name: call.method_name.to_string(),
-                args: serde_json::to_vec(&shown_args)?,
+                args: shown_args,
                 gas: call.gas,
                 deposit: call.deposit,
             })))
-        })
+        }))
         .collect::<color_eyre::eyre::Result<Vec<_>>>()?;
     let shown_transaction = PrepopulatedTransaction {
         signer_id: preflight.signer_id.clone(),

@@ -138,7 +138,7 @@ fn pause_action_context(
             steps: vec![step],
             function_calls: vec![FunctionCall {
                 method_name,
-                args: json!({}),
+                args: json!({}).into(),
                 deposit: ONE_YOCTO_NEAR,
                 gas: PAUSE_GAS,
             }],
@@ -149,6 +149,7 @@ fn pause_action_context(
                 dex_id: None,
                 deployment: None,
             },
+            deploy_code: None,
         })
     })
 }

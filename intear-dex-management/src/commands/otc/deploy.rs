@@ -192,6 +192,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                     }),
                 }),
             },
-        })
+        deploy_code: None,
+})
     })
 }

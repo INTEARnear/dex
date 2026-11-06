@@ -370,7 +370,8 @@ pub fn dex_call_paying_for_storage(
                 method_name: "execute_operations",
                 args: serde_json::json!({
                     "operations": [planning::dex_call_operation(dex_id, method, args, &[])?],
-                }),
+                })
+                .into(),
                 deposit: ONE_YOCTO_NEAR,
                 gas,
             }],
@@ -396,7 +397,8 @@ pub fn dex_call_paying_for_storage(
                 args,
                 &[(AssetId::Near, storage_near.as_yoctonear())],
             )?],
-        }),
+        })
+        .into(),
         deposit: storage_near,
         gas,
     });

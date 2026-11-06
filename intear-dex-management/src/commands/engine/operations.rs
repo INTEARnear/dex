@@ -254,7 +254,7 @@ impl RunContext {
                 }
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
-                    args: execute_operations_args.clone(),
+                    args: execute_operations_args.clone().into(),
                     deposit,
                     gas,
                 });
@@ -275,6 +275,7 @@ impl RunContext {
                         },
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

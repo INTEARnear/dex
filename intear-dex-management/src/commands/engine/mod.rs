@@ -9,6 +9,7 @@ pub mod operations;
 pub mod pause;
 pub mod storage;
 pub mod transfer;
+pub mod upgrade;
 pub mod withdraw;
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -72,4 +73,9 @@ pub enum EngineAction {
     ))]
     /// Trusted code deployer, custody and rescue of untracked assets
     Admin(self::admin::AdminCommands),
+    #[strum_discriminants(strum(
+        message = "upgrade   - Build the engine reproducibly and deploy it to dex.intear.near"
+    ))]
+    /// Build the engine reproducibly and deploy it to dex.intear.near
+    Upgrade(self::upgrade::UpgradeCommands),
 }

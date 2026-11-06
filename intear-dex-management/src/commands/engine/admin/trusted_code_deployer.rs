@@ -85,7 +85,7 @@ impl SetTrustedCodeDeployerContext {
                     )],
                     function_calls: vec![FunctionCall {
                         method_name: "set_trusted_code_deployer",
-                        args: json!({ "account_id": new_trusted_code_deployer }),
+                        args: json!({ "account_id": new_trusted_code_deployer }).into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas: SET_TRUSTED_CODE_DEPLOYER_GAS,
                     }],
@@ -98,6 +98,7 @@ impl SetTrustedCodeDeployerContext {
                         dex_id: None,
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

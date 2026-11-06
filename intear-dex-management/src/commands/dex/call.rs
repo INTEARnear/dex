@@ -130,7 +130,8 @@ impl CallContext {
                             "args": Base64VecU8(args.clone()),
                             "attached_assets": attached_assets,
                             "referrer": null,
-                        }),
+                        })
+                        .into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas,
                     }],
@@ -141,6 +142,7 @@ impl CallContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

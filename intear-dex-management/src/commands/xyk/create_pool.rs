@@ -700,7 +700,8 @@ impl PoolFeesContext {
                             },
                             &attached_assets,
                         )?],
-                    }),
+                    })
+                    .into(),
                     deposit: storage_near,
                     gas: CREATE_POOL_GAS,
                 });
@@ -715,6 +716,7 @@ impl PoolFeesContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

@@ -120,7 +120,7 @@ impl DepositContext {
                             ));
                             function_calls.push(FunctionCall {
                                 method_name: "register_assets",
-                                args: json!({ "asset_ids": [AssetId::Near] }),
+                                args: json!({ "asset_ids": [AssetId::Near] }).into(),
                                 deposit: ONE_YOCTO_NEAR,
                                 gas: planning::register_assets_gas(1)?,
                             });
@@ -130,7 +130,7 @@ impl DepositContext {
                         ));
                         function_calls.push(FunctionCall {
                             method_name: "deposit_near",
-                            args: json!({}),
+                            args: json!({}).into(),
                             deposit: NearToken::from_yoctonear(raw_amount),
                             gas: DEPOSIT_NEAR_GAS,
                         });
@@ -145,6 +145,7 @@ impl DepositContext {
                                 dex_id: None,
                                 deployment: None,
                             },
+                            deploy_code: None,
                         })
                     }
                     AssetId::Nep141(token_id) => {
@@ -204,7 +205,7 @@ impl DepositContext {
                             ));
                             function_calls.push(FunctionCall {
                                 method_name: "storage_deposit",
-                                args: json!({ "account_id": ENGINE_ACCOUNT_ID, "registration_only": true }),
+                                args: json!({ "account_id": ENGINE_ACCOUNT_ID, "registration_only": true }).into(),
                                 deposit: minimum_deposit,
                                 gas: TOKEN_STORAGE_DEPOSIT_GAS,
                             });
@@ -218,7 +219,8 @@ impl DepositContext {
                                 "receiver_id": ENGINE_ACCOUNT_ID,
                                 "amount": U128(raw_amount),
                                 "msg": "",
-                            }),
+                            })
+                            .into(),
                             deposit: ONE_YOCTO_NEAR,
                             gas: FT_TRANSFER_CALL_GAS,
                         });
@@ -238,6 +240,7 @@ impl DepositContext {
                                 dex_id: None,
                                 deployment: None,
                             },
+                            deploy_code: None,
                         })
                     }
                     AssetId::Nep171(_, _) | AssetId::Nep245(_, _) => {

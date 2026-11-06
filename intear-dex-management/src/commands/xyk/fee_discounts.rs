@@ -280,7 +280,8 @@ fn change_fee_discount_signer_action_context(
                 })?),
                 "attached_assets": {},
                 "referrer": null,
-            }),
+            })
+            .into(),
             deposit: ONE_YOCTO_NEAR,
             gas: SET_FEE_DISCOUNT_SIGNER_GAS,
         }];
@@ -298,6 +299,7 @@ fn change_fee_discount_signer_action_context(
                 dex_id: Some(dex_id.clone()),
                 deployment: None,
             },
+            deploy_code: None,
         })
     })
 }

@@ -154,7 +154,8 @@ impl WithdrawContext {
                                 to: to.clone(),
                                 rescue_address: None,
                             }],
-                        }),
+                        })
+                        .into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas: WITHDRAW_GAS,
                     }],
@@ -165,6 +166,7 @@ impl WithdrawContext {
                         dex_id: None,
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

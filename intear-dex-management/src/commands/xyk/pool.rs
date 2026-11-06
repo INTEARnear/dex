@@ -312,7 +312,8 @@ impl LockContext {
                                 &LockPoolArgs { pool_id },
                                 &[],
                             )?],
-                        }),
+                        })
+                        .into(),
                         deposit: ONE_YOCTO_NEAR,
                         gas: LOCK_POOL_GAS,
                     }],
@@ -323,6 +324,7 @@ impl LockContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))
@@ -490,6 +492,7 @@ impl EditFeesContext {
                         dex_id: Some(dex_id.clone()),
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

@@ -201,7 +201,7 @@ impl TransferReceiverContext {
                 });
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
-                    args: json!({ "operations": operations }),
+                    args: json!({ "operations": operations }).into(),
                     deposit: ONE_YOCTO_NEAR,
                     gas: TRANSFER_GAS,
                 });
@@ -216,6 +216,7 @@ impl TransferReceiverContext {
                         dex_id: None,
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))

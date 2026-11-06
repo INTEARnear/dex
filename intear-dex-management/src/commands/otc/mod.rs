@@ -153,7 +153,7 @@ fn with_storage_deposit(
     all_operations.extend(operations);
     function_calls.push(FunctionCall {
         method_name: "execute_operations",
-        args: json!({ "operations": all_operations }),
+        args: json!({ "operations": all_operations }).into(),
         deposit,
         gas: gas
             .checked_add(OTC_STORAGE_DEPOSIT_GAS)
@@ -221,7 +221,7 @@ pub fn otc_call_paying_for_storage(
             steps.push(action_step);
             function_calls.push(FunctionCall {
                 method_name: "execute_operations",
-                args: json!({ "operations": [operation] }),
+                args: json!({ "operations": [operation] }).into(),
                 deposit: ONE_YOCTO_NEAR,
                 gas: OTC_CALL_GAS,
             });

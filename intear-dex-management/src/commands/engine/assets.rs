@@ -271,7 +271,8 @@ impl RegisterContext {
                 ));
                 function_calls.push(FunctionCall {
                     method_name: "register_assets",
-                    args: json!({ "asset_ids": unregistered_asset_ids, "for": register_for }),
+                    args: json!({ "asset_ids": unregistered_asset_ids, "for": register_for })
+                        .into(),
                     deposit: ONE_YOCTO_NEAR,
                     gas,
                 });
@@ -288,6 +289,7 @@ impl RegisterContext {
                         dex_id: None,
                         deployment: None,
                     },
+                    deploy_code: None,
                 })
             },
         )))
