@@ -391,7 +391,7 @@ mod deprecation_warning_workaround {
             oracle_key: PublicKeyHandle,
             dex_id: DexId,
             request: Base64VecU8,
-            nonce: Base64VecU8,
+            nonce: Base58CryptoHash,
         },
     }
 }

@@ -1,7 +1,7 @@
 use crate::common::*;
 
 use intear_dex::oracle::{
-    GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
+    GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
 };
 use intear_dex_types::{
     AccountOrDexId, AssetId, DexId, FeeFraction, IntearDexEvent, Operation, SwapAdvancedMode,
@@ -5005,13 +5005,15 @@ async fn gas_key_balance(
     }
 }
 
-/// Add an oracle key to the dex engine with `deposit` for its storage and gas
+/// Add an oracle key of `key_type` to the dex engine with `deposit` for its
+/// storage and gas
 async fn create_oracle_key(
     dex_engine_contract: &Contract,
     payer: &Account,
+    key_type: KeyType,
     deposit: NearToken,
 ) -> SecretKey {
-    let oracle_key = SecretKey::from_random(KeyType::ED25519);
+    let oracle_key = SecretKey::from_random(key_type);
     let result = payer
         .call(dex_engine_contract.id(), "create_oracle_key")
         .max_gas()
@@ -5033,7 +5035,7 @@ async fn waiting_for_oracle_request(
     sandbox: &Worker<Sandbox>,
     transactions: &[&TransactionStatus],
     request: &[u8],
-) -> Vec<Base64VecU8> {
+) -> Vec<Base58CryptoHash> {
     // At once, since operations stop waiting after 200 blocks
     let mut queries = tokio::task::JoinSet::new();
     for transaction in transactions {
@@ -5200,7 +5202,13 @@ async fn test_oracle() {
     assert_success(&result).unwrap();
 
     let storage_usage_before = storage_usage().await;
-    let oracle_key = create_oracle_key(&dex_engine_contract, &user3, oracle_key_deposit).await;
+    let oracle_key = create_oracle_key(
+        &dex_engine_contract,
+        &user3,
+        KeyType::ED25519,
+        oracle_key_deposit,
+    )
+    .await;
     let oracle_key_balance = gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key)
         .await
         .unwrap();
@@ -5268,27 +5276,29 @@ async fn test_oracle() {
             }))
     };
     let rate_response = near_sdk::borsh::to_vec(&rate).unwrap();
-    let respond =
-        |oracle_key: &SecretKey, request: &[u8], response: Vec<u8>, nonces: Vec<Base64VecU8>| {
-            let request_hash = Base58CryptoHash::from(near_sdk::env::sha256_array(request));
-            let oracle_key = oracle_key.clone();
-            let sandbox = &sandbox;
-            let dex_engine_contract = &dex_engine_contract;
-            async move {
-                call_engine_with_gas_key(
-                    sandbox,
-                    dex_engine_contract,
-                    &oracle_key,
-                    "oracle_respond",
-                    json!({
-                        "request_hash": request_hash,
-                        "response": Base64VecU8(response),
-                        "nonces": nonces,
-                    }),
-                )
-                .await
-            }
-        };
+    let respond = |oracle_key: &SecretKey,
+                   request: &[u8],
+                   response: Vec<u8>,
+                   nonces: Vec<Base58CryptoHash>| {
+        let request_hash = Base58CryptoHash::from(near_sdk::env::sha256_array(request));
+        let oracle_key = oracle_key.clone();
+        let sandbox = &sandbox;
+        let dex_engine_contract = &dex_engine_contract;
+        async move {
+            call_engine_with_gas_key(
+                sandbox,
+                dex_engine_contract,
+                &oracle_key,
+                "oracle_respond",
+                json!({
+                    "request_hash": request_hash,
+                    "response": Base64VecU8(response),
+                    "nonces": nonces,
+                }),
+            )
+            .await
+        }
+    };
 
     // Without a request, the oracle has nothing to respond to
     let result = execute_operations(vec![oracle_rate_swap(
@@ -5413,6 +5423,8 @@ async fn test_oracle() {
     assert_gas_key_call_success(&outcome).unwrap();
     let result = waiting_near_deposit.await.unwrap();
     assert_success(&result).unwrap();
+    // None of the NEAR was refunded
+    assert_eq!(result.json::<U128>().unwrap(), U128(0));
     let result = waiting_ft_deposit.await.unwrap();
     assert_success(&result).unwrap();
     user1_ft1_wallet -= ft1_deposit;
@@ -5474,9 +5486,21 @@ async fn test_oracle() {
     .transact_async()
     .await
     .unwrap();
+    // Swaps more than the ft1 that the user has on the engine
+    let waiting_without_deposit = execute_operations(vec![
+        oracle_request(request.clone()),
+        failing_swap(ft1_asset_id.clone(), ft1_deposit - swap_amount),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
     let waiting_operations = waiting_for_oracle_request(
         &sandbox,
-        &[&waiting_near_deposit, &waiting_ft_deposit],
+        &[
+            &waiting_near_deposit,
+            &waiting_ft_deposit,
+            &waiting_without_deposit,
+        ],
         &request,
     )
     .await;
@@ -5488,7 +5512,11 @@ async fn test_oracle() {
     )
     .await;
     assert_gas_key_call_success(&outcome).unwrap();
-    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+    // deposit_near returns the NEAR it refunded, and ft_transfer_call the tokens it used
+    for (waiting, returned) in [
+        (waiting_near_deposit, U128(near_deposit.as_yoctonear())),
+        (waiting_ft_deposit, U128(0)),
+    ] {
         let result = waiting.await.unwrap();
         assert!(format!("{result:?}").contains("Not enough input balance in anonymous assets"));
         let refund_gas = result
@@ -5503,8 +5531,13 @@ async fn test_oracle() {
             .expect("No receipt logged that the operations failed")
             .gas_burnt;
         println!("Refunded after failed operations with {refund_gas}");
-        assert!(refund_gas < GAS_FOR_AFTER_ORACLE_OPERATIONS);
+        assert!(refund_gas < GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX);
+        assert_eq!(result.json::<U128>().unwrap(), returned);
     }
+    // With nothing to refund, the transaction fails as the operations did
+    let result = waiting_without_deposit.await.unwrap();
+    assert!(result.is_failure());
+    assert!(format!("{result:?}").contains("Insufficient balance"));
     assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
         .await
         .unwrap();
@@ -5544,8 +5577,13 @@ async fn test_oracle() {
 
     // Deposits are refunded if the oracle doesn't respond in time, and only the
     // oracle that was asked can respond
-    let other_oracle_key =
-        create_oracle_key(&dex_engine_contract, &user4, NearToken::from_near(1)).await;
+    let other_oracle_key = create_oracle_key(
+        &dex_engine_contract,
+        &user4,
+        KeyType::ED25519,
+        NearToken::from_near(1),
+    )
+    .await;
     let storage_usage_before = storage_usage().await;
     let user1_near_before = near_balance_after_refunds(&sandbox, &user1).await;
     let waiting_near_deposit = deposit_near(vec![
@@ -5568,9 +5606,17 @@ async fn test_oracle() {
     .transact_async()
     .await
     .unwrap();
+    let waiting_without_deposit = execute_operations(vec![oracle_request(request.clone())])
+        .transact_async()
+        .await
+        .unwrap();
     let waiting_operations = waiting_for_oracle_request(
         &sandbox,
-        &[&waiting_near_deposit, &waiting_ft_deposit],
+        &[
+            &waiting_near_deposit,
+            &waiting_ft_deposit,
+            &waiting_without_deposit,
+        ],
         &request,
     )
     .await;
@@ -5602,10 +5648,17 @@ async fn test_oracle() {
         "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
     )));
     sandbox.fast_forward(250).await.unwrap();
-    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+    for (waiting, returned) in [
+        (waiting_near_deposit, U128(near_deposit.as_yoctonear())),
+        (waiting_ft_deposit, U128(0)),
+    ] {
         let result = waiting.await.unwrap();
         assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
+        assert_eq!(result.json::<U128>().unwrap(), returned);
     }
+    let result = waiting_without_deposit.await.unwrap();
+    assert!(result.is_failure());
+    assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
     // Too late, so it's for nothing
     let outcome = respond(
         &oracle_key,
@@ -5667,10 +5720,10 @@ async fn test_oracle() {
     .await
     .unwrap();
     assert!(format!("{result:?}").contains("Dex code can't be deployed after an oracle request"));
-    // The gas of what happens after the requests is paid for up front
+    // The gas of refunding a held deposit is paid for up front
     let storage_usage_before = storage_usage().await;
-    let result = execute_operations(vec![oracle_request(request.clone())])
-        .gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
+    let result = deposit_near(vec![oracle_request(request.clone())])
+        .gas(GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX)
         .transact()
         .await
         .unwrap();
@@ -5827,6 +5880,7 @@ async fn test_oracle() {
     let small_oracle_key = create_oracle_key(
         &dex_engine_contract,
         &user3,
+        KeyType::ED25519,
         // Enough to prepay the gas of a transaction, and less than 1 NEAR
         oracle_key_storage_cost.saturating_add(NearToken::from_millinear(500)),
     )
@@ -5854,4 +5908,107 @@ async fn test_oracle() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_oracle_key_types() {
+    let request = b"request to an oracle".to_vec();
+    // Less than the 1 NEAR of gas balance that deleting a key can burn
+    let oracle_key_deposit = NearToken::from_near(1);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user3,
+        user4,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let storage_usage = || async {
+        dex_engine_contract
+            .view_account()
+            .await
+            .unwrap()
+            .storage_usage
+    };
+
+    for key_type in [KeyType::ED25519, KeyType::SECP256K1, KeyType::MLDSA65] {
+        let storage_usage_before = storage_usage().await;
+        let oracle_key =
+            create_oracle_key(&dex_engine_contract, &user3, key_type, oracle_key_deposit).await;
+        let oracle_key_storage_cost = oracle_key_deposit.saturating_sub(
+            gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key)
+                .await
+                .unwrap(),
+        );
+        // The deposit pays exactly for the storage that the key takes
+        assert_eq!(
+            oracle_key_storage_cost,
+            near_sdk::env::storage_byte_cost()
+                .saturating_mul((storage_usage().await - storage_usage_before) as u128),
+            "{key_type}"
+        );
+
+        // The key responds as the oracle that the operations wait for
+        let waiting = user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": [Operation::OracleRequest {
+                    oracle_key: oracle_key_handle(&oracle_key),
+                    dex_id: dex_id.clone(),
+                    request: Base64VecU8(request.clone()),
+                }],
+            }))
+            .transact_async()
+            .await
+            .unwrap();
+        let nonces = waiting_for_oracle_request(&sandbox, &[&waiting], &request).await;
+        let outcome = call_engine_with_gas_key(
+            &sandbox,
+            &dex_engine_contract,
+            &oracle_key,
+            "oracle_respond",
+            json!({
+                "request_hash": Base58CryptoHash::from(near_sdk::env::sha256_array(&request)),
+                "response": Base64VecU8(b"response".to_vec()),
+                "nonces": nonces,
+            }),
+        )
+        .await;
+        assert_gas_key_call_success(&outcome).unwrap();
+        let result = wait_for_transaction(waiting).await;
+        assert_success(&result).unwrap();
+
+        // The key removes itself, and the NEAR that paid for its storage goes back
+        let user4_near_before = near_balance_after_refunds(&sandbox, &user4).await;
+        let outcome = call_engine_with_gas_key(
+            &sandbox,
+            &dex_engine_contract,
+            &oracle_key,
+            "remove_oracle_key",
+            json!({
+                "receiver_id": user4.id(),
+            }),
+        )
+        .await;
+        assert_gas_key_call_success(&outcome).unwrap();
+        assert_eq!(
+            gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key).await,
+            None
+        );
+        assert_eq!(storage_usage().await, storage_usage_before);
+        assert_near_balance(
+            &user4,
+            user4_near_before.saturating_add(oracle_key_storage_cost),
+        )
+        .await
+        .unwrap();
+    }
 }

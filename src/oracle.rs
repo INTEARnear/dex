@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use intear_dex_types::{AssetId, Caller, DexId, IntearDexEvent, Operation, ReferralFees, expect};
 use near_sdk::{
-    AccountId, Allowance, CryptoHash, CurveType, Gas, GasWeight, NearToken, Promise, PromiseError,
-    PublicKey, PublicKeyHandle, UserYieldId,
+    AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError, PublicKey,
+    PublicKeyHandle, UserYieldId,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
     serde_json::{Value, json},
@@ -13,7 +13,7 @@ use crate::{
     DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
 };
 
-pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(5);
+pub const GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX: Gas = Gas::from_tgas(5);
 
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
 pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
@@ -23,11 +23,6 @@ pub const MAX_ORACLE_REQUEST_BYTES: usize = 1024;
 const ORACLE_KEY_NONCES: u32 = 4;
 const ORACLE_KEY_METHODS: [&str; 2] = ["oracle_respond", "remove_oracle_key"];
 const GAS_FOR_AFTER_ORACLE_KEY_REMOVAL: Gas = Gas::from_tgas(5);
-
-// https://github.com/near/nearcore/blob/2.14.0/core/crypto/src/signature.rs#L331-L337
-const ED25519_KEY_STORAGE_BYTES: u64 = 33;
-const SECP256K1_KEY_STORAGE_BYTES: u64 = 65;
-const ML_DSA_65_KEY_STORAGE_BYTES: u64 = 33;
 
 // https://github.com/near/nearcore/blob/2.14.0/core/primitives-core/src/types.rs#L19-L21
 const GAS_KEY_NONCE_STORAGE_BYTES: u64 = 8 + 2;
@@ -63,10 +58,10 @@ impl DexEngine {
     /// Delete the oracle key that signed the transaction, and send the NEAR that
     /// paid for its storage to `receiver_id`. Deleting a gas key burns its
     /// balance, and fails if the balance is more than 1 NEAR.
-    /// 
+    ///
     /// https://github.com/near/nearcore/blob/2.14.0/core/primitives-core/src/account.rs#L888
     #[private]
-    pub fn remove_oracle_key(&mut self, receiver_id: AccountId) -> Promise {
+    pub fn remove_oracle_key(&self, receiver_id: AccountId) -> Promise {
         let oracle_key = near_sdk::env::signer_account_pk();
         let current_account_id = near_sdk::env::current_account_id();
         Promise::new(current_account_id.clone())
@@ -80,7 +75,7 @@ impl DexEngine {
 
     #[private]
     pub fn after_oracle_key_removal(
-        &mut self,
+        &self,
         oracle_key: PublicKey,
         receiver_id: AccountId,
         #[callback_result] removed: Result<(), PromiseError>,
@@ -146,76 +141,67 @@ impl DexEngine {
             response,
         };
         let mut events = CallEvents::default();
-        let waiting_for_oracles = self.internal_execute_operations(
-            &mut events,
-            operations,
-            trader,
-            held_assets,
-            referrer,
-            referral_fees,
-            Some(&oracle_response),
-        );
-        expect!(
-            waiting_for_oracles.is_none(),
-            "Operations after an oracle request can't wait for an oracle again"
-        );
+        if self
+            .internal_execute_operations(
+                &mut events,
+                operations,
+                trader,
+                held_assets,
+                referrer,
+                referral_fees,
+                Some(&oracle_response),
+            )
+            .is_some()
+        {
+            unreachable!("Operations after an oracle request don't have another one");
+        };
         events.emit();
     }
 
-    /// Refund the held assets if the operations after the oracle request didn't
-    /// run. Returns what `*_on_transfer` returns for the deposit.
+    /// Refund the held deposit if the operations after the oracle request
+    /// didn't run. Returns what `*_on_transfer` returns for the deposit, or
+    /// for NEAR, the amount refunded.
     #[private]
-    pub fn after_oracle_operations(
+    pub fn after_oracle_operations_in_sandbox(
         &mut self,
-        trader: Caller,
-        held_assets: Option<HashMap<AssetId, U128>>,
+        alleged_sender: AccountId,
+        transfer_of: AssetId,
+        held_assets: HashMap<AssetId, U128>,
         #[callback_result] executed: Result<(), PromiseError>,
     ) -> Value {
-        fn refund_return_value(trader: &Caller, refund: &HashMap<AssetId, U128>) -> Value {
-            let Caller::OnTransfer {
-                alleged_sender,
-                transfer_of,
-            } = trader
-            else {
-                return Value::Null;
-            };
+        let refund_amount = if executed.is_ok() {
+            U128(0)
+        } else {
+            near_sdk::env::log_str("Operations after the oracle request failed");
             expect!(
-                refund.is_empty() || refund.len() == 1,
-                "refund must contain exactly zero or one asset, the input asset"
+                held_assets.keys().all(|asset_id| *asset_id == transfer_of),
+                "Only the deposited {transfer_of} can be held"
             );
-            let refund_amount = refund.get(transfer_of).copied().unwrap_or(U128(0));
-            match transfer_of {
-                AssetId::Near => {
-                    if refund_amount.0 != 0 {
-                        Promise::new(alleged_sender.clone())
-                            .transfer(NearToken::from_yoctonear(refund_amount.0))
-                            .detach();
-                    }
-                    Value::Null
-                }
-                AssetId::Nep141(_) => json!(refund_amount),
-                AssetId::Nep171(..) => json!(refund_amount.0 != 0),
-                AssetId::Nep245(..) => json!([refund_amount]),
+            for (asset_id, amount) in &held_assets {
+                let in_custody = self
+                    .total_in_custody
+                    .get_mut(asset_id)
+                    .expect("Held asset is not in custody");
+                in_custody.0 = in_custody
+                    .0
+                    .checked_sub(amount.0)
+                    .expect("Held asset is not in custody");
             }
+            held_assets.get(&transfer_of).copied().unwrap_or(U128(0))
+        };
+        match transfer_of {
+            AssetId::Near => {
+                if refund_amount.0 != 0 {
+                    Promise::new(alleged_sender)
+                        .transfer(NearToken::from_yoctonear(refund_amount.0))
+                        .detach();
+                }
+                json!(refund_amount)
+            }
+            AssetId::Nep141(_) => json!(refund_amount),
+            AssetId::Nep171(..) => json!(refund_amount.0 != 0),
+            AssetId::Nep245(..) => json!([refund_amount]),
         }
-
-        if executed.is_ok() {
-            // refund nothing = return success
-            return refund_return_value(&trader, &HashMap::new());
-        }
-        near_sdk::env::log_str("Operations after the oracle request failed");
-        let held_assets = held_assets.unwrap_or_default();
-        for (asset_id, amount) in &held_assets {
-            let in_custody = self
-                .total_in_custody
-                .get_mut(asset_id)
-                .expect("Held asset is not in custody");
-            in_custody.0 = in_custody
-                .0
-                .checked_sub(amount.0)
-                .expect("Held asset is not in custody");
-        }
-        refund_return_value(&trader, &held_assets)
     }
 }
 
@@ -260,11 +246,11 @@ impl DexEngine {
             oracle_key: oracle_key.clone(),
             dex_id: dex_id.clone(),
             request: request.clone(),
-            nonce: Base64VecU8(nonce.to_vec()),
+            nonce: Base58CryptoHash::from(nonce),
         }
         .emit();
 
-        Promise::new_yield_with_id(
+        let waiting = Promise::new_yield_with_id(
             "after_oracle_response",
             json!({
                 "oracle_key": oracle_key,
@@ -282,13 +268,25 @@ impl DexEngine {
             GasWeight(1),
             yield_id,
         )
-        .expect("Operations with the same yield id already wait for an oracle")
+        .expect("Operations with the same yield id already wait for an oracle");
+        // With nothing held, there's nothing to refund, and the result of the
+        // operations is the result of the transaction
+        let Some(held_assets) = sandboxed_assets else {
+            return waiting;
+        };
+        let Caller::OnTransfer {
+            alleged_sender,
+            transfer_of,
+        } = trader
+        else {
+            unreachable!("sandboxed_assets is Some but caller is not OnTransfer")
+        };
         // Runs whether the operations ran, failed, or timed out, with gas of its own
-        .then(
+        waiting.then(
             Self::ext(near_sdk::env::current_account_id())
-                .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
+                .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX)
                 .with_unused_gas_weight(0)
-                .after_oracle_operations(trader, sandboxed_assets),
+                .after_oracle_operations_in_sandbox(alleged_sender, transfer_of, held_assets),
         )
     }
 }
@@ -308,11 +306,8 @@ fn oracle_yield_id(
 
 /// The NEAR that the storage of an oracle key takes
 fn oracle_key_storage_cost(oracle_key: &PublicKey) -> NearToken {
-    let key_bytes = match oracle_key.curve_type() {
-        CurveType::ED25519 => ED25519_KEY_STORAGE_BYTES,
-        CurveType::SECP256K1 => SECP256K1_KEY_STORAGE_BYTES,
-        CurveType::MLDSA65 => ML_DSA_65_KEY_STORAGE_BYTES,
-    };
+    let key_bytes =
+        near_sdk::borsh::object_length(&PublicKeyHandle::from(oracle_key)).unwrap() as u64;
     // Borsh of the access key: its nonce, the tag of its permission, the gas key's
     // balance and number of nonces, unlimited allowance, receiver and methods
     let access_key_bytes = near_sdk::borsh::object_length(&(
