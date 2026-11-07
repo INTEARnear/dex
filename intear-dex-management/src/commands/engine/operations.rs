@@ -128,6 +128,20 @@ impl RunContext {
         if operations.is_empty() {
             return Err(eyre!("{} has no operations", scope.file));
         }
+        if operations.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Withdraw {
+                    rescue_address: Some(_),
+                    ..
+                }
+            )
+        }) {
+            return Err(eyre!(
+                "{} gives a Withdraw a rescue_address, which {ENGINE_ACCOUNT_ID} only reads when the operations come with a deposit in a transfer call or deposit_near, and this runs them with execute_operations",
+                scope.file
+            ));
+        }
         let deposit = scope.deposit.map_or(
             ONE_YOCTO_NEAR,
             |near_cli_rs::types::near_token::NearToken(deposit)| deposit,
@@ -190,9 +204,7 @@ impl RunContext {
                             to: AccountOrDexId::Account(account_id),
                             ..
                         } => referenced_accounts.push(account_id),
-                        Operation::Withdraw {
-                            to, rescue_address, ..
-                        } => referenced_accounts.extend(to.iter().chain(rescue_address)),
+                        Operation::Withdraw { to, .. } => referenced_accounts.extend(to),
                         Operation::DeployDexCode { .. } => {
                             let trusted_code_deployer = engine::trusted_code_deployer(
                                 &preflight.network_config,
@@ -379,7 +391,8 @@ fn operation_step(
             asset_id,
             amount,
             to,
-            rescue_address,
+            // Refused before planning, since the engine doesn't read it in execute_operations
+            rescue_address: _,
         } => {
             let withdrawn = match amount {
                 WithdrawAmount::Full { at_least: None } => {
@@ -398,13 +411,15 @@ fn operation_step(
                 }
             };
             let receiver_id = to.as_ref().unwrap_or(signer_id);
-            match rescue_address {
-                Some(rescue_address) => format!(
-                    "Withdraw {withdrawn} from {signer_id}'s balance to {receiver_id}'s wallet, or to {rescue_address} if that fails"
-                ),
-                None => format!(
-                    "Withdraw {withdrawn} from {signer_id}'s balance to {receiver_id}'s wallet"
-                ),
+            if receiver_id == signer_id {
+                format!(
+                    "Withdraw {withdrawn} from {signer_id}'s balance to its wallet, or back to its balance if that fails"
+                )
+            } else {
+                format!(
+                    "Withdraw {withdrawn} from {signer_id}'s balance to {receiver_id}'s wallet, or if that fails, to {receiver_id}'s balance if it registered {} on {ENGINE_ACCOUNT_ID}, else back to {signer_id}'s",
+                    asset_label(asset_id)?
+                )
             }
         }
         Operation::SwapSimple {

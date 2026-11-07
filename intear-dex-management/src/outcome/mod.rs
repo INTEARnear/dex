@@ -132,7 +132,7 @@ fn failure_message(error: &TxExecutionError) -> String {
     }
 }
 
-/// The account a failed withdrawal went back to, from the engine's log
+/// The account or dex a failed withdrawal went to, from the engine's log
 /// "Refunding to bob.near (recipient) because …" or "Refunding to
 /// Account(alice.near) (rescue) because …"
 fn withdrawal_refund_target(log: &str) -> Option<String> {
@@ -319,7 +319,7 @@ pub fn report_outcome(
     }
     for refund_target in &withdrawal_refund_targets {
         failure_lines.push(format!(
-            "{ENGINE_ACCOUNT_ID} put the withdrawal back into {refund_target}'s balance"
+            "{ENGINE_ACCOUNT_ID} couldn't send the withdrawal, so it put it into {refund_target}'s balance"
         ));
     }
     if let Some(expected_deployment) = &expected_outcome.deployment {

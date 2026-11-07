@@ -633,6 +633,59 @@ async fn test_withdraw_failures() {
     )
     .await
     .unwrap();
+
+    // A failed withdrawal goes to the recipient's balance instead, if it registered the asset
+    let result = user2
+        .call(dex_engine_contract.id(), "storage_deposit")
+        .max_gas()
+        .deposit(storage_deposit_amount)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user2
+        .call(dex_engine_contract.id(), "register_assets")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_ids": [AssetId::Nep141(ft1.id().clone())],
+            "for": AccountOrDexId::Account(user2.id().clone()),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user1
+        .call(dex_engine_contract.id(), "withdraw")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "asset_id": AssetId::Nep141(ft1.id().clone()),
+            "amount": WithdrawAmount::Exact(U128(ft_withdraw_attempt)),
+            "withdraw_to": user2.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert!(!result.json::<bool>().unwrap());
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user1.id().clone()),
+        AssetId::Nep141(ft1.id().clone()),
+        Some(U128(ft_deposit_amount - ft_withdraw_attempt)),
+    )
+    .await
+    .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user2.id().clone()),
+        AssetId::Nep141(ft1.id().clone()),
+        Some(U128(ft_withdraw_attempt)),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

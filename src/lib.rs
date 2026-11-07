@@ -502,8 +502,9 @@ impl DexEngine {
     /// the assets will be withdrawn to the user's account.
     ///
     /// Returns `true` if the withdrawal was successful, `false`
-    /// otherwise. If a withdrawal fails, the assets will be
-    /// refunded to the contract's custody balance of the user.
+    /// otherwise. If a withdrawal fails, the assets go to the
+    /// inner balance of `withdraw_to` if it has the asset
+    /// registered, or back to the user's if it doesn't.
     #[payable]
     pub fn withdraw(
         &mut self,

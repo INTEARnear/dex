@@ -168,17 +168,23 @@ pub enum Operation {
         last_part_of_id: String,
         code_base64: Base64VecU8,
     },
-    /// Withdraw assets from the dex engine contract's inner
-    /// balance to the user. If amount is None, the entire
-    /// balance of the asset will be withdrawn.
+    /// Withdraw assets to `to`, or to the user if it's None.
+    /// They come from the user's inner balance, or when the
+    /// operations come with a deposit, from what the deposit
+    /// and the operations before it left, and
+    /// [`WithdrawAmount::Full`] takes all of that. If the
+    /// withdrawal fails, the assets go to the inner balance of
+    /// `to` if it has the asset registered, or else to the
+    /// user's, or to `rescue_address`'s if the user hasn't
+    /// registered the asset.
     Withdraw {
         asset_id: AssetId,
         amount: WithdrawAmount,
         to: Option<AccountId>,
-        /// If the withdrawal fails and current user doesn't have
-        /// a registerd balance in this asset, the assets will be
-        /// refunded to this address. It's required that either
-        /// the user address or rescue address is registered.
+        /// Required when the operations come with a deposit
+        /// (`*_transfer_call` or `deposit_near`) whose sender
+        /// hasn't registered this asset, and not read otherwise.
+        /// It must have the asset registered.
         rescue_address: Option<AccountId>,
     },
     /// Swap assets between two assets on the selected dex.
