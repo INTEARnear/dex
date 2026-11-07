@@ -163,7 +163,7 @@ pub enum Operation {
         asset_ids: Vec<AssetId>,
         r#for: Option<AccountOrDexId>,
     },
-    /// Deploy new code to your dex.
+    /// Deploy new code to your dex. Can't be used after OracleRequest.
     DeployDexCode {
         last_part_of_id: String,
         code_base64: Base64VecU8,
@@ -228,7 +228,8 @@ pub enum Operation {
     /// `dex_id` reads with the `oracle_request` host function. Only allowed as
     /// the first operation. The operations after the request run once the
     /// oracle responds, and deposited assets are held until then, or refunded
-    /// if the oracle doesn't respond in time.
+    /// if the oracle doesn't respond in time. The request and the response are
+    /// at most 1024 bytes.
     OracleRequest {
         oracle_key: PublicKeyHandle,
         dex_id: DexId,

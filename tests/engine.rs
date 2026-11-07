@@ -1,6 +1,8 @@
 use crate::common::*;
 
-use intear_dex::oracle::{GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_RESPONSE_BYTES};
+use intear_dex::oracle::{
+    GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
+};
 use intear_dex_types::{
     AccountOrDexId, AssetId, DexId, FeeFraction, IntearDexEvent, Operation, SwapAdvancedMode,
     SwapOperationAmount, SwapOption, SwapRequestAmount, WithdrawAmount,
@@ -5613,6 +5615,24 @@ async fn test_oracle() {
     .unwrap();
     assert!(format!("{result:?}").contains("Only the first operation can be an oracle request"));
     assert_eq!(storage_usage().await, storage_usage_before);
+    let result = execute_operations(vec![oracle_request(vec![0; MAX_ORACLE_REQUEST_BYTES + 1])])
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains(&format!(
+        "Request is more than {MAX_ORACLE_REQUEST_BYTES} bytes"
+    )));
+    let result = execute_operations(vec![
+        oracle_request(request.clone()),
+        Operation::DeployDexCode {
+            last_part_of_id: "dex".to_string(),
+            code_base64: Base64VecU8(get_compiled_wasms().await.test_dex_wasm.clone()),
+        },
+    ])
+    .transact()
+    .await
+    .unwrap();
+    assert!(format!("{result:?}").contains("Dex code can't be deployed after an oracle request"));
     // The gas of what happens after the requests is paid for up front
     let storage_usage_before = storage_usage().await;
     let result = execute_operations(vec![oracle_request(request.clone())])
@@ -5677,4 +5697,22 @@ async fn test_oracle() {
         assert_success(&result).unwrap();
     }
     assert_eq!(storage_usage().await, storage_usage_before);
+
+    // The largest request and response
+    let largest_request = vec![1; MAX_ORACLE_REQUEST_BYTES];
+    let waiting = execute_operations(vec![oracle_request(largest_request.clone())])
+        .transact_async()
+        .await
+        .unwrap();
+    let nonces = waiting_for_oracle_request(&sandbox, &[&waiting], &largest_request).await;
+    let outcome = respond(
+        &oracle_key,
+        &largest_request,
+        vec![2; MAX_ORACLE_RESPONSE_BYTES],
+        nonces,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let result = wait_for_transaction(waiting).await;
+    assert_success(&result).unwrap();
 }

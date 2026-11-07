@@ -18,6 +18,8 @@ pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(5);
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
 pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
 
+pub const MAX_ORACLE_REQUEST_BYTES: usize = 1024;
+
 const ORACLE_KEY_NONCES: u32 = 4;
 const ORACLE_KEY_METHOD: &str = "oracle_respond";
 
@@ -233,6 +235,16 @@ impl DexEngine {
                 .iter()
                 .any(|operation| matches!(operation, Operation::OracleRequest { .. })),
             "Only the first operation can be an oracle request"
+        );
+        expect!(
+            request.0.len() <= MAX_ORACLE_REQUEST_BYTES,
+            "Request is more than {MAX_ORACLE_REQUEST_BYTES} bytes"
+        );
+        expect!(
+            !operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::DeployDexCode { .. })),
+            "Dex code can't be deployed after an oracle request"
         );
         let nonce = near_sdk::env::random_seed_array();
         let yield_id = oracle_yield_id(&oracle_key, near_sdk::env::sha256_array(&request.0), nonce);
