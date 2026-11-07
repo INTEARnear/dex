@@ -9,8 +9,9 @@ use intear_dex_types::{
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
+use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_client::{JsonRpcClient, methods};
-use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_primitives::action::{Action, FunctionCallAction};
 use near_primitives::transaction::{
     NonceMode, SignedTransaction, Transaction, TransactionNonce, TransactionV1,
@@ -4916,6 +4917,94 @@ fn oracle_key_handle(oracle_key: &SecretKey) -> PublicKeyHandle {
     )
 }
 
+/// Call the dex engine in a transaction that `key`, a gas key of the engine
+/// account such as an oracle key, signs. near-workspaces can't sign with gas keys.
+async fn call_engine_with_gas_key(
+    sandbox: &Worker<Sandbox>,
+    dex_engine_contract: &Contract,
+    key: &SecretKey,
+    method_name: &str,
+    args: near_sdk::serde_json::Value,
+) -> FinalExecutionOutcomeView {
+    let client = JsonRpcClient::connect(sandbox.rpc_addr());
+    let QueryResponseKind::GasKeyNonces(GasKeyNoncesView { nonces }) = client
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+            request: QueryRequest::ViewGasKeyNonces {
+                account_id: dex_engine_contract.id().clone(),
+                public_key: key.public_key(),
+            },
+        })
+        .await
+        .unwrap()
+        .kind
+    else {
+        panic!("{} is not a gas key", key.public_key());
+    };
+    let block_hash = client
+        .call(methods::block::RpcBlockRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+        })
+        .await
+        .unwrap()
+        .header
+        .hash;
+    let transaction = Transaction::V1(TransactionV1 {
+        signer_id: dex_engine_contract.id().clone(),
+        public_key: key.public_key(),
+        nonce: TransactionNonce::from_nonce_and_index(nonces[0] + 1, 0),
+        receiver_id: dex_engine_contract.id().clone(),
+        block_hash,
+        actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
+            method_name: method_name.to_string(),
+            args: args.to_string().into_bytes(),
+            gas: near_primitives::types::Gas::from_teragas(300),
+            deposit: NearToken::ZERO,
+        }))],
+        nonce_mode: NonceMode::Monotonic,
+    });
+    let signature = key.sign(transaction.get_hash_and_size().0.as_ref());
+    client
+        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            signed_transaction: SignedTransaction::new(signature, transaction),
+        })
+        .await
+        .unwrap()
+}
+
+/// The gas balance of a gas key of the dex engine, or None if it doesn't exist
+async fn gas_key_balance(
+    sandbox: &Worker<Sandbox>,
+    dex_engine_contract: &Contract,
+    key: &SecretKey,
+) -> Option<NearToken> {
+    let response = JsonRpcClient::connect(sandbox.rpc_addr())
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+            request: QueryRequest::ViewAccessKey {
+                account_id: dex_engine_contract.id().clone(),
+                public_key: key.public_key(),
+            },
+        })
+        .await;
+    match response {
+        Ok(response) => {
+            let QueryResponseKind::AccessKey(AccessKeyView {
+                permission: AccessKeyPermissionView::GasKeyFunctionCall { balance, .. },
+                ..
+            }) = response.kind
+            else {
+                panic!("{} is not a gas key", key.public_key());
+            };
+            Some(balance)
+        }
+        Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcQueryError::UnknownAccessKey { .. },
+        ))) => None,
+        Err(err) => panic!("{err}"),
+    }
+}
+
 /// Add an oracle key to the dex engine with `deposit` for its storage and gas
 async fn create_oracle_key(
     dex_engine_contract: &Contract,
@@ -5033,6 +5122,7 @@ async fn test_oracle() {
     let swap_amount = 100u128;
     let near_deposit = NearToken::from_near(1);
     let oracle_key_deposit = NearToken::from_near(2);
+    let top_up_amount = NearToken::from_millinear(500);
     let max_gas_cost = NearToken::from_millinear(100);
 
     let TestContext {
@@ -5111,27 +5201,9 @@ async fn test_oracle() {
 
     let storage_usage_before = storage_usage().await;
     let oracle_key = create_oracle_key(&dex_engine_contract, &user3, oracle_key_deposit).await;
-    let QueryResponseKind::AccessKey(AccessKeyView {
-        permission:
-            AccessKeyPermissionView::GasKeyFunctionCall {
-                balance: oracle_key_balance,
-                ..
-            },
-        ..
-    }) = JsonRpcClient::connect(sandbox.rpc_addr())
-        .call(methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::None),
-            request: QueryRequest::ViewAccessKey {
-                account_id: dex_engine_contract.id().clone(),
-                public_key: oracle_key.public_key(),
-            },
-        })
+    let oracle_key_balance = gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key)
         .await
-        .unwrap()
-        .kind
-    else {
-        panic!("The oracle key is not a gas key");
-    };
+        .unwrap();
     let oracle_key_storage_cost = oracle_key_deposit.saturating_sub(oracle_key_balance);
     // The deposit pays exactly for the storage that the key takes
     assert_eq!(
@@ -5198,65 +5270,23 @@ async fn test_oracle() {
     let rate_response = near_sdk::borsh::to_vec(&rate).unwrap();
     let respond =
         |oracle_key: &SecretKey, request: &[u8], response: Vec<u8>, nonces: Vec<Base64VecU8>| {
-            let request = request.to_vec();
+            let request_hash = Base58CryptoHash::from(near_sdk::env::sha256_array(request));
             let oracle_key = oracle_key.clone();
             let sandbox = &sandbox;
             let dex_engine_contract = &dex_engine_contract;
-            // Signed by hand, since near-workspaces can't sign with gas keys
             async move {
-                let client = JsonRpcClient::connect(sandbox.rpc_addr());
-                let QueryResponseKind::GasKeyNonces(GasKeyNoncesView { nonces: key_nonces }) =
-                    client
-                        .call(methods::query::RpcQueryRequest {
-                            block_reference: BlockReference::Finality(Finality::None),
-                            request: QueryRequest::ViewGasKeyNonces {
-                                account_id: dex_engine_contract.id().clone(),
-                                public_key: oracle_key.public_key(),
-                            },
-                        })
-                        .await
-                        .unwrap()
-                        .kind
-                else {
-                    panic!("The oracle key is not a gas key");
-                };
-                let block_hash = client
-                    .call(methods::block::RpcBlockRequest {
-                        block_reference: BlockReference::Finality(Finality::None),
-                    })
-                    .await
-                    .unwrap()
-                    .header
-                    .hash;
-                let transaction = Transaction::V1(TransactionV1 {
-                    signer_id: dex_engine_contract.id().clone(),
-                    public_key: oracle_key.public_key(),
-                    nonce: TransactionNonce::from_nonce_and_index(key_nonces[0] + 1, 0),
-                    receiver_id: dex_engine_contract.id().clone(),
-                    block_hash,
-                    actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
-                        method_name: "oracle_respond".to_string(),
-                        args: json!({
-                            "request_hash": Base58CryptoHash::from(
-                                near_sdk::env::sha256_array(&request)
-                            ),
-                            "response": Base64VecU8(response),
-                            "nonces": nonces,
-                        })
-                        .to_string()
-                        .into_bytes(),
-                        gas: near_primitives::types::Gas::from_teragas(300),
-                        deposit: NearToken::ZERO,
-                    }))],
-                    nonce_mode: NonceMode::Monotonic,
-                });
-                let signature = oracle_key.sign(transaction.get_hash_and_size().0.as_ref());
-                client
-                    .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
-                        signed_transaction: SignedTransaction::new(signature, transaction),
-                    })
-                    .await
-                    .unwrap()
+                call_engine_with_gas_key(
+                    sandbox,
+                    dex_engine_contract,
+                    &oracle_key,
+                    "oracle_respond",
+                    json!({
+                        "request_hash": request_hash,
+                        "response": Base64VecU8(response),
+                        "nonces": nonces,
+                    }),
+                )
+                .await
             }
         };
 
@@ -5358,14 +5388,18 @@ async fn test_oracle() {
         &request,
     )
     .await;
-    // Held deposits are out of custody while they wait
-    assert_total_in_custody(&dex_engine_contract, AssetId::Near, Some(U128(0)))
-        .await
-        .unwrap();
+    // Held deposits stay in custody while they wait
+    assert_total_in_custody(
+        &dex_engine_contract,
+        AssetId::Near,
+        Some(U128(near_deposit.as_yoctonear())),
+    )
+    .await
+    .unwrap();
     assert_total_in_custody(
         &dex_engine_contract,
         ft1_asset_id.clone(),
-        Some(U128(ft1_in_custody)),
+        Some(U128(ft1_in_custody + ft1_deposit)),
     )
     .await
     .unwrap();
@@ -5715,4 +5749,109 @@ async fn test_oracle() {
     assert_gas_key_call_success(&outcome).unwrap();
     let result = wait_for_transaction(waiting).await;
     assert_success(&result).unwrap();
+
+    // The same key can't be added again, and the whole deposit is refunded
+    let user3_near_before = near_balance_after_refunds(&sandbox, &user3).await;
+    let result = user3
+        .call(dex_engine_contract.id(), "create_oracle_key")
+        .max_gas()
+        .deposit(oracle_key_deposit)
+        .args_json(json!({
+            "oracle_key": oracle_key.public_key(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+    assert!(
+        user3_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user3).await)
+            < oracle_key_storage_cost
+    );
+
+    // Anyone can top up an oracle key, and only oracle keys
+    let balance_before = gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key)
+        .await
+        .unwrap();
+    let result = user4
+        .call(dex_engine_contract.id(), "top_up_oracle_key")
+        .max_gas()
+        .deposit(top_up_amount)
+        .args_json(json!({
+            "oracle_key": oracle_key.public_key(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key).await,
+        Some(balance_before.saturating_add(top_up_amount))
+    );
+    let user4_near_before = near_balance_after_refunds(&sandbox, &user4).await;
+    let result = user4
+        .call(dex_engine_contract.id(), "top_up_oracle_key")
+        .max_gas()
+        .deposit(top_up_amount)
+        .args_json(json!({
+            "oracle_key": SecretKey::from_random(KeyType::ED25519).public_key(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+    assert!(
+        user4_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user4).await)
+            < max_gas_cost
+    );
+
+    // Deleting a key would burn more than 1 NEAR of its gas balance
+    let outcome = call_engine_with_gas_key(
+        &sandbox,
+        &dex_engine_contract,
+        &oracle_key,
+        "remove_oracle_key",
+        json!({
+            "receiver_id": user4.id(),
+        }),
+    )
+    .await;
+    assert!(format!("{outcome:?}").contains("Failed to remove the oracle key"));
+    assert!(
+        gas_key_balance(&sandbox, &dex_engine_contract, &oracle_key)
+            .await
+            .is_some()
+    );
+
+    // An oracle removes its key, and the NEAR that paid for its storage goes back
+    let storage_usage_before = storage_usage().await;
+    let small_oracle_key = create_oracle_key(
+        &dex_engine_contract,
+        &user3,
+        // Enough to prepay the gas of a transaction, and less than 1 NEAR
+        oracle_key_storage_cost.saturating_add(NearToken::from_millinear(500)),
+    )
+    .await;
+    let user4_near_before = near_balance_after_refunds(&sandbox, &user4).await;
+    let outcome = call_engine_with_gas_key(
+        &sandbox,
+        &dex_engine_contract,
+        &small_oracle_key,
+        "remove_oracle_key",
+        json!({
+            "receiver_id": user4.id(),
+        }),
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    assert_eq!(
+        gas_key_balance(&sandbox, &dex_engine_contract, &small_oracle_key).await,
+        None
+    );
+    assert_eq!(storage_usage().await, storage_usage_before);
+    assert_near_balance(
+        &user4,
+        user4_near_before.saturating_add(oracle_key_storage_cost),
+    )
+    .await
+    .unwrap();
 }

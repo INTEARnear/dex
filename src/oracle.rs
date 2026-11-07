@@ -21,7 +21,8 @@ pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
 pub const MAX_ORACLE_REQUEST_BYTES: usize = 1024;
 
 const ORACLE_KEY_NONCES: u32 = 4;
-const ORACLE_KEY_METHOD: &str = "oracle_respond";
+const ORACLE_KEY_METHODS: [&str; 2] = ["oracle_respond", "remove_oracle_key"];
+const GAS_FOR_AFTER_ORACLE_KEY_REMOVAL: Gas = Gas::from_tgas(5);
 
 // https://github.com/near/nearcore/blob/2.14.0/core/crypto/src/signature.rs#L331-L337
 const ED25519_KEY_STORAGE_BYTES: u64 = 33;
@@ -33,48 +34,13 @@ const GAS_KEY_NONCE_STORAGE_BYTES: u64 = 8 + 2;
 
 #[near]
 impl DexEngine {
-    /// Add a gas key that can only call `oracle_respond`, for an oracle to
-    /// respond with. The attached NEAR pays for the key's storage, and the rest
-    /// of it is the gas balance.
+    /// Add a gas key that can only call `oracle_respond` and `remove_oracle_key`,
+    /// for an oracle to respond with. The attached NEAR pays for the key's
+    /// storage, and the rest of it is the gas balance.
     #[payable]
     pub fn create_oracle_key(&mut self, oracle_key: PublicKey) -> Promise {
         self.assert_not_paused();
-        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(u128::from({
-            let key_bytes = match oracle_key.curve_type() {
-                CurveType::ED25519 => ED25519_KEY_STORAGE_BYTES,
-                CurveType::SECP256K1 => SECP256K1_KEY_STORAGE_BYTES,
-                CurveType::MLDSA65 => ML_DSA_65_KEY_STORAGE_BYTES,
-            };
-            // Borsh of the access key: its nonce, the tag of its permission, the gas key's
-            // balance and number of nonces, unlimited allowance, receiver and methods
-            let access_key_bytes = near_sdk::borsh::object_length(&(
-                0u64,
-                0u8,
-                0u128,
-                0u16,
-                None::<u128>,
-                near_sdk::env::current_account_id(),
-                vec![ORACLE_KEY_METHOD],
-            ))
-            .unwrap() as u64;
-            key_bytes
-                .checked_add(access_key_bytes)
-                .unwrap()
-                .checked_add(STORAGE_BYTES_PER_RECORD)
-                .unwrap()
-                .checked_add(
-                    u64::from(ORACLE_KEY_NONCES)
-                        .checked_mul(
-                            key_bytes
-                                .checked_add(GAS_KEY_NONCE_STORAGE_BYTES)
-                                .unwrap()
-                                .checked_add(STORAGE_BYTES_PER_RECORD)
-                                .unwrap(),
-                        )
-                        .unwrap(),
-                )
-                .unwrap()
-        }));
+        let storage_cost = oracle_key_storage_cost(&oracle_key);
         let gas_key_balance = near_sdk::env::attached_deposit()
             .checked_sub(storage_cost)
             .unwrap_or_else(|| panic!("Attach at least {storage_cost} for the storage of the key"));
@@ -85,9 +51,50 @@ impl DexEngine {
                 ORACLE_KEY_NONCES,
                 Allowance::Unlimited,
                 current_account_id,
-                ORACLE_KEY_METHOD.to_string(),
+                ORACLE_KEY_METHODS.join(","),
             )
             .transfer_to_gas_key(oracle_key, gas_key_balance)
+            // Pays for the key's storage once it's added, and is refunded with the
+            // gas balance if it can't be
+            .transfer(storage_cost)
+            .refund_to(near_sdk::env::predecessor_account_id())
+    }
+
+    /// Delete the oracle key that signed the transaction, and send the NEAR that
+    /// paid for its storage to `receiver_id`. Deleting a gas key burns its
+    /// balance, and fails if the balance is more than 1 NEAR.
+    /// 
+    /// https://github.com/near/nearcore/blob/2.14.0/core/primitives-core/src/account.rs#L888
+    #[private]
+    pub fn remove_oracle_key(&mut self, receiver_id: AccountId) -> Promise {
+        let oracle_key = near_sdk::env::signer_account_pk();
+        let current_account_id = near_sdk::env::current_account_id();
+        Promise::new(current_account_id.clone())
+            .delete_key(oracle_key.clone())
+            .then(
+                Self::ext(current_account_id)
+                    .with_static_gas(GAS_FOR_AFTER_ORACLE_KEY_REMOVAL)
+                    .after_oracle_key_removal(oracle_key, receiver_id),
+            )
+    }
+
+    #[private]
+    pub fn after_oracle_key_removal(
+        &mut self,
+        oracle_key: PublicKey,
+        receiver_id: AccountId,
+        #[callback_result] removed: Result<(), PromiseError>,
+    ) -> Promise {
+        expect!(removed.is_ok(), "Failed to remove the oracle key");
+        Promise::new(receiver_id).transfer(oracle_key_storage_cost(&oracle_key))
+    }
+
+    /// Add the attached NEAR to the gas balance of an oracle key
+    #[payable]
+    pub fn top_up_oracle_key(&mut self, oracle_key: PublicKey) -> Promise {
+        self.assert_not_paused();
+        Promise::new(near_sdk::env::current_account_id())
+            .transfer_to_gas_key(oracle_key, near_sdk::env::attached_deposit())
             .refund_to(near_sdk::env::predecessor_account_id())
     }
 
@@ -132,16 +139,6 @@ impl DexEngine {
             panic!("Oracle didn't respond in time");
         };
         self.assert_not_paused();
-        for (asset_id, amount) in held_assets.iter().flatten() {
-            let in_custody = self
-                .total_in_custody
-                .get_mut(asset_id)
-                .expect("Held asset is not registered");
-            in_custody.0 = in_custody
-                .0
-                .checked_add(amount.0)
-                .expect("Balance overflow");
-        }
         let oracle_response = OracleResponse {
             oracle_key,
             dex_id,
@@ -169,7 +166,7 @@ impl DexEngine {
     /// run. Returns what `*_on_transfer` returns for the deposit.
     #[private]
     pub fn after_oracle_operations(
-        &self,
+        &mut self,
         trader: Caller,
         held_assets: Option<HashMap<AssetId, U128>>,
         #[callback_result] executed: Result<(), PromiseError>,
@@ -207,7 +204,18 @@ impl DexEngine {
             return refund_return_value(&trader, &HashMap::new());
         }
         near_sdk::env::log_str("Operations after the oracle request failed");
-        refund_return_value(&trader, &held_assets.unwrap_or_default())
+        let held_assets = held_assets.unwrap_or_default();
+        for (asset_id, amount) in &held_assets {
+            let in_custody = self
+                .total_in_custody
+                .get_mut(asset_id)
+                .expect("Held asset is not in custody");
+            in_custody.0 = in_custody
+                .0
+                .checked_sub(amount.0)
+                .expect("Held asset is not in custody");
+        }
+        refund_return_value(&trader, &held_assets)
     }
 }
 
@@ -256,18 +264,6 @@ impl DexEngine {
         }
         .emit();
 
-        // Out of custody while held, so that if the operations don't run, they're
-        // refunded without the engine tracking them
-        for (asset_id, amount) in sandboxed_assets.iter().flatten() {
-            let in_custody = self
-                .total_in_custody
-                .get_mut(asset_id)
-                .expect("Sandboxed asset is not in custody");
-            in_custody.0 = in_custody
-                .0
-                .checked_sub(amount.0)
-                .expect("Sandboxed asset is not in custody");
-        }
         Promise::new_yield_with_id(
             "after_oracle_response",
             json!({
@@ -307,5 +303,45 @@ fn oracle_yield_id(
 ) -> UserYieldId {
     UserYieldId::new(near_sdk::env::sha256_array(
         near_sdk::borsh::to_vec(&(oracle_key, request_hash, nonce)).unwrap(),
+    ))
+}
+
+/// The NEAR that the storage of an oracle key takes
+fn oracle_key_storage_cost(oracle_key: &PublicKey) -> NearToken {
+    let key_bytes = match oracle_key.curve_type() {
+        CurveType::ED25519 => ED25519_KEY_STORAGE_BYTES,
+        CurveType::SECP256K1 => SECP256K1_KEY_STORAGE_BYTES,
+        CurveType::MLDSA65 => ML_DSA_65_KEY_STORAGE_BYTES,
+    };
+    // Borsh of the access key: its nonce, the tag of its permission, the gas key's
+    // balance and number of nonces, unlimited allowance, receiver and methods
+    let access_key_bytes = near_sdk::borsh::object_length(&(
+        0u64,
+        0u8,
+        0u128,
+        0u16,
+        None::<u128>,
+        near_sdk::env::current_account_id(),
+        ORACLE_KEY_METHODS.to_vec(),
+    ))
+    .unwrap() as u64;
+    near_sdk::env::storage_byte_cost().saturating_mul(u128::from(
+        key_bytes
+            .checked_add(access_key_bytes)
+            .unwrap()
+            .checked_add(STORAGE_BYTES_PER_RECORD)
+            .unwrap()
+            .checked_add(
+                u64::from(ORACLE_KEY_NONCES)
+                    .checked_mul(
+                        key_bytes
+                            .checked_add(GAS_KEY_NONCE_STORAGE_BYTES)
+                            .unwrap()
+                            .checked_add(STORAGE_BYTES_PER_RECORD)
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
     ))
 }
