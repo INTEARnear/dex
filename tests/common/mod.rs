@@ -8,11 +8,13 @@ use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::Base64VecU8;
 use near_sdk::serde_json::json;
 use near_sdk::{AccountId, NearToken, json_types::U128};
-use near_workspaces::network::{Mainnet, Sandbox};
+use near_workspaces::network::{Mainnet, Sandbox, ValidatorKey};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -67,9 +69,13 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             };
 
             println!("Compiling chunked-upgrade");
+            // In a target directory of its own, since cargo-near builds near-sdk with the ABI of
+            // the contract, so building both in one would rebuild near-sdk for each of them
+            let chunked_upgrade_target_directory = target_directory.join("chunked-upgrade");
             assert!(
                 Command::new("cargo")
                     .current_dir(workspace_root)
+                    .env("CARGO_TARGET_DIR", &chunked_upgrade_target_directory)
                     .args([
                         "near",
                         "build",
@@ -82,9 +88,10 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                     .unwrap()
                     .success()
             );
-            let chunked_upgrade_wasm =
-                std::fs::read(target_directory.join("near/chunked_upgrade/chunked_upgrade.wasm"))
-                    .unwrap();
+            let chunked_upgrade_wasm = std::fs::read(
+                chunked_upgrade_target_directory.join("near/chunked_upgrade/chunked_upgrade.wasm"),
+            )
+            .unwrap();
 
             let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
 
@@ -194,8 +201,17 @@ pub async fn assert_ft_balance(
 /// Returns the balance of NEAR of an account after refunds of unused gas
 /// for previous transactions are received.
 pub async fn near_balance_after_refunds(sandbox: &Worker<Sandbox>, account: &Account) -> NearToken {
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(sandbox, 3).await;
     account.view_account().await.unwrap().balance
+}
+
+/// Wait for receipts that are still on the way, without fast-forwarding the
+/// sandbox, which tests that share it would notice
+pub async fn wait_for_blocks(sandbox: &Worker<Sandbox>, blocks: u64) {
+    let height = sandbox.view_block().await.unwrap().height();
+    while sandbox.view_block().await.unwrap().height() < height + blocks {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Assert the balance of NEAR of an account.
@@ -399,6 +415,12 @@ pub struct TestContext {
     pub ft3: Contract,
 }
 
+/// The sandbox that tests share, unless they need one of their own. Dropped
+/// when the tests exit, since otherwise near-sandbox stops it, but leaves its
+/// data, which grows by gigabytes in a run.
+static SHARED_SANDBOX: OnceCell<Mutex<Option<Worker<Sandbox>>>> = OnceCell::const_new();
+static TESTS_ON_SHARED_SANDBOX: AtomicUsize = AtomicUsize::new(0);
+
 /// Set up the basic test environment
 pub async fn setup_test_environment() -> TestContext {
     setup_test_environment_with_config(TestSetupConfig::default()).await
@@ -406,8 +428,82 @@ pub async fn setup_test_environment() -> TestContext {
 
 /// Set up the test environment with custom configuration.
 pub async fn setup_test_environment_with_config(config: TestSetupConfig) -> TestContext {
+    setup_test_environment_on_sandbox(false, config).await
+}
+
+/// Set up the test environment on a sandbox of its own instead of the one
+/// that tests share, for tests that fast-forward it, which other tests would
+/// notice
+pub async fn setup_test_environment_on_own_sandbox(config: TestSetupConfig) -> TestContext {
+    setup_test_environment_on_sandbox(true, config).await
+}
+
+async fn setup_test_environment_on_sandbox(
+    own_sandbox: bool,
+    config: TestSetupConfig,
+) -> TestContext {
     let wasms = get_compiled_wasms().await;
-    let sandbox = near_workspaces::sandbox().await.unwrap();
+    let sandbox = if own_sandbox {
+        near_workspaces::sandbox().await.unwrap()
+    } else {
+        extern "C" fn drop_shared_sandbox() {
+            drop(SHARED_SANDBOX.get().unwrap().lock().unwrap().take());
+        }
+        let (shared_sandbox_rpc_addr, root_account_id_length) = {
+            let shared_sandbox = SHARED_SANDBOX
+                .get_or_init(|| async {
+                    let shared_sandbox = near_workspaces::sandbox().await.unwrap();
+                    assert_eq!(unsafe { libc::atexit(drop_shared_sandbox) }, 0);
+                    Mutex::new(Some(shared_sandbox))
+                })
+                .await
+                .lock()
+                .unwrap();
+            let shared_sandbox = shared_sandbox.as_ref().unwrap();
+            (
+                shared_sandbox.rpc_addr(),
+                shared_sandbox.root_account().unwrap().id().len(),
+            )
+        };
+        // The root account of the test, so that the accounts it creates are its
+        // own. As long as the root account of a sandbox of its own, since the
+        // storage costs that tests expect depend on the lengths of account ids.
+        let test_account_id: AccountId = format!(
+            "{:0>1$}",
+            TESTS_ON_SHARED_SANDBOX.fetch_add(1, Ordering::Relaxed),
+            root_account_id_length,
+        )
+        .parse()
+        .unwrap();
+        let test_account_key = near_workspaces::types::SecretKey::from_random(
+            near_workspaces::types::KeyType::ED25519,
+        );
+        // A worker of its own, since the shared one is on the runtime of the
+        // test that started the sandbox
+        let sandbox = near_workspaces::sandbox()
+            .rpc_addr(&shared_sandbox_rpc_addr)
+            .validator_key(ValidatorKey::Known(
+                test_account_id.clone(),
+                test_account_key.clone(),
+            ))
+            .await
+            .unwrap();
+        // Patched in with as much NEAR as the root account of a sandbox of its
+        // own has, since the root account of the shared sandbox doesn't have
+        // that much for each test
+        sandbox
+            .patch(&test_account_id)
+            .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000_000_000)))
+            .access_key(
+                test_account_key.public_key(),
+                near_workspaces::types::AccessKey::full_access(),
+            )
+            .transact()
+            .await
+            .unwrap();
+        sandbox
+    };
+    // The engine can be bigger than the requests that RPCs accept
     let dex_engine_contract = sandbox
         .dev_deploy(&wasms.chunked_upgrade_wasm)
         .await

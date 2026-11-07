@@ -7,7 +7,7 @@ use near_contract_standards::{
 };
 use near_sdk::{AccountId, PromiseOrValue, json_types::U128, near};
 
-use crate::{DexEngine, DexEngineExt, IntearDexEvent, OracleResponses, call_events::CallEvents};
+use crate::{DexEngine, DexEngineExt, IntearDexEvent, call_events::CallEvents};
 
 #[near]
 impl DexEngine {
@@ -45,7 +45,7 @@ impl DexEngine {
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
                 message.referrer(),
                 message.referral_fees(),
-                &OracleResponses::new(),
+                None,
             ) {
                 waiting_for_oracles.as_return().detach();
             }
@@ -111,7 +111,7 @@ impl FungibleTokenReceiver for DexEngine {
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
                 message.referrer(),
                 message.referral_fees(),
-                &OracleResponses::new(),
+                None,
             )
         } else {
             self.internal_increase_assets(
@@ -186,7 +186,7 @@ impl NonFungibleTokenReceiver for DexEngine {
                 )])),
                 message.referrer(),
                 message.referral_fees(),
-                &OracleResponses::new(),
+                None,
             )
         } else {
             self.internal_increase_assets(
@@ -292,7 +292,7 @@ impl DexEngine {
                 Some(attached_assets),
                 message.referrer(),
                 message.referral_fees(),
-                &OracleResponses::new(),
+                None,
             )
         } else {
             for ((token_id, previous_owner_id), amount) in token_ids

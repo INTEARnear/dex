@@ -225,10 +225,10 @@ pub enum Operation {
         r#for: Option<AccountOrDexId>,
     },
     /// Ask the oracle that has `oracle_key` to respond to `request`, which
-    /// `dex_id` reads with the `oracle_request` host function. Only allowed
-    /// at the start of the operations. The operations after the requests run
-    /// once all of them are responded to, and deposited assets are held until
-    /// then, or refunded if the oracles don't respond in time.
+    /// `dex_id` reads with the `oracle_request` host function. Only allowed as
+    /// the first operation. The operations after the request run once the
+    /// oracle responds, and deposited assets are held until then, or refunded
+    /// if the oracle doesn't respond in time.
     OracleRequest {
         oracle_key: PublicKeyHandle,
         dex_id: DexId,
@@ -384,12 +384,13 @@ mod deprecation_warning_workaround {
             referral_fees_paid: Vec<(AccountId, U128)>,
         },
         /// Operations wait for the oracle that has `oracle_key` to respond to
-        /// `request` with `oracle_respond`, under the sha256 of the request
+        /// `request` with `oracle_respond`, which names them by `nonce`
         #[event_version("1.0.0")]
         OracleRequest {
             oracle_key: PublicKeyHandle,
             dex_id: DexId,
             request: Base64VecU8,
+            nonce: Base64VecU8,
         },
     }
 }

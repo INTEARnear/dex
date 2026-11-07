@@ -17,7 +17,7 @@ use near_sdk::{
 use wasmi::{Engine, Func, Linker, Module, Store};
 
 use crate::{
-    CallType, DexEngine, DexEngineExt, IntearDexEvent, OracleResponses, PendingStorageUpdates,
+    CallType, DexEngine, DexEngineExt, IntearDexEvent, OracleResponse, PendingStorageUpdates,
     RunnerData, call_events::CallEvents,
 };
 
@@ -122,7 +122,7 @@ impl DexEngine {
         method: &str,
         dex_storage_balances: &'a crate::storage_management::StorageBalances<DexId>,
         referrer: Option<AccountId>,
-        oracle_responses: &'a OracleResponses,
+        oracle_response: Option<&'a OracleResponse>,
     ) -> Result<DexRun, String> {
         let engine = Engine::default();
         // SAFETY: already validated in internal_deploy_dex_code
@@ -144,7 +144,7 @@ impl DexEngine {
                 dex_storage_usage_before_transaction: storage_usage_before,
                 referrer,
                 dex_events: Vec::new(),
-                oracle_responses,
+                oracle_response,
             },
         );
         let mut linker = Linker::new(&engine);
@@ -185,7 +185,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<U128>,
-        oracle_responses: &OracleResponses,
+        oracle_response: Option<&OracleResponse>,
     ) -> (U128, U128) {
         let swap = self
             .internal_simulate_swap_simple(
@@ -197,7 +197,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees,
-                oracle_responses,
+                oracle_response,
             )
             .unwrap_or_else(|err| panic!("{err}"));
         self.internal_commit_swap(events, swap, trader, referrer, constraint)
@@ -332,7 +332,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<U128>,
-        oracle_responses: &OracleResponses,
+        oracle_response: Option<&OracleResponse>,
     ) -> (U128, U128) {
         expect!(!options.is_empty(), "At least one swap option is required");
         let mut best: Option<SimulatedSwap> = None;
@@ -346,7 +346,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees.clone(),
-                oracle_responses,
+                oracle_response,
             );
             let simulation = match simulation {
                 Ok(simulation) => simulation,
@@ -455,7 +455,7 @@ impl DexEngine {
         trader: intear_dex_types::Caller,
         anon_swap_available_assets: Option<&mut HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
-        oracle_responses: &OracleResponses,
+        oracle_response: Option<&OracleResponse>,
     ) -> Base64VecU8 {
         expect!(
             method != "swap",
@@ -489,7 +489,7 @@ impl DexEngine {
             &method,
             &self.dex_storage_balances,
             referrer,
-            oracle_responses,
+            oracle_response,
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
         events.extend_dex_events(dex_run.dex_events);
@@ -615,7 +615,7 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
-        oracle_responses: &OracleResponses,
+        oracle_response: Option<&OracleResponse>,
     ) -> Result<SimulatedSwap, String> {
         let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
         let swap_request = SwapRequest {
@@ -644,7 +644,7 @@ impl DexEngine {
             "swap",
             &self.dex_storage_balances,
             referrer,
-            oracle_responses,
+            oracle_response,
         )
         .map_err(|err| format!("Running wasm failed: {err}"))?;
         let response: SwapResponse =
@@ -700,7 +700,7 @@ impl DexEngine {
             &method,
             &self.dex_storage_balances,
             None,
-            &OracleResponses::new(),
+            None,
         )
         .unwrap_or_else(|err| panic!("Running wasm failed: {err}"));
 
@@ -859,10 +859,10 @@ impl DexEngine {
         mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
         mut referral_fees_of_first_swap: ReferralFees,
-        oracle_responses: &OracleResponses,
+        oracle_response: Option<&OracleResponse>,
     ) -> Option<Promise> {
         if let Some(Operation::OracleRequest { .. }) = operations.first() {
-            return Some(self.internal_wait_for_oracles(
+            return Some(self.internal_wait_for_oracle(
                 operations,
                 trader,
                 anon_swap_available_assets,
@@ -1037,7 +1037,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
-                        oracle_responses,
+                        oracle_response,
                     );
                     last_output = Some((asset_out, amount_out));
                 }
@@ -1073,7 +1073,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
-                        oracle_responses,
+                        oracle_response,
                     );
                     last_output = Some((asset_out, amount_out));
                 }
@@ -1092,7 +1092,7 @@ impl DexEngine {
                         trader.clone(),
                         anon_swap_available_assets.as_mut(),
                         referrer.clone(),
-                        oracle_responses,
+                        oracle_response,
                     );
                 }
                 Operation::TransferAsset {
@@ -1175,7 +1175,7 @@ impl DexEngine {
                     }
                 }
                 Operation::OracleRequest { .. } => {
-                    panic!("Oracle requests are only allowed at the start of operations");
+                    panic!("Only the first operation can be an oracle request");
                 }
             }
         }

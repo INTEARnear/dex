@@ -6,7 +6,7 @@ pub mod call_events;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
-pub mod migration;
+
 pub mod oracle;
 pub mod rescue;
 pub mod storage_management;
@@ -22,7 +22,7 @@ use intear_dex_types::{
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
-    PanicOnDefault, Promise, PromiseOrValue, PublicKeyHandle, UserYieldId,
+    PanicOnDefault, Promise, PromiseOrValue, PublicKeyHandle,
     json_types::{Base64VecU8, U128},
     near,
     store::{IterableMap, LazyOption, LookupMap},
@@ -71,13 +71,6 @@ pub struct DexEngine {
     /// New engine code that's uploaded in chunks, since it may not
     /// fit in one transaction.
     uploaded_code: LazyOption<Vec<u8>>,
-    /// Operations that wait for an oracle to respond to a request, by the
-    /// oracle's key and the hash of the request, with the index of the
-    /// request among their oracle requests
-    oracle_requests: LookupMap<(PublicKeyHandle, CryptoHash), Vec<(UserYieldId, u32)>>,
-    /// Responses to the oracle requests of operations that wait for them,
-    /// in the order of the requests, until all of them are responded to
-    oracle_responses: LookupMap<UserYieldId, Vec<Option<Vec<u8>>>>,
 }
 
 #[derive(BorshStorageKey)]
@@ -101,8 +94,6 @@ enum StorageKey {
         dex_id: DexId,
     },
     UploadedCode,
-    OracleRequests,
-    OracleResponses,
 }
 
 enum CallType<'a> {
@@ -123,8 +114,6 @@ enum CallType<'a> {
 type DexStorage = LookupMap<(DexId, Vec<u8>), Vec<u8>>;
 
 type PendingStorageUpdates = HashMap<Vec<u8>, Option<Vec<u8>>>;
-
-type OracleResponses = HashMap<(PublicKeyHandle, DexId, Vec<u8>), Vec<u8>>;
 
 /// `storage_num_extra_bytes_record` in
 /// https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L37
@@ -277,6 +266,13 @@ impl CallType<'_> {
     }
 }
 
+struct OracleResponse {
+    oracle_key: PublicKeyHandle,
+    dex_id: DexId,
+    request: Vec<u8>,
+    response: Vec<u8>,
+}
+
 pub struct RunnerData<'a> {
     request: Vec<u8>,
     response: Option<Vec<u8>>,
@@ -287,7 +283,7 @@ pub struct RunnerData<'a> {
     dex_storage_usage_before_transaction: u64,
     referrer: Option<AccountId>,
     dex_events: Vec<DexEventData>,
-    oracle_responses: &'a OracleResponses,
+    oracle_response: Option<&'a OracleResponse>,
 }
 
 #[near]
@@ -305,8 +301,6 @@ impl DexEngine {
             paused: false,
             trusted_code_deployer,
             uploaded_code: LazyOption::new(StorageKey::UploadedCode, None),
-            oracle_requests: LookupMap::new(StorageKey::OracleRequests),
-            oracle_responses: LookupMap::new(StorageKey::OracleResponses),
         }
     }
 
@@ -441,7 +435,7 @@ impl DexEngine {
             referrer,
             referral_fees.unwrap_or_default(),
             constraint,
-            &OracleResponses::new(),
+            None,
         );
         events.emit();
         amounts
@@ -472,7 +466,7 @@ impl DexEngine {
             Caller::Direct(near_sdk::env::predecessor_account_id()),
             None,
             referrer,
-            &OracleResponses::new(),
+            None,
         );
         events.emit();
         response
@@ -578,7 +572,7 @@ impl DexEngine {
             None,
             referrer,
             referral_fees.unwrap_or_default(),
-            &OracleResponses::new(),
+            None,
         ) {
             waiting_for_oracles.as_return().detach();
         }
@@ -654,7 +648,7 @@ impl DexEngine {
             amount,
             referrer,
             referral_fees.unwrap_or_default(),
-            &OracleResponses::new(),
+            None,
         )
         .map(|swap| (swap.total_amount_in(), swap.amount_out()))
         .unwrap_or_else(|err| panic!("{err}"))

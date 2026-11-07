@@ -1,27 +1,33 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use intear_dex_types::{AssetId, Caller, DexId, IntearDexEvent, Operation, ReferralFees, expect};
 use near_sdk::{
-    AccountId, Allowance, CurveType, Gas, GasWeight, NearToken, Promise, PromiseError, PublicKey,
-    PublicKeyHandle, UserYieldId,
+    AccountId, Allowance, CryptoHash, CurveType, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PublicKey, PublicKeyHandle, UserYieldId,
     json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
     serde_json::{Value, json},
 };
 
-use crate::{DexEngine, DexEngineExt, STORAGE_BYTES_PER_RECORD, call_events::CallEvents};
+use crate::{
+    DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
+};
 
-const MAX_WAITING_FOR_SAME_ORACLE_REQUEST: usize = 500;
+pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(5);
+
+// https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
+pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
+
 const ORACLE_KEY_NONCES: u32 = 4;
 const ORACLE_KEY_METHOD: &str = "oracle_respond";
+
 // https://github.com/near/nearcore/blob/2.14.0/core/crypto/src/signature.rs#L331-L337
 const ED25519_KEY_STORAGE_BYTES: u64 = 33;
 const SECP256K1_KEY_STORAGE_BYTES: u64 = 65;
 const ML_DSA_65_KEY_STORAGE_BYTES: u64 = 33;
+
 // https://github.com/near/nearcore/blob/2.14.0/core/primitives-core/src/types.rs#L19-L21
 const GAS_KEY_NONCE_STORAGE_BYTES: u64 = 8 + 2;
-// https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
-const MAX_YIELD_PAYLOAD_SIZE: usize = 1024;
 
 #[near]
 impl DexEngine {
@@ -83,63 +89,88 @@ impl DexEngine {
             .refund_to(near_sdk::env::predecessor_account_id())
     }
 
-    /// Respond to requests to the oracle whose key signed the transaction, by
+    /// Respond to a request to the oracle whose key signed the transaction, by
     /// the sha256 of the request.
     #[private]
-    pub fn oracle_respond(&mut self, requests: BTreeMap<Base58CryptoHash, Base64VecU8>) {
+    pub fn oracle_respond(
+        &self,
+        request_hash: Base58CryptoHash,
+        response: Base64VecU8,
+        nonces: Vec<Base64VecU8>,
+    ) {
+        expect!(
+            response.0.len() <= MAX_ORACLE_RESPONSE_BYTES,
+            "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
+        );
         let oracle_key = PublicKeyHandle::from(near_sdk::env::signer_account_pk());
-        for (request_hash, response) in requests {
-            let waiting = self
-                .oracle_requests
-                .remove(&(oracle_key.clone(), *request_hash.as_ref()))
-                .unwrap_or_default();
-            for (yield_id, request_index) in waiting {
-                let responses = self
-                    .oracle_responses
-                    .get_mut(&yield_id)
-                    .expect("Waiting operations have no responses");
-                responses[request_index as usize] = Some(response.0.clone());
-                if responses.iter().any(Option::is_none) {
-                    continue;
-                }
-                let responses: Vec<Vec<u8>> = self
-                    .oracle_responses
-                    .remove(&yield_id)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .collect();
-                let payload = near_sdk::serde_json::to_vec(&responses).unwrap();
-                // Operations whose requests could be crafted to fail the whole response
-                // are left to time out
-                if payload.len() > MAX_YIELD_PAYLOAD_SIZE {
-                    near_sdk::env::log_str(&format!(
-                        "Responses are {} bytes, more than {MAX_YIELD_PAYLOAD_SIZE} bytes that operations can get",
-                        payload.len()
-                    ));
-                    continue;
-                }
-                // Fails if the operations timed out, but haven't removed their requests yet
-                let _ = yield_id.resume(payload);
-            }
+        let request_hash = CryptoHash::from(request_hash);
+        for nonce in nonces {
+            let nonce: [u8; 32] = nonce.0.try_into().expect("Nonce must be 32 bytes");
+            // Fails if no operations wait with this yield id
+            let _ = oracle_yield_id(&oracle_key, request_hash, nonce).resume(&response.0);
         }
     }
 
-    /// Run the operations after the oracle requests, once oracles responded to
-    /// all of them, or refund the held assets if they didn't in time. Returns
-    /// what `*_on_transfer` returns for the deposit.
+    /// Run the operations after the oracle request with the response that the
+    /// oracle resumed them with, if it responded in time
     #[private]
-    #[payable]
-    pub fn after_oracle_responses(
+    pub fn after_oracle_response(
         &mut self,
-        yield_id: UserYieldId,
-        requests: Vec<(PublicKeyHandle, DexId, Base64VecU8)>,
+        oracle_key: PublicKeyHandle,
+        dex_id: DexId,
+        request: Base64VecU8,
         operations: Vec<Operation>,
         trader: Caller,
         held_assets: Option<HashMap<AssetId, U128>>,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
-        #[callback_result] responses: Result<Vec<Base64VecU8>, PromiseError>,
+    ) {
+        let Ok(response) = near_sdk::env::promise_result_checked(0, MAX_ORACLE_RESPONSE_BYTES)
+        else {
+            panic!("Oracle didn't respond in time");
+        };
+        self.assert_not_paused();
+        for (asset_id, amount) in held_assets.iter().flatten() {
+            let in_custody = self
+                .total_in_custody
+                .get_mut(asset_id)
+                .expect("Held asset is not registered");
+            in_custody.0 = in_custody
+                .0
+                .checked_add(amount.0)
+                .expect("Balance overflow");
+        }
+        let oracle_response = OracleResponse {
+            oracle_key,
+            dex_id,
+            request: request.0,
+            response,
+        };
+        let mut events = CallEvents::default();
+        let waiting_for_oracles = self.internal_execute_operations(
+            &mut events,
+            operations,
+            trader,
+            held_assets,
+            referrer,
+            referral_fees,
+            Some(&oracle_response),
+        );
+        expect!(
+            waiting_for_oracles.is_none(),
+            "Operations after an oracle request can't wait for an oracle again"
+        );
+        events.emit();
+    }
+
+    /// Refund the held assets if the operations after the oracle request didn't
+    /// run. Returns what `*_on_transfer` returns for the deposit.
+    #[private]
+    pub fn after_oracle_operations(
+        &self,
+        trader: Caller,
+        held_assets: Option<HashMap<AssetId, U128>>,
+        #[callback_result] executed: Result<(), PromiseError>,
     ) -> Value {
         fn refund_return_value(trader: &Caller, refund: &HashMap<AssetId, U128>) -> Value {
             let Caller::OnTransfer {
@@ -169,64 +200,19 @@ impl DexEngine {
             }
         }
 
-        let Ok(responses) = responses else {
-            self.oracle_responses.remove(&yield_id);
-            for (oracle_key, _, request) in requests {
-                let request_key = (oracle_key, near_sdk::env::sha256_array(&request.0));
-                if let Some(waiting) = self.oracle_requests.get_mut(&request_key) {
-                    waiting.retain(|(waiting_yield_id, _)| *waiting_yield_id != yield_id);
-                    if waiting.is_empty() {
-                        self.oracle_requests.remove(&request_key);
-                    }
-                }
-            }
-            near_sdk::env::log_str("Oracles didn't respond in time");
-            return refund_return_value(&trader, &held_assets.unwrap_or_default());
-        };
-
-        self.assert_not_paused();
-        for (asset_id, amount) in held_assets.iter().flatten() {
-            let in_custody = self
-                .total_in_custody
-                .get_mut(asset_id)
-                .expect("Held asset is not registered");
-            in_custody.0 = in_custody
-                .0
-                .checked_add(amount.0)
-                .expect("Balance overflow");
+        if executed.is_ok() {
+            // refund nothing = return success
+            return refund_return_value(&trader, &HashMap::new());
         }
-        let oracle_responses = requests
-            .into_iter()
-            .zip(responses)
-            .map(|((oracle_key, dex_id, request), response)| {
-                ((oracle_key, dex_id, request.0), response.into())
-            })
-            .collect();
-        let mut events = CallEvents::default();
-        let waiting_for_oracles = self.internal_execute_operations(
-            &mut events,
-            operations,
-            trader.clone(),
-            held_assets,
-            referrer,
-            referral_fees,
-            &oracle_responses,
-        );
-        expect!(
-            waiting_for_oracles.is_none(),
-            "Operations after oracle requests can't wait for oracles again"
-        );
-        events.emit();
-
-        // refund nothing = return success
-        refund_return_value(&trader, &HashMap::new())
+        near_sdk::env::log_str("Operations after the oracle request failed");
+        refund_return_value(&trader, &held_assets.unwrap_or_default())
     }
 }
 
 impl DexEngine {
-    /// Make the operations after the oracle requests wait for
-    /// oracles to respond, holding the sandboxed assets until then
-    pub(crate) fn internal_wait_for_oracles(
+    /// Make the operations after the oracle request wait for the oracle to
+    /// respond, holding the sandboxed assets until then
+    pub(crate) fn internal_wait_for_oracle(
         &mut self,
         mut operations: Vec<Operation>,
         trader: Caller,
@@ -234,44 +220,32 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
     ) -> Promise {
-        let yield_id = UserYieldId::new(near_sdk::env::random_seed_array());
-        let request_count = operations
-            .iter()
-            .take_while(|operation| matches!(operation, Operation::OracleRequest { .. }))
-            .count();
-        let operations_after_requests = operations.split_off(request_count);
-        let mut requests = Vec::new();
-        for (request_index, operation) in operations.iter().enumerate() {
-            let Operation::OracleRequest {
-                oracle_key,
-                dex_id,
-                request,
-            } = operation
-            else {
-                unreachable!("Only oracle requests are left");
-            };
-            let waiting = self
-                .oracle_requests
-                .entry((oracle_key.clone(), near_sdk::env::sha256_array(&request.0)))
-                .or_default();
-            expect!(
-                waiting.len() < MAX_WAITING_FOR_SAME_ORACLE_REQUEST,
-                "{MAX_WAITING_FOR_SAME_ORACLE_REQUEST} operations already wait for the same request to {oracle_key}"
-            );
-            waiting.push((yield_id, request_index.try_into().unwrap()));
-            IntearDexEvent::OracleRequest {
-                oracle_key: oracle_key.clone(),
-                dex_id: dex_id.clone(),
-                request: request.clone(),
-            }
-            .emit();
-            requests.push((oracle_key, dex_id, request));
+        let Operation::OracleRequest {
+            oracle_key,
+            dex_id,
+            request,
+        } = operations.remove(0)
+        else {
+            unreachable!("Operations that wait for an oracle start with an oracle request");
+        };
+        expect!(
+            !operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::OracleRequest { .. })),
+            "Only the first operation can be an oracle request"
+        );
+        let nonce = near_sdk::env::random_seed_array();
+        let yield_id = oracle_yield_id(&oracle_key, near_sdk::env::sha256_array(&request.0), nonce);
+        IntearDexEvent::OracleRequest {
+            oracle_key: oracle_key.clone(),
+            dex_id: dex_id.clone(),
+            request: request.clone(),
+            nonce: Base64VecU8(nonce.to_vec()),
         }
-        self.oracle_responses
-            .insert(yield_id, vec![None; requests.len()]);
+        .emit();
 
-        // Out of custody while held, so that if the operations fail, the
-        // asset's contract refunds it without the engine tracking it
+        // Out of custody while held, so that if the operations don't run, they're
+        // refunded without the engine tracking them
         for (asset_id, amount) in sandboxed_assets.iter().flatten() {
             let in_custody = self
                 .total_in_custody
@@ -282,31 +256,44 @@ impl DexEngine {
                 .checked_sub(amount.0)
                 .expect("Sandboxed asset is not in custody");
         }
-        let held_near = sandboxed_assets
-            .as_ref()
-            .and_then(|assets| assets.get(&AssetId::Near))
-            .map_or(NearToken::ZERO, |amount| {
-                NearToken::from_yoctonear(amount.0)
-            });
         Promise::new_yield_with_id(
-            "after_oracle_responses",
+            "after_oracle_response",
             json!({
-                "yield_id": yield_id,
-                "requests": requests,
-                "operations": operations_after_requests,
+                "oracle_key": oracle_key,
+                "dex_id": dex_id,
+                "request": request,
+                "operations": operations,
                 "trader": trader,
                 "held_assets": sandboxed_assets,
                 "referrer": referrer,
                 "referral_fees": referral_fees,
             })
             .to_string(),
-            held_near,
+            NearToken::ZERO,
             Gas::from_gas(0),
             GasWeight(1),
             yield_id,
         )
-        .expect("Operations with the same yield id already wait for oracles")
-        // NEAR is held in the attached deposit, which goes back if the operations fail
-        .refund_to(trader.alleged_account_id().clone())
+        .expect("Operations with the same yield id already wait for an oracle")
+        // Runs whether the operations ran, failed, or timed out, with gas of its own
+        .then(
+            Self::ext(near_sdk::env::current_account_id())
+                .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
+                .with_unused_gas_weight(0)
+                .after_oracle_operations(trader, sandboxed_assets),
+        )
     }
+}
+
+/// The yield id of operations that wait for the oracle with `oracle_key` to
+/// respond to the request with `request_hash`, so that only that oracle can
+/// resume them, and only with a response to that request
+fn oracle_yield_id(
+    oracle_key: &PublicKeyHandle,
+    request_hash: CryptoHash,
+    nonce: [u8; 32],
+) -> UserYieldId {
+    UserYieldId::new(near_sdk::env::sha256_array(
+        near_sdk::borsh::to_vec(&(oracle_key, request_hash, nonce)).unwrap(),
+    ))
 }

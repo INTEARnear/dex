@@ -1,20 +1,36 @@
-mod common;
-use common::*;
+use crate::common::*;
 
+use intear_dex::oracle::{GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_RESPONSE_BYTES};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, FeeFraction, Operation, SwapAdvancedMode, SwapOperationAmount,
-    SwapOption, SwapRequestAmount, WithdrawAmount,
+    AccountOrDexId, AssetId, DexId, FeeFraction, IntearDexEvent, Operation, SwapAdvancedMode,
+    SwapOperationAmount, SwapOption, SwapRequestAmount, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
+use near_crypto::{KeyType, SecretKey};
+use near_jsonrpc_client::{JsonRpcClient, methods};
+use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_primitives::action::{Action, FunctionCallAction};
+use near_primitives::transaction::{
+    NonceMode, SignedTransaction, Transaction, TransactionNonce, TransactionV1,
+};
+use near_primitives::types::{BlockReference, Finality};
+use near_primitives::views::{
+    AccessKeyPermissionView, AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView,
+    FinalExecutionStatus, GasKeyNoncesView, QueryRequest, TxExecutionStatus,
+};
 use near_sdk::serde_json::json;
 use near_sdk::{
-    AccountId, NearToken,
+    AccountId, Gas, NearToken, PublicKeyHandle,
     base64::{Engine, prelude::BASE64_STANDARD},
-    json_types::{Base64VecU8, U128},
+    json_types::{Base58CryptoHash, Base64VecU8, U128},
     near,
 };
-use near_workspaces::Contract;
+use near_workspaces::network::Sandbox;
+use near_workspaces::operations::TransactionStatus;
+use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::{Account, Contract, Worker};
 use std::collections::HashMap;
+use std::time::Duration;
 use test_dex_types::{
     AddLiquidityArgs, AssetWithBalance, CreatePoolArgs, CreatePoolResponse, PoolId,
     RemoveLiquidityArgs, SimplePool, SwapMessage,
@@ -2194,7 +2210,7 @@ async fn test_regular_flow() {
     assert_success(&result).unwrap();
     track_tokens_burnt(&result, &mut total_near_burnt);
     assert!(result.json::<bool>().unwrap());
-    sandbox.fast_forward(1).await.unwrap();
+    wait_for_blocks(&sandbox, 1).await;
     assert_near_balance(
         &deployer,
         initial_near_balance
@@ -3321,7 +3337,7 @@ async fn test_total_storage_balances() {
         .await
         .unwrap();
 
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(&sandbox, 3).await;
     assert_untracked_near(&dex_engine_contract).await.unwrap();
 }
 
@@ -3342,7 +3358,7 @@ async fn test_untracked_near() {
     })
     .await;
 
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(&sandbox, 3).await;
     let untracked_near_initial = assert_untracked_near(&dex_engine_contract).await.unwrap();
 
     let result = user1
@@ -3365,7 +3381,7 @@ async fn test_untracked_near() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(&sandbox, 3).await;
     let untracked_near_after_deposit = assert_untracked_near(&dex_engine_contract).await.unwrap();
     assert!(untracked_near_after_deposit >= untracked_near_after_transfer);
     assert!(
@@ -3540,7 +3556,7 @@ async fn test_rescue() {
         .await
         .unwrap();
     assert!(result.is_success());
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(&sandbox, 3).await;
     let untracked_near = assert_untracked_near(&dex_engine_contract).await.unwrap();
     assert!(untracked_near >= near_transfer_amount);
 
@@ -3576,7 +3592,7 @@ async fn test_rescue() {
     )
     .await
     .unwrap();
-    sandbox.fast_forward(3).await.unwrap();
+    wait_for_blocks(&sandbox, 3).await;
     assert_untracked_near(&dex_engine_contract).await.unwrap();
 
     set_paused(&dex_engine_contract, &pauser, false).await;
@@ -4886,4 +4902,779 @@ async fn test_deploy_code_chunks() {
             .storage_usage,
         old_storage_usage + (new_code.len() - old_code.len()) as u64
     );
+}
+
+fn oracle_key_handle(oracle_key: &SecretKey) -> PublicKeyHandle {
+    PublicKeyHandle::from(
+        oracle_key
+            .public_key()
+            .to_string()
+            .parse::<near_sdk::PublicKey>()
+            .unwrap(),
+    )
+}
+
+/// Add an oracle key to the dex engine with `deposit` for its storage and gas
+async fn create_oracle_key(
+    dex_engine_contract: &Contract,
+    payer: &Account,
+    deposit: NearToken,
+) -> SecretKey {
+    let oracle_key = SecretKey::from_random(KeyType::ED25519);
+    let result = payer
+        .call(dex_engine_contract.id(), "create_oracle_key")
+        .max_gas()
+        .deposit(deposit)
+        .args_json(json!({
+            "oracle_key": oracle_key.public_key(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    oracle_key
+}
+
+/// The operations of `transactions`, sent with `transact_async`, that wait for
+/// `request`, by the `nonce` of their `oracle_request` events, once all of them
+/// started waiting
+async fn waiting_for_oracle_request(
+    sandbox: &Worker<Sandbox>,
+    transactions: &[&TransactionStatus],
+    request: &[u8],
+) -> Vec<Base64VecU8> {
+    // At once, since operations stop waiting after 200 blocks
+    let mut queries = tokio::task::JoinSet::new();
+    for transaction in transactions {
+        let client = JsonRpcClient::connect(sandbox.rpc_addr());
+        let query = methods::tx::RpcTransactionStatusRequest {
+            transaction_info: methods::tx::TransactionInfo::TransactionId {
+                tx_hash: near_primitives::hash::CryptoHash(transaction.hash().0),
+                sender_account_id: transaction.sender_id().clone(),
+            },
+            wait_until: TxExecutionStatus::None,
+        };
+        let request = request.to_vec();
+        queries.spawn(async move {
+            // Asks again until the sandbox, which is slow with many transactions
+            // at once, runs the transaction
+            for _ in 0..100 {
+                match client.call(&query).await {
+                    Ok(response) => {
+                        let waiting = response
+                            .final_execution_outcome
+                            .into_iter()
+                            .flat_map(|outcome| outcome.into_outcome().receipts_outcome)
+                            .flat_map(|receipt| receipt.outcome.logs)
+                            .filter_map(|log| {
+                                let event = log.strip_prefix("EVENT_JSON:")?;
+                                let Ok(IntearDexEvent::OracleRequest {
+                                    request: event_request,
+                                    nonce,
+                                    ..
+                                }) = near_sdk::serde_json::from_str(event)
+                                else {
+                                    return None;
+                                };
+                                (event_request.0 == request).then_some(nonce)
+                            })
+                            .collect::<Vec<_>>();
+                        if !waiting.is_empty() {
+                            return waiting;
+                        }
+                    }
+                    Err(err) => println!("Asking again after: {err}"),
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            panic!("Operations didn't start waiting for the request");
+        });
+    }
+    queries.join_all().await.into_iter().flatten().collect()
+}
+
+/// Wait for a transaction sent with `transact_async`, asking again when the
+/// sandbox is too busy to answer, as it is after many receipts at once
+async fn wait_for_transaction(transaction: TransactionStatus) -> ExecutionFinalResult {
+    for _ in 0..100 {
+        match transaction.status().await {
+            Ok(std::task::Poll::Ready(result)) => return result,
+            Ok(std::task::Poll::Pending) => {}
+            Err(err) => println!("Asking again after: {err}"),
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!("Transaction didn't finish");
+}
+
+/// Assert that the oracle transaction and all of its receipts succeeded
+fn assert_gas_key_call_success(outcome: &FinalExecutionOutcomeView) -> Result<(), String> {
+    let failed = !matches!(outcome.status, FinalExecutionStatus::SuccessValue(_))
+        || outcome
+            .receipts_outcome
+            .iter()
+            .any(|receipt| matches!(receipt.outcome.status, ExecutionStatusView::Failure(_)));
+    if failed {
+        println!("{outcome:#?}");
+        return Err("Not successful".to_string());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oracle() {
+    let rate = 2u128;
+    let request = b"rate of the swap".to_vec();
+    let dex_ft2_liquidity = 1_000_000_000_000_000_000_000_000_000u128;
+    let user1_ft1 = 1_000_000u128;
+    let ft1_deposit = 1_000u128;
+    let swap_amount = 100u128;
+    let near_deposit = NearToken::from_near(1);
+    let oracle_key_deposit = NearToken::from_near(2);
+    let max_gas_cost = NearToken::from_millinear(100);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user3,
+        user4,
+        deployer,
+        ft1,
+        ft2,
+        ..
+    } = setup_test_environment_on_own_sandbox(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: get_compiled_wasms().await.test_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+    let storage_usage = || async {
+        dex_engine_contract
+            .view_account()
+            .await
+            .unwrap()
+            .storage_usage
+    };
+
+    // The dex pays swaps at the oracle's rate with ft2, and user1 has ft1
+    let result = deployer
+        .call(ft2.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(dex_ft2_liquidity),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = deployer
+        .call(dex_engine_contract.id(), "transfer_asset")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "to": AccountOrDexId::Dex(dex_id.clone()),
+            "asset_id": ft2_asset_id.clone(),
+            "amount": U128(dex_ft2_liquidity),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(user1_ft1),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let storage_usage_before = storage_usage().await;
+    let oracle_key = create_oracle_key(&dex_engine_contract, &user3, oracle_key_deposit).await;
+    let QueryResponseKind::AccessKey(AccessKeyView {
+        permission:
+            AccessKeyPermissionView::GasKeyFunctionCall {
+                balance: oracle_key_balance,
+                ..
+            },
+        ..
+    }) = JsonRpcClient::connect(sandbox.rpc_addr())
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+            request: QueryRequest::ViewAccessKey {
+                account_id: dex_engine_contract.id().clone(),
+                public_key: oracle_key.public_key(),
+            },
+        })
+        .await
+        .unwrap()
+        .kind
+    else {
+        panic!("The oracle key is not a gas key");
+    };
+    let oracle_key_storage_cost = oracle_key_deposit.saturating_sub(oracle_key_balance);
+    // The deposit pays exactly for the storage that the key takes
+    assert_eq!(
+        oracle_key_storage_cost,
+        near_sdk::env::storage_byte_cost()
+            .saturating_mul((storage_usage().await - storage_usage_before) as u128)
+    );
+
+    let oracle_request = |request: Vec<u8>| Operation::OracleRequest {
+        oracle_key: oracle_key_handle(&oracle_key),
+        dex_id: dex_id.clone(),
+        request: Base64VecU8(request),
+    };
+    let oracle_rate_swap =
+        |asset_in: AssetId, asset_out: AssetId, amount: u128| Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: Base64VecU8(
+                near_sdk::borsh::to_vec(&SwapMessage::OracleRate {
+                    oracle_key: oracle_key_handle(&oracle_key),
+                    request: request.clone(),
+                })
+                .unwrap(),
+            ),
+            asset_in,
+            asset_out,
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount))),
+            constraint: None,
+        };
+    let withdraw_swap_output = |asset_id: AssetId| Operation::Withdraw {
+        asset_id,
+        amount: WithdrawAmount::PreviousSwapOutput,
+        to: None,
+        rescue_address: None,
+    };
+    let execute_operations = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": operations,
+            }))
+    };
+    let deposit_near = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "deposit_near")
+            .max_gas()
+            .deposit(near_deposit)
+            .args_json(json!({
+                "operations": operations,
+            }))
+    };
+    let deposit_ft1 = |operations: Vec<Operation>| {
+        user1
+            .call(ft1.id(), "ft_transfer_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": dex_engine_contract.id(),
+                "amount": U128(ft1_deposit),
+                "msg": near_sdk::serde_json::to_string(&operations).unwrap(),
+            }))
+    };
+    let rate_response = near_sdk::borsh::to_vec(&rate).unwrap();
+    let respond =
+        |oracle_key: &SecretKey, request: &[u8], response: Vec<u8>, nonces: Vec<Base64VecU8>| {
+            let request = request.to_vec();
+            let oracle_key = oracle_key.clone();
+            let sandbox = &sandbox;
+            let dex_engine_contract = &dex_engine_contract;
+            // Signed by hand, since near-workspaces can't sign with gas keys
+            async move {
+                let client = JsonRpcClient::connect(sandbox.rpc_addr());
+                let QueryResponseKind::GasKeyNonces(GasKeyNoncesView { nonces: key_nonces }) =
+                    client
+                        .call(methods::query::RpcQueryRequest {
+                            block_reference: BlockReference::Finality(Finality::None),
+                            request: QueryRequest::ViewGasKeyNonces {
+                                account_id: dex_engine_contract.id().clone(),
+                                public_key: oracle_key.public_key(),
+                            },
+                        })
+                        .await
+                        .unwrap()
+                        .kind
+                else {
+                    panic!("The oracle key is not a gas key");
+                };
+                let block_hash = client
+                    .call(methods::block::RpcBlockRequest {
+                        block_reference: BlockReference::Finality(Finality::None),
+                    })
+                    .await
+                    .unwrap()
+                    .header
+                    .hash;
+                let transaction = Transaction::V1(TransactionV1 {
+                    signer_id: dex_engine_contract.id().clone(),
+                    public_key: oracle_key.public_key(),
+                    nonce: TransactionNonce::from_nonce_and_index(key_nonces[0] + 1, 0),
+                    receiver_id: dex_engine_contract.id().clone(),
+                    block_hash,
+                    actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
+                        method_name: "oracle_respond".to_string(),
+                        args: json!({
+                            "request_hash": Base58CryptoHash::from(
+                                near_sdk::env::sha256_array(&request)
+                            ),
+                            "response": Base64VecU8(response),
+                            "nonces": nonces,
+                        })
+                        .to_string()
+                        .into_bytes(),
+                        gas: near_primitives::types::Gas::from_teragas(300),
+                        deposit: NearToken::ZERO,
+                    }))],
+                    nonce_mode: NonceMode::Monotonic,
+                });
+                let signature = oracle_key.sign(transaction.get_hash_and_size().0.as_ref());
+                client
+                    .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+                        signed_transaction: SignedTransaction::new(signature, transaction),
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+
+    // Without a request, the oracle has nothing to respond to
+    let result = execute_operations(vec![oracle_rate_swap(
+        ft1_asset_id.clone(),
+        ft2_asset_id.clone(),
+        swap_amount,
+    )])
+    .transact()
+    .await
+    .unwrap();
+    assert!(format!("{result:?}").contains("Oracle didn't respond"));
+
+    // A swap at the rate the oracle responds with
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(ft1_deposit),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let waiting = execute_operations(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(ft1_asset_id.clone(), ft2_asset_id.clone(), swap_amount),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_operations = waiting_for_oracle_request(&sandbox, &[&waiting], &request).await;
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let result = waiting.await.unwrap();
+    assert_success(&result).unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user1.id().clone()),
+        ft1_asset_id.clone(),
+        Some(U128(ft1_deposit - swap_amount)),
+    )
+    .await
+    .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Account(user1.id().clone()),
+        ft2_asset_id.clone(),
+        Some(U128(swap_amount * rate)),
+    )
+    .await
+    .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Dex(dex_id.clone()),
+        ft2_asset_id.clone(),
+        Some(U128(dex_ft2_liquidity - swap_amount * rate)),
+    )
+    .await
+    .unwrap();
+    let mut user1_ft1_wallet = user1_ft1 - ft1_deposit;
+    let mut ft1_in_custody = ft1_deposit;
+    let mut ft2_in_custody = dex_ft2_liquidity;
+
+    // Deposits wait for the same request, and one response lets both of them run
+    let waiting_near_deposit = deposit_near(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(
+            AssetId::Near,
+            ft2_asset_id.clone(),
+            near_deposit.as_yoctonear(),
+        ),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_ft_deposit = deposit_ft1(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(ft1_asset_id.clone(), ft2_asset_id.clone(), ft1_deposit),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_operations = waiting_for_oracle_request(
+        &sandbox,
+        &[&waiting_near_deposit, &waiting_ft_deposit],
+        &request,
+    )
+    .await;
+    // Held deposits are out of custody while they wait
+    assert_total_in_custody(&dex_engine_contract, AssetId::Near, Some(U128(0)))
+        .await
+        .unwrap();
+    assert_total_in_custody(
+        &dex_engine_contract,
+        ft1_asset_id.clone(),
+        Some(U128(ft1_in_custody)),
+    )
+    .await
+    .unwrap();
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let result = waiting_near_deposit.await.unwrap();
+    assert_success(&result).unwrap();
+    let result = waiting_ft_deposit.await.unwrap();
+    assert_success(&result).unwrap();
+    user1_ft1_wallet -= ft1_deposit;
+    ft1_in_custody += ft1_deposit;
+    ft2_in_custody -= (near_deposit.as_yoctonear() + ft1_deposit) * rate;
+    let user1_ft2_wallet = (near_deposit.as_yoctonear() + ft1_deposit) * rate;
+    assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
+        .await
+        .unwrap();
+    assert_ft_balance(&user1, ft2.clone(), U128(user1_ft2_wallet))
+        .await
+        .unwrap();
+    assert_inner_asset_balance(
+        &dex_engine_contract,
+        AccountOrDexId::Dex(dex_id.clone()),
+        AssetId::Near,
+        Some(U128(near_deposit.as_yoctonear())),
+    )
+    .await
+    .unwrap();
+    let assert_custody = |near: u128, ft1_amount: u128, ft2_amount: u128| {
+        let dex_engine_contract = &dex_engine_contract;
+        let ft1_asset_id = ft1_asset_id.clone();
+        let ft2_asset_id = ft2_asset_id.clone();
+        async move {
+            assert_total_in_custody(dex_engine_contract, AssetId::Near, Some(U128(near)))
+                .await
+                .unwrap();
+            assert_total_in_custody(dex_engine_contract, ft1_asset_id, Some(U128(ft1_amount)))
+                .await
+                .unwrap();
+            assert_total_in_custody(dex_engine_contract, ft2_asset_id, Some(U128(ft2_amount)))
+                .await
+                .unwrap();
+        }
+    };
+    let near_in_custody = near_deposit.as_yoctonear();
+    assert_custody(near_in_custody, ft1_in_custody, ft2_in_custody).await;
+
+    // Deposits are refunded if the operations after the response fail
+    // Swaps more than the deposit
+    let failing_swap = |asset_in: AssetId, deposit: u128| {
+        oracle_rate_swap(asset_in, ft2_asset_id.clone(), deposit + 1)
+    };
+    let user1_near_before = near_balance_after_refunds(&sandbox, &user1).await;
+    let waiting_near_deposit = deposit_near(vec![
+        oracle_request(request.clone()),
+        failing_swap(AssetId::Near, near_deposit.as_yoctonear()),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_ft_deposit = deposit_ft1(vec![
+        oracle_request(request.clone()),
+        failing_swap(ft1_asset_id.clone(), ft1_deposit),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_operations = waiting_for_oracle_request(
+        &sandbox,
+        &[&waiting_near_deposit, &waiting_ft_deposit],
+        &request,
+    )
+    .await;
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+        let result = waiting.await.unwrap();
+        assert!(format!("{result:?}").contains("Not enough input balance in anonymous assets"));
+        let refund_gas = result
+            .receipt_outcomes()
+            .iter()
+            .find(|outcome| {
+                outcome
+                    .logs
+                    .iter()
+                    .any(|log| log == "Operations after the oracle request failed")
+            })
+            .expect("No receipt logged that the operations failed")
+            .gas_burnt;
+        println!("Refunded after failed operations with {refund_gas}");
+        assert!(refund_gas < GAS_FOR_AFTER_ORACLE_OPERATIONS);
+    }
+    assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
+        .await
+        .unwrap();
+    assert!(
+        user1_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user1).await)
+            < max_gas_cost
+    );
+    assert_custody(near_in_custody, ft1_in_custody, ft2_in_custody).await;
+
+    // Deposits are refunded if the contract is paused while they wait
+    let pauser = create_pauser(&sandbox).await;
+    let waiting = deposit_ft1(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(ft1_asset_id.clone(), ft2_asset_id.clone(), ft1_deposit),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_operations = waiting_for_oracle_request(&sandbox, &[&waiting], &request).await;
+    set_paused(&dex_engine_contract, &pauser, true).await;
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let result = waiting.await.unwrap();
+    assert!(format!("{result:?}").contains("Contract is paused"));
+    set_paused(&dex_engine_contract, &pauser, false).await;
+    assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
+        .await
+        .unwrap();
+    assert_custody(near_in_custody, ft1_in_custody, ft2_in_custody).await;
+
+    // Deposits are refunded if the oracle doesn't respond in time, and only the
+    // oracle that was asked can respond
+    let other_oracle_key =
+        create_oracle_key(&dex_engine_contract, &user4, NearToken::from_near(1)).await;
+    let storage_usage_before = storage_usage().await;
+    let user1_near_before = near_balance_after_refunds(&sandbox, &user1).await;
+    let waiting_near_deposit = deposit_near(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(
+            AssetId::Near,
+            ft2_asset_id.clone(),
+            near_deposit.as_yoctonear(),
+        ),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_ft_deposit = deposit_ft1(vec![
+        oracle_request(request.clone()),
+        oracle_rate_swap(ft1_asset_id.clone(), ft2_asset_id.clone(), ft1_deposit),
+        withdraw_swap_output(ft2_asset_id.clone()),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let waiting_operations = waiting_for_oracle_request(
+        &sandbox,
+        &[&waiting_near_deposit, &waiting_ft_deposit],
+        &request,
+    )
+    .await;
+    // Responses of another oracle, or to another request, are for nothing
+    let outcome = respond(
+        &other_oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations.clone(),
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let outcome = respond(
+        &oracle_key,
+        b"another request",
+        rate_response.clone(),
+        waiting_operations.clone(),
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        vec![0; MAX_ORACLE_RESPONSE_BYTES + 1],
+        waiting_operations.clone(),
+    )
+    .await;
+    assert!(format!("{outcome:?}").contains(&format!(
+        "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
+    )));
+    sandbox.fast_forward(250).await.unwrap();
+    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+        let result = waiting.await.unwrap();
+        assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
+    }
+    // Too late, so it's for nothing
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
+        .await
+        .unwrap();
+    assert!(
+        user1_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user1).await)
+            < max_gas_cost
+    );
+    assert_custody(near_in_custody, ft1_in_custody, ft2_in_custody).await;
+    assert_eq!(storage_usage().await, storage_usage_before);
+    wait_for_blocks(&sandbox, 3).await;
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
+
+    // Requests that aren't allowed
+    let result = execute_operations(vec![
+        Operation::RegisterAssets {
+            asset_ids: vec![AssetId::Near],
+            r#for: None,
+        },
+        oracle_request(request.clone()),
+    ])
+    .transact()
+    .await
+    .unwrap();
+    assert!(format!("{result:?}").contains("Only the first operation can be an oracle request"));
+    let storage_usage_before = storage_usage().await;
+    let result = execute_operations(vec![
+        oracle_request(request.clone()),
+        oracle_request(request.clone()),
+    ])
+    .transact()
+    .await
+    .unwrap();
+    assert!(format!("{result:?}").contains("Only the first operation can be an oracle request"));
+    assert_eq!(storage_usage().await, storage_usage_before);
+    // The gas of what happens after the requests is paid for up front
+    let storage_usage_before = storage_usage().await;
+    let result = execute_operations(vec![oracle_request(request.clone())])
+        .gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
+        .transact()
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+    assert_eq!(storage_usage().await, storage_usage_before);
+
+    // Any number of operations wait for the same request, and the oracle
+    // responds to them in as many calls as it needs
+    let storage_usage_before = storage_usage().await;
+    let wait_for_request =
+        || execute_operations(vec![oracle_request(request.clone())]).gas(Gas::from_tgas(30));
+    let mut waiting_first = Vec::new();
+    let mut waiting_later = Vec::new();
+    for _ in 0..10 {
+        waiting_first.push(wait_for_request().transact_async().await.unwrap());
+        waiting_later.push(wait_for_request().transact_async().await.unwrap());
+    }
+    let waiting_operations_first = waiting_for_oracle_request(
+        &sandbox,
+        &waiting_first.iter().collect::<Vec<_>>(),
+        &request,
+    )
+    .await;
+    let waiting_operations_later = waiting_for_oracle_request(
+        &sandbox,
+        &waiting_later.iter().collect::<Vec<_>>(),
+        &request,
+    )
+    .await;
+    // The engine stores nothing for operations while they wait
+    assert_eq!(storage_usage().await, storage_usage_before);
+    // Responding to the same operations again before they run is for nothing
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        [waiting_operations_first.clone(), waiting_operations_first].concat(),
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    for waiting in waiting_first {
+        let result = wait_for_transaction(waiting).await;
+        assert_success(&result).unwrap();
+    }
+    for waiting in &waiting_later {
+        assert!(waiting.status().await.unwrap().is_pending());
+    }
+    let outcome = respond(
+        &oracle_key,
+        &request,
+        rate_response.clone(),
+        waiting_operations_later,
+    )
+    .await;
+    assert_gas_key_call_success(&outcome).unwrap();
+    for waiting in waiting_later {
+        let result = wait_for_transaction(waiting).await;
+        assert_success(&result).unwrap();
+    }
+    assert_eq!(storage_usage().await, storage_usage_before);
 }

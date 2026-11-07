@@ -1,5 +1,4 @@
-mod common;
-use common::*;
+use crate::common::*;
 
 use intear_dex_types::{
     AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount,
@@ -1572,7 +1571,7 @@ async fn test_otc_nonces() {
         user2,
         user2_key,
         ..
-    } = setup_test_environment_with_config(TestSetupConfig {
+    } = setup_test_environment_on_own_sandbox(TestSetupConfig {
         dex: Some(DexSetupConfig {
             id: "dex".to_string(),
             code: wasms.otc_dex_wasm.clone(),

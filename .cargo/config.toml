@@ -2,3 +2,6 @@
 # near-sdk only uses host functions when `near` cfg is set (cargo-near sets it
 # automatically, but dexes are built with plain `cargo build`)
 rustflags = ["--cfg", "near"]
+
+[env]
+RUST_TEST_THREADS = "32"

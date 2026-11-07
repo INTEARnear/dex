@@ -21,8 +21,8 @@ static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom>
 };
 
 /// The dex that the engine's tests run: the simplest possible x*y=k pools,
-/// with just one liquidity provider each, and swaps of an asset for itself.
-/// See [`SwapMessage`].
+/// with just one liquidity provider each, swaps of an asset for itself, and
+/// swaps at a rate that an oracle responds with. See [`SwapMessage`].
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct TestDex {
@@ -60,6 +60,30 @@ impl Dex for TestDex {
                 }
             }
             SwapMessage::Pool { pool_id } => self.swap_on_pool(request, pool_id),
+            SwapMessage::OracleRate {
+                oracle_key,
+                request: oracle_request,
+            } => {
+                let response = env::oracle_request(&oracle_key, oracle_request)
+                    .expect("Oracle didn't respond");
+                let rate: u128 = near_sdk::borsh::from_slice(&response).expect("Invalid rate");
+                match request.amount {
+                    SwapRequestAmount::ExactIn(amount_in) => SwapResponse {
+                        amount_in,
+                        amount_out: U128(amount_in.0.checked_mul(rate).expect("Overflow")),
+                    },
+                    SwapRequestAmount::ExactOut(amount_out) => {
+                        expect!(
+                            amount_out.0.checked_rem(rate) == Some(0),
+                            "Amount out must be a multiple of the rate"
+                        );
+                        SwapResponse {
+                            amount_in: U128(amount_out.0.checked_div(rate).unwrap()),
+                            amount_out,
+                        }
+                    }
+                }
+            }
         }
     }
 }

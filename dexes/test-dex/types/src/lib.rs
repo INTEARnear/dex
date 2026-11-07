@@ -1,5 +1,5 @@
 use intear_dex_types::AssetId;
-use near_sdk::{AccountId, json_types::U128, near};
+use near_sdk::{AccountId, PublicKeyHandle, json_types::U128, near};
 
 pub type PoolId = u64;
 
@@ -10,6 +10,13 @@ pub enum SwapMessage {
     Same,
     /// Swap on an x * y = k pool
     Pool { pool_id: PoolId },
+    /// Swap at the rate that the oracle with `oracle_key` responded to
+    /// `request` with: the borsh of a u128 of output per input. The dex
+    /// pays the output from its own balance, and trusts any oracle.
+    OracleRate {
+        oracle_key: PublicKeyHandle,
+        request: Vec<u8>,
+    },
 }
 
 #[near(serializers=[borsh])]

@@ -1,5 +1,4 @@
-mod common;
-use common::*;
+use crate::common::*;
 
 use intear_dex_types::{
     AccountOrDexId, AssetId, DexEventData, DexId, Operation, SwapOperationAmount,
@@ -1811,7 +1810,7 @@ async fn test_xyk_scheduled_fees() {
         user1,
         user2,
         ..
-    } = setup_test_environment_with_config(TestSetupConfig {
+    } = setup_test_environment_on_own_sandbox(TestSetupConfig {
         dex: Some(DexSetupConfig {
             id: "dex".to_string(),
             code: wasms.xyk_dex_wasm.clone(),

@@ -835,15 +835,14 @@ pub fn oracle_request(
                 "Failed to read oracle request from guest memory: {err}"
             ))
         })?;
-    let dex_id = caller.data().dex_id.clone();
-    let Some(response) = caller
-        .data()
-        .oracle_responses
-        .get(&(oracle_key, dex_id, request))
-        .cloned()
-    else {
+    let Some(oracle_response) = caller.data().oracle_response.filter(|oracle_response| {
+        oracle_response.oracle_key == oracle_key
+            && oracle_response.dex_id == caller.data().dex_id
+            && oracle_response.request == request
+    }) else {
         return Ok(0);
     };
+    let response = oracle_response.response.clone();
     caller.data_mut().registers.insert(register_id, response);
     Ok(1)
 }
