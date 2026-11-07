@@ -246,7 +246,7 @@ impl DexEngine {
             oracle_key: oracle_key.clone(),
             dex_id: dex_id.clone(),
             request: request.clone(),
-            nonce: Base58CryptoHash::from(nonce),
+            nonce: Base64VecU8(nonce.to_vec()),
         }
         .emit();
 

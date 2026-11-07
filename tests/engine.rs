@@ -21,11 +21,12 @@ use near_primitives::views::{
     AccessKeyPermissionView, AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView,
     FinalExecutionStatus, GasKeyNoncesView, QueryRequest, TxExecutionStatus,
 };
+use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json::json;
 use near_sdk::{
     AccountId, Gas, NearToken, PublicKeyHandle,
     base64::{Engine, prelude::BASE64_STANDARD},
-    json_types::{Base58CryptoHash, Base64VecU8, U128},
+    json_types::{Base64VecU8, U128},
     near,
 };
 use near_workspaces::network::Sandbox;
@@ -5035,7 +5036,7 @@ async fn waiting_for_oracle_request(
     sandbox: &Worker<Sandbox>,
     transactions: &[&TransactionStatus],
     request: &[u8],
-) -> Vec<Base58CryptoHash> {
+) -> Vec<Base64VecU8> {
     // At once, since operations stop waiting after 200 blocks
     let mut queries = tokio::task::JoinSet::new();
     for transaction in transactions {
@@ -5276,29 +5277,27 @@ async fn test_oracle() {
             }))
     };
     let rate_response = near_sdk::borsh::to_vec(&rate).unwrap();
-    let respond = |oracle_key: &SecretKey,
-                   request: &[u8],
-                   response: Vec<u8>,
-                   nonces: Vec<Base58CryptoHash>| {
-        let request_hash = Base58CryptoHash::from(near_sdk::env::sha256_array(request));
-        let oracle_key = oracle_key.clone();
-        let sandbox = &sandbox;
-        let dex_engine_contract = &dex_engine_contract;
-        async move {
-            call_engine_with_gas_key(
-                sandbox,
-                dex_engine_contract,
-                &oracle_key,
-                "oracle_respond",
-                json!({
-                    "request_hash": request_hash,
-                    "response": Base64VecU8(response),
-                    "nonces": nonces,
-                }),
-            )
-            .await
-        }
-    };
+    let respond =
+        |oracle_key: &SecretKey, request: &[u8], response: Vec<u8>, nonces: Vec<Base64VecU8>| {
+            let request_hash = Base58CryptoHash::from(near_sdk::env::sha256_array(request));
+            let oracle_key = oracle_key.clone();
+            let sandbox = &sandbox;
+            let dex_engine_contract = &dex_engine_contract;
+            async move {
+                call_engine_with_gas_key(
+                    sandbox,
+                    dex_engine_contract,
+                    &oracle_key,
+                    "oracle_respond",
+                    json!({
+                        "request_hash": request_hash,
+                        "response": Base64VecU8(response),
+                        "nonces": nonces,
+                    }),
+                )
+                .await
+            }
+        };
 
     // Without a request, the oracle has nothing to respond to
     let result = execute_operations(vec![oracle_rate_swap(
