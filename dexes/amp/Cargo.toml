@@ -1,0 +1,17 @@
+[package]
+name = "amp-dex"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
+intear-dex-common = { path = "../../intear-dex-common", features = ["dex"] }
+amp-dex-types = { path = "types", features = ["dex"] }
+talc = { version = "4.4.3", default-features = false, features = ["lock_api"] }
+
+[features]
+# Only slimedragon.near can use the dex, as it's deployed while it's tried out
+private_beta = []

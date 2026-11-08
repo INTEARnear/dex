@@ -1,4 +1,4 @@
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
@@ -22,7 +22,7 @@ use crate::display::{self, OutputFormat};
 use crate::errors::{self, PreflightError};
 use crate::inputs::fees::{FeesArg, PayoutsArg};
 use crate::inputs::pool_id::PoolIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{
     self, FunctionCall, ONE_YOCTO_NEAR, Preflight, TransactionPlan, storage, xyk_storage,
 };
@@ -322,6 +322,7 @@ impl LockContext {
                         success_message: format!("Locked {pool_label}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,
@@ -490,6 +491,7 @@ impl EditFeesContext {
                         success_message: format!("Changed the fees of {pool_label}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,

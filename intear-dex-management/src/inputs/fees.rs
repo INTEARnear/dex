@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_primitives::types::AccountId;
 use xyk_dex_types::{
     ClaimMode, FeeAmount, FeeConfigurationV2, FeeFraction, FeePayoutType, FeeReceiver,

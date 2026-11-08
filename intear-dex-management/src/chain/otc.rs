@@ -1,4 +1,4 @@
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::types::{AccountId, BlockReference};
 use near_sdk::PublicKey;

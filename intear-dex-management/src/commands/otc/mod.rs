@@ -1,5 +1,6 @@
 use color_eyre::eyre::eyre;
-use intear_dex_types::{AccountOrDexId, AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::AccountOrDexId;
 use near_primitives::gas::Gas;
 use near_sdk::NearToken;
 use otc_dex_types::StorageDepositArgs;

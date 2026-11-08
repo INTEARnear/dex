@@ -9,7 +9,7 @@ use super::OtcContext;
 use crate::chain::otc;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, TransactionPlan, otc_storage};
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -137,6 +137,7 @@ impl SetAuthorizedKeyContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

@@ -16,19 +16,20 @@ use std::collections::HashMap;
 use crate::{
     call_events::CallEvents, internal_operations::TradeAccount, storage_management::StorageBalances,
 };
+use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, CAN_PAUSE, Caller, DexEventData, DexId, DirectWithdrawAmount,
-    IntearDexEvent, Operation, ReferralFees, SwapRequestAmount, expect,
+    AccountOrDexId, CAN_PAUSE, DexEventData, DirectWithdrawAmount, IntearDexEvent, Operation,
+    ReferralFees,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
     PanicOnDefault, Promise, PromiseOrValue, PublicKeyHandle,
-    json_types::{Base64VecU8, U128},
+    json_types::Base64VecU8,
     near,
     store::{IterableMap, LazyOption, LookupMap},
 };
 
-pub type AssetBalances = IterableMap<AssetId, U128>;
+pub type AssetBalances = IterableMap<AssetId, TokenAmount>;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -63,7 +64,7 @@ pub struct DexEngine {
     /// dex engine contract. And if the balance is greater
     /// than this stored amount, it can be freely taken out
     /// without causing any issues.
-    total_in_custody: IterableMap<AssetId, U128>,
+    total_in_custody: IterableMap<AssetId, TokenAmount>,
     paused: bool,
     /// The only account that can deploy dex code. Dex code isn't
     /// validated when it's loaded, so it must come from a trusted source.
@@ -419,8 +420,8 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
-        constraint: Option<U128>,
-    ) -> (U128, U128) {
+        constraint: Option<TokenAmount>,
+    ) -> (TokenAmount, TokenAmount) {
         let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
@@ -451,7 +452,7 @@ impl DexEngine {
         dex_id: DexId,
         method: String,
         args: Base64VecU8,
-        attached_assets: HashMap<AssetId, U128>,
+        attached_assets: HashMap<AssetId, TokenAmount>,
         referrer: Option<AccountId>,
     ) -> Base64VecU8 {
         let mut events = CallEvents::default();
@@ -473,7 +474,7 @@ impl DexEngine {
     }
 
     #[payable]
-    pub fn transfer_asset(&mut self, to: AccountOrDexId, asset_id: AssetId, amount: U128) {
+    pub fn transfer_asset(&mut self, to: AccountOrDexId, asset_id: AssetId, amount: TokenAmount) {
         let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
@@ -540,25 +541,24 @@ impl DexEngine {
         );
         self.assert_not_paused();
         if near_sdk::env::attached_deposit() > NearToken::from_yoctonear(1) {
+            let deposit = TokenAmount::new(near_sdk::env::attached_deposit().as_yoctonear());
             self.internal_increase_assets(
                 &mut events,
                 AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
                 AssetId::Near,
-                U128(near_sdk::env::attached_deposit().as_yoctonear()),
+                deposit,
             );
             self.total_in_custody
                 .entry(AssetId::Near)
                 .and_modify(|b| {
-                    b.0 =
-                        b.0.checked_add(near_sdk::env::attached_deposit().as_yoctonear())
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "Balance overflow for contract and asset Near: {} + {} > {}",
-                                    b.0,
-                                    near_sdk::env::attached_deposit().as_yoctonear(),
-                                    u128::MAX
-                                )
-                            });
+                    *b = b.checked_add(deposit).unwrap_or_else(|| {
+                        panic!(
+                            "Balance overflow for contract and asset Near: {} + {} > {}",
+                            b,
+                            deposit,
+                            u128::MAX
+                        )
+                    });
                 })
                 .or_insert_with(|| {
                     panic!(
@@ -580,7 +580,7 @@ impl DexEngine {
         events.emit();
     }
 
-    pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<U128> {
+    pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<TokenAmount> {
         self.asset_balances(&of)?.get(&asset_id).copied()
     }
 
@@ -590,7 +590,7 @@ impl DexEngine {
         dex_id: Option<DexId>,
         from_index: u32,
         limit: u32,
-    ) -> Vec<(AssetId, U128)> {
+    ) -> Vec<(AssetId, TokenAmount)> {
         let of = match (account_id, dex_id) {
             (Some(account_id), None) => AccountOrDexId::Account(account_id),
             (None, Some(dex_id)) => AccountOrDexId::Dex(dex_id),
@@ -607,7 +607,7 @@ impl DexEngine {
             .collect()
     }
 
-    pub fn total_in_custody(&self, asset_id: AssetId) -> Option<U128> {
+    pub fn total_in_custody(&self, asset_id: AssetId) -> Option<TokenAmount> {
         self.total_in_custody.get(&asset_id).copied()
     }
 
@@ -638,7 +638,7 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
-    ) -> (U128, U128) {
+    ) -> (TokenAmount, TokenAmount) {
         self.assert_not_paused();
         self.internal_simulate_swap_simple(
             dex_id,

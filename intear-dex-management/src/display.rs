@@ -1,8 +1,7 @@
 use color_eyre::eyre::eyre;
-use intear_dex_types::AssetId;
+use intear_dex_common::{AssetId, FeeFraction};
 use prettytable::Table;
 use serde_json::json;
-use xyk_dex_types::FeeFraction;
 
 use crate::chain::asset_metadata::AssetMetadata;
 

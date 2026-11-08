@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId};
+use intear_dex_common::AssetId;
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use otc_dex_types::DepositAssetsArgs;
 
@@ -9,7 +10,7 @@ use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::asset_amounts::AssetAmountsArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, TransactionPlan, otc_storage};
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -126,6 +127,7 @@ impl DepositContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

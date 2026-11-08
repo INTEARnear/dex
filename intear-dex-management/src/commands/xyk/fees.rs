@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation, WithdrawAmount};
+use intear_dex_common::{AssetId, DexId, TokenAmount};
+use intear_dex_types::{AccountOrDexId, Operation, WithdrawAmount};
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::config::NetworkConfig;
 use near_cli_rs::network_view_at_block::{
@@ -11,7 +12,7 @@ use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use xyk_dex_types::WithdrawFeesArgs;
 
-use super::XykContext;
+use super::{FeesContext, FeesDex};
 use crate::chain::asset_metadata::AssetMetadataCache;
 use crate::chain::{engine, fungible_token, xyk};
 use crate::deployment::ENGINE_ACCOUNT_ID;
@@ -27,14 +28,14 @@ const WITHDRAW_FEES_GAS: Gas = Gas::from_teragas(60);
 pub(super) const WITHDRAWAL_TO_WALLET_GAS: Gas = Gas::from_teragas(20);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 pub struct FeesCommands {
     #[interactive_clap(subcommand)]
     action: FeesAction,
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 #[strum_discriminants(derive(EnumMessage, EnumIter))]
 /// What do you want to do with collected fees?
 pub enum FeesAction {
@@ -54,10 +55,11 @@ pub(super) fn selected_asset_ids(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
     dex_id: &DexId,
+    dex: FeesDex,
 ) -> color_eyre::eyre::Result<Vec<AssetId>> {
     match selection {
         AssetSelectionArg::All => {
-            super::all_pool_asset_ids(network_config, block_reference, dex_id)
+            super::all_pool_asset_ids(network_config, block_reference, dex_id, dex)
         }
         AssetSelectionArg::Listed(asset_ids) => Ok(asset_ids.clone()),
     }
@@ -109,7 +111,7 @@ pub(super) fn selection_label(
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = PendingContext)]
 pub struct Pending {
     #[interactive_clap(skip_default_input_arg)]
@@ -125,7 +127,7 @@ pub struct Pending {
 
 impl Pending {
     fn input_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
             &context.global_context.config.credentials_home_dir,
@@ -133,7 +135,7 @@ impl Pending {
         )
     }
 
-    fn input_assets(_context: &XykContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
+    fn input_assets(_context: &FeesContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
         crate::inputs::prompt(
             "Which assets? Comma-separated asset ids, e.g. near,nep141:usdt.tether-token.near, or all",
         )
@@ -145,18 +147,19 @@ pub struct PendingContext(ArgsForViewContext);
 
 impl PendingContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<Pending as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let account_id: AccountId = scope.account_id.clone().into();
         let selection = scope.assets.clone();
         let dex_id = previous_context.dex_id;
+        let dex = previous_context.dex;
         let output_format = previous_context.global_context.output_format;
         let on_after_getting_block_reference_callback: OnAfterGettingBlockReferenceCallback =
             std::sync::Arc::new(move |network_config, block_reference| {
                 let block_reference = engine::engine_view_block(network_config, block_reference)?;
                 let asset_ids =
-                    selected_asset_ids(&selection, network_config, &block_reference, &dex_id)?;
+                    selected_asset_ids(&selection, network_config, &block_reference, &dex_id, dex)?;
                 let pending_fees = pending_fees_in_order(
                     network_config,
                     &block_reference,
@@ -216,7 +219,7 @@ impl From<PendingContext> for ArgsForViewContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = WithdrawContext)]
 pub struct Withdraw {
     #[interactive_clap(skip_default_input_arg)]
@@ -235,7 +238,7 @@ pub struct Withdraw {
 
 impl Withdraw {
     fn input_signer_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_signer_account_id_from_used_account_list(
             &context.global_context.config.credentials_home_dir,
@@ -243,14 +246,14 @@ impl Withdraw {
         )
     }
 
-    fn input_assets(_context: &XykContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
+    fn input_assets(_context: &FeesContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
         crate::inputs::prompt(
             "Which assets? Comma-separated asset ids, e.g. near,nep141:usdt.tether-token.near, or all",
         )
     }
 
     fn input_destination(
-        _context: &XykContext,
+        _context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<FundsDestinationArg>> {
         crate::inputs::select(
             "Withdraw to the wallet, or into the balance on dex.intear.near?",
@@ -267,12 +270,13 @@ pub struct WithdrawContext(ActionContext);
 
 impl WithdrawContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<Withdraw as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let selection = scope.assets.clone();
         let destination = scope.destination;
         let dex_id = previous_context.dex_id;
+        let dex = previous_context.dex;
         Ok(Self(planning::write_action_context(
             &previous_context.global_context,
             scope.signer_account_id.clone().into(),
@@ -288,6 +292,7 @@ impl WithdrawContext {
                     &preflight.network_config,
                     &preflight.block_reference,
                     &dex_id,
+                    dex,
                 )?;
                 let pending_fees = pending_fees_in_order(
                     &preflight.network_config,
@@ -365,7 +370,7 @@ impl WithdrawContext {
                         for (asset_id, amount) in &pending_fees {
                             operations.push(serde_json::to_value(Operation::Withdraw {
                                 asset_id: asset_id.clone(),
-                                amount: WithdrawAmount::Exact(U128(*amount)),
+                                amount: WithdrawAmount::Exact(TokenAmount::new(*amount)),
                                 to: None,
                                 rescue_address: None,
                             })?);
@@ -396,6 +401,7 @@ impl WithdrawContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: dex.events(),
                         deployment: None,
                     },
                     deploy_code: None,

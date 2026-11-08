@@ -1,4 +1,4 @@
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
@@ -10,9 +10,9 @@ use near_sdk::json_types::Base64VecU8;
 use serde_json::json;
 use std::str::FromStr;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
-use xyk_dex_types::{CAN_MIGRATE, SetFeeDiscountSignerArgs};
+use xyk_dex_types::SetFeeDiscountSignerArgs;
 
-use super::XykContext;
+use super::FeesContext;
 use crate::chain::{engine, xyk};
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
@@ -23,14 +23,14 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 const SET_FEE_DISCOUNT_SIGNER_GAS: Gas = Gas::from_teragas(50);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 pub struct FeeDiscountsCommands {
     #[interactive_clap(subcommand)]
     action: FeeDiscountsAction,
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 #[strum_discriminants(derive(EnumMessage, EnumIter))]
 /// What do you want to do with fee discounts?
 pub enum FeeDiscountsAction {
@@ -50,7 +50,7 @@ pub enum FeeDiscountsAction {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = ShowContext)]
 pub struct Show {
     #[interactive_clap(named_arg)]
@@ -63,7 +63,7 @@ pub struct ShowContext(ArgsForViewContext);
 
 impl ShowContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         _scope: &<Show as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let dex_id = previous_context.dex_id;
@@ -111,11 +111,11 @@ impl From<ShowContext> for ArgsForViewContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = SetSignerContext)]
 pub struct SetSigner {
     #[interactive_clap(skip_default_input_arg)]
-    /// Which account sets the signer? Only slimedragon.near can
+    /// Which account sets the signer? Only slimedragon.near can on xyk dexes, and the deployer on amp dexes
     signer_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(skip_default_input_arg)]
     /// The key that signs fee discounts from now on, e.g. 'ed25519:…'
@@ -127,13 +127,13 @@ pub struct SetSigner {
 
 impl SetSigner {
     fn input_signer_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         input_signer_account_id(context)
     }
 
     fn input_fee_discount_signer(
-        _context: &XykContext,
+        _context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::public_key::PublicKey>> {
         match inquire::CustomType::new("Which key signs fee discounts from now on? e.g. ed25519:…")
             .with_error_message("That isn't a public key like ed25519:…")
@@ -154,7 +154,7 @@ pub struct SetSignerContext(ActionContext);
 
 impl SetSignerContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<SetSigner as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let fee_discount_signer = PublicKey::from_str(&scope.fee_discount_signer.to_string())
@@ -179,11 +179,11 @@ impl From<SetSignerContext> for ActionContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = DisableContext)]
 pub struct Disable {
     #[interactive_clap(skip_default_input_arg)]
-    /// Which account disables fee discounts? Only slimedragon.near can
+    /// Which account disables fee discounts? Only slimedragon.near can on xyk dexes, and the deployer on amp dexes
     signer_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(named_arg)]
     /// Select network
@@ -192,7 +192,7 @@ pub struct Disable {
 
 impl Disable {
     fn input_signer_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         input_signer_account_id(context)
     }
@@ -203,7 +203,7 @@ pub struct DisableContext(ActionContext);
 
 impl DisableContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<Disable as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         Ok(Self(change_fee_discount_signer_action_context(
@@ -221,11 +221,14 @@ impl From<DisableContext> for ActionContext {
 }
 
 fn input_signer_account_id(
-    context: &XykContext,
+    context: &FeesContext,
 ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
     near_cli_rs::common::input_signer_account_id_from_used_account_list(
         &context.global_context.config.credentials_home_dir,
-        &format!("Which account signs? It has to be {CAN_MIGRATE}"),
+        &format!(
+            "Which account signs? It has to be {}",
+            context.fee_discount_signer_setter()
+        ),
     )
 }
 
@@ -240,16 +243,19 @@ fn fee_discounts_label(fee_discount_signer: Option<&PublicKey>) -> String {
 /// The transaction that sets the key signing fee discounts on the dex to
 /// `new_fee_discount_signer`, or removes it with `None`
 fn change_fee_discount_signer_action_context(
-    context: &XykContext,
+    context: &FeesContext,
     signer_id: AccountId,
     new_fee_discount_signer: Option<PublicKey>,
 ) -> ActionContext {
     let dex_id: DexId = context.dex_id.clone();
+    let setter_id = context.fee_discount_signer_setter();
+    let dex = context.dex;
     planning::write_action_context(&context.global_context, signer_id, move |preflight| {
         preflight.ensure_engine_not_paused()?;
-        if preflight.signer_id != CAN_MIGRATE {
+        if preflight.signer_id != setter_id {
             return Err(PreflightError::NotAllowedToSetFeeDiscountSigner {
                 signer_id: preflight.signer_id.clone(),
+                setter_id: setter_id.clone(),
             }
             .into_report());
         }
@@ -297,6 +303,7 @@ fn change_fee_discount_signer_action_context(
                 ),
                 transfer_call: None,
                 dex_id: Some(dex_id.clone()),
+                dex_events: dex.events(),
                 deployment: None,
             },
             deploy_code: None,

@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 
 use crypto_bigint::U256;
-use intear_dex_types::{
+use intear_dex_common::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
-    SwapRequestAmount, SwapResponse, env, expect,
+    SwapRequestAmount, SwapResponse, TokenAmount, env, expect,
 };
-use near_sdk::{
-    BorshStorageKey, NearToken, PanicOnDefault, json_types::U128, near, store::LookupMap,
-};
+use near_sdk::{BorshStorageKey, NearToken, PanicOnDefault, near, store::LookupMap};
 use test_dex_types::{
     AddLiquidityArgs, AssetWithBalance, CreatePoolArgs, CreatePoolResponse, PoolId,
     RemoveLiquidityArgs, SimplePool, SwapMessage,
@@ -70,15 +68,19 @@ impl Dex for TestDex {
                 match request.amount {
                     SwapRequestAmount::ExactIn(amount_in) => SwapResponse {
                         amount_in,
-                        amount_out: U128(amount_in.0.checked_mul(rate).expect("Overflow")),
+                        amount_out: TokenAmount::new(
+                            amount_in.get().checked_mul(rate).expect("Overflow"),
+                        ),
                     },
                     SwapRequestAmount::ExactOut(amount_out) => {
                         expect!(
-                            amount_out.0.checked_rem(rate) == Some(0),
+                            amount_out.get().checked_rem(rate) == Some(0),
                             "Amount out must be a multiple of the rate"
                         );
                         SwapResponse {
-                            amount_in: U128(amount_out.0.checked_div(rate).unwrap()),
+                            amount_in: TokenAmount::new(
+                                amount_out.get().checked_div(rate).unwrap(),
+                            ),
                             amount_out,
                         }
                     }
@@ -104,61 +106,50 @@ impl TestDex {
             "Invalid asset out"
         );
         expect!(
-            pool.assets.0.balance.0 > 0 && pool.assets.1.balance.0 > 0,
+            !pool.assets.0.balance.is_zero() && !pool.assets.1.balance.is_zero(),
             "Pool is empty"
         );
         let first_in = pool.assets.0.asset_id == request.asset_in;
+        let (in_balance, out_balance) = if first_in {
+            (&mut pool.assets.0.balance, &mut pool.assets.1.balance)
+        } else {
+            (&mut pool.assets.1.balance, &mut pool.assets.0.balance)
+        };
 
-        match request.amount {
-            SwapRequestAmount::ExactIn(exact_amount_in) => {
-                expect!(exact_amount_in.0 > 0, "Amount must be greater than 0");
-                let (in_balance, out_balance) = if first_in {
-                    (&mut pool.assets.0.balance.0, &mut pool.assets.1.balance.0)
-                } else {
-                    (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
-                };
+        let (amount_in, amount_out) = match request.amount {
+            SwapRequestAmount::ExactIn(amount_in) => {
+                expect!(!amount_in.is_zero(), "Amount must be greater than 0");
                 let amount_out = u128::from_le_bytes(
-                    *(U256::from(exact_amount_in.0) * U256::from(*out_balance)
-                        / (U256::from(*in_balance) + U256::from(exact_amount_in.0)))
+                    *(U256::from(amount_in.get()) * U256::from(out_balance.get())
+                        / (U256::from(in_balance.get()) + U256::from(amount_in.get())))
                     .to_le_bytes()
                     .first_chunk()
                     .unwrap(),
                 );
-                *in_balance = in_balance.checked_add(exact_amount_in.0).expect("Overflow");
-                *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
-                SwapResponse {
-                    amount_in: exact_amount_in,
-                    amount_out: U128(amount_out),
-                }
+                (amount_in, TokenAmount::new(amount_out))
             }
-            SwapRequestAmount::ExactOut(exact_amount_out) => {
-                expect!(exact_amount_out.0 > 0, "Amount must be greater than 0");
-                let (in_balance, out_balance) = if first_in {
-                    (&mut pool.assets.0.balance.0, &mut pool.assets.1.balance.0)
-                } else {
-                    (&mut pool.assets.1.balance.0, &mut pool.assets.0.balance.0)
-                };
+            SwapRequestAmount::ExactOut(amount_out) => {
+                expect!(!amount_out.is_zero(), "Amount must be greater than 0");
                 expect!(
-                    exact_amount_out.0 < *out_balance,
+                    amount_out < *out_balance,
                     "Amount must be less than out balance"
                 );
                 let amount_in = u128::from_le_bytes(
-                    *((U256::from(*in_balance) * U256::from(exact_amount_out.0))
-                        / (U256::from(*out_balance) - U256::from(exact_amount_out.0)))
+                    *((U256::from(in_balance.get()) * U256::from(amount_out.get()))
+                        / (U256::from(out_balance.get()) - U256::from(amount_out.get())))
                     .saturating_add(&U256::ONE)
                     .to_le_bytes()
                     .first_chunk()
                     .unwrap(),
                 );
-                *in_balance = in_balance.checked_add(amount_in).expect("Overflow");
-                *out_balance = out_balance
-                    .checked_sub(exact_amount_out.0)
-                    .expect("Underflow");
-                SwapResponse {
-                    amount_in: U128(amount_in),
-                    amount_out: U128(exact_amount_out.0),
-                }
+                (TokenAmount::new(amount_in), amount_out)
             }
+        };
+        *in_balance = in_balance.checked_add(amount_in).expect("Overflow");
+        *out_balance = out_balance.checked_sub(amount_out).expect("Underflow");
+        SwapResponse {
+            amount_in,
+            amount_out,
         }
     }
 }
@@ -184,7 +175,7 @@ impl TestDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -209,11 +200,11 @@ impl TestDex {
                 assets: (
                     AssetWithBalance {
                         asset_id: assets.0.clone(),
-                        balance: U128(0),
+                        balance: TokenAmount::ZERO,
                     },
                     AssetWithBalance {
                         asset_id: assets.1,
-                        balance: U128(0),
+                        balance: TokenAmount::ZERO,
                     },
                 ),
                 owner_id: caller_id.clone(),
@@ -236,7 +227,7 @@ impl TestDex {
             attached_assets
                 .remove(&AssetId::Near)
                 .expect("Near should be attached for storage")
-                .0,
+                .get(),
         );
         expect!(
             attached_near >= storage_cost,
@@ -253,7 +244,7 @@ impl TestDex {
             {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(caller_id),
                 }]
             } else {
@@ -270,7 +261,7 @@ impl TestDex {
         &mut self,
         #[allow(unused_mut)]
         #[serializer(borsh)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -297,19 +288,17 @@ impl TestDex {
             attached_assets.is_empty(),
             "No assets other than the two pool assets should be attached"
         );
-        pool.assets.0.balance.0 = pool
+        pool.assets.0.balance = pool
             .assets
             .0
             .balance
-            .0
-            .checked_add(asset_1_amount.0)
+            .checked_add(asset_1_amount)
             .expect("Overflow");
-        pool.assets.1.balance.0 = pool
+        pool.assets.1.balance = pool
             .assets
             .1
             .balance
-            .0
-            .checked_add(asset_2_amount.0)
+            .checked_add(asset_2_amount)
             .expect("Overflow");
 
         #[near(serializers=[borsh])]
@@ -325,7 +314,7 @@ impl TestDex {
     #[result_serializer(borsh)]
     pub fn remove_liquidity(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -347,19 +336,17 @@ impl TestDex {
             pool.owner_id == caller_id,
             "Only pool owner can remove liquidity"
         );
-        pool.assets.0.balance.0 = pool
+        pool.assets.0.balance = pool
             .assets
             .0
             .balance
-            .0
-            .checked_sub(assets_to_remove.0.0)
+            .checked_sub(assets_to_remove.0)
             .expect("Not enough balance for asset 1 withdrawal");
-        pool.assets.1.balance.0 = pool
+        pool.assets.1.balance = pool
             .assets
             .1
             .balance
-            .0
-            .checked_sub(assets_to_remove.1.0)
+            .checked_sub(assets_to_remove.1)
             .expect("Not enough balance for asset 2 withdrawal");
 
         #[near(serializers=[borsh])]

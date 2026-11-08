@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use intear_dex_types::{AssetId, Caller, DexId, IntearDexEvent, Operation, ReferralFees, expect};
+use intear_dex_common::{AssetId, Caller, DexId, TokenAmount, expect};
+use intear_dex_types::{IntearDexEvent, Operation, ReferralFees};
 use near_sdk::{
     AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError, PublicKey,
     PublicKeyHandle, UserYieldId,
-    json_types::{Base58CryptoHash, Base64VecU8, U128},
+    json_types::{Base58CryptoHash, Base64VecU8},
     near,
     serde_json::{Value, json},
 };
@@ -125,7 +126,7 @@ impl DexEngine {
         request: Base64VecU8,
         operations: Vec<Operation>,
         trader: Caller,
-        held_assets: Option<HashMap<AssetId, U128>>,
+        held_assets: Option<HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
     ) {
@@ -166,11 +167,11 @@ impl DexEngine {
         &mut self,
         alleged_sender: AccountId,
         transfer_of: AssetId,
-        held_assets: HashMap<AssetId, U128>,
+        held_assets: HashMap<AssetId, TokenAmount>,
         #[callback_result] executed: Result<(), PromiseError>,
     ) -> Value {
         let refund_amount = if executed.is_ok() {
-            U128(0)
+            TokenAmount::ZERO
         } else {
             near_sdk::env::log_str("Operations after the oracle request failed");
             expect!(
@@ -182,24 +183,23 @@ impl DexEngine {
                     .total_in_custody
                     .get_mut(asset_id)
                     .expect("Held asset is not in custody");
-                in_custody.0 = in_custody
-                    .0
-                    .checked_sub(amount.0)
+                *in_custody = in_custody
+                    .checked_sub(*amount)
                     .expect("Held asset is not in custody");
             }
-            held_assets.get(&transfer_of).copied().unwrap_or(U128(0))
+            held_assets.get(&transfer_of).copied().unwrap_or_default()
         };
         match transfer_of {
             AssetId::Near => {
-                if refund_amount.0 != 0 {
+                if !refund_amount.is_zero() {
                     Promise::new(alleged_sender)
-                        .transfer(NearToken::from_yoctonear(refund_amount.0))
+                        .transfer(NearToken::from_yoctonear(refund_amount.get()))
                         .detach();
                 }
                 json!(refund_amount)
             }
             AssetId::Nep141(_) => json!(refund_amount),
-            AssetId::Nep171(..) => json!(refund_amount.0 != 0),
+            AssetId::Nep171(..) => json!(!refund_amount.is_zero()),
             AssetId::Nep245(..) => json!([refund_amount]),
         }
     }
@@ -212,7 +212,7 @@ impl DexEngine {
         &mut self,
         mut operations: Vec<Operation>,
         trader: Caller,
-        sandboxed_assets: Option<HashMap<AssetId, U128>>,
+        sandboxed_assets: Option<HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
     ) -> Promise {

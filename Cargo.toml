@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "intear-dex-common",
     "intear-dex-types",
     "chunked-upgrade",
     "dexes/test-dex",
@@ -8,6 +9,8 @@ members = [
     "dexes/otc/types",
     "dexes/xyk",
     "dexes/xyk/types",
+    "dexes/amp",
+    "dexes/amp/types",
     "intear-dex-management",
 ]
 
@@ -44,6 +47,7 @@ near-sdk = { version = "5.30", default-features = false, features = [
     "deterministic-account-ids",
 ] }
 wasmi = { version = "1", default-features = false }
+intear-dex-common = { path = "./intear-dex-common" }
 intear-dex-types = { path = "./intear-dex-types" }
 near-contract-standards = "5.30"
 lz4_flex = { version = "0.14", default-features = false, features = [
@@ -59,6 +63,7 @@ libc = "0.2"
 tokio = { version = "1.12.0", features = ["full"] }
 near-crypto = "0.38"
 xyk-dex-types = { path = "./dexes/xyk/types" }
+amp-dex-types = { path = "./dexes/amp/types" }
 otc-dex-types = { path = "./dexes/otc/types" }
 test-dex-types = { path = "./dexes/test-dex/types" }
 near-primitives = "0.38"

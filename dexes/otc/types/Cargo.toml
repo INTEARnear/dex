@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 near-sdk = { version = "5", default-features = false }
-intear-dex-types = { path = "../../../intear-dex-types" }
+intear-dex-common = { path = "../../../intear-dex-common" }
 
 [dev-dependencies]
 # The types are near-sdk types, which only build outside of a contract with this
 near-sdk = { version = "5", default-features = false, features = ["non-contract-usage"] }
 
 [features]
-dex = ["intear-dex-types/dex"]
+dex = ["intear-dex-common/dex"]

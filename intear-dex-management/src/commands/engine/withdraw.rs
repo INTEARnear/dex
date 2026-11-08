@@ -1,3 +1,4 @@
+use intear_dex_common::TokenAmount;
 use intear_dex_types::{AccountOrDexId, Operation, WithdrawAmount};
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
@@ -12,7 +13,7 @@ use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::amount::AmountOrAllArg;
 use crate::inputs::asset_ids::AssetIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
 const WITHDRAW_GAS: Gas = Gas::from_teragas(50);
@@ -134,7 +135,7 @@ impl WithdrawContext {
                             .into_report());
                         }
                         (
-                            WithdrawAmount::Exact(U128(raw_amount)),
+                            WithdrawAmount::Exact(TokenAmount::new(raw_amount)),
                             display::format_amount(raw_amount, metadata.as_ref()),
                         )
                     }
@@ -164,6 +165,7 @@ impl WithdrawContext {
                         success_message: format!("Withdrew {description}"),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

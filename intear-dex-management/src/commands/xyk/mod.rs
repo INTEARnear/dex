@@ -1,12 +1,13 @@
 use color_eyre::eyre::{bail, eyre};
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
 use near_sdk::NearToken;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use xyk_dex_types::{
-    AssetIndex, ClaimMode, FeeConfigurationV2, FeeReceiver, PoolAssets, PoolId, PoolView,
+    AssetIndex, CAN_MIGRATE, ClaimMode, FeeConfigurationV2, FeeReceiver, PoolAssets, PoolId,
+    PoolView,
 };
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
@@ -15,6 +16,7 @@ use crate::errors::PreflightError;
 use crate::inputs::amount::AmountArg;
 use crate::inputs::dex_id::DexIdArg;
 use crate::inputs::pool_id::PoolIdArg;
+use crate::outcome::DexEvents;
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near, xyk_storage};
 
 pub mod community_fees;
@@ -65,6 +67,51 @@ impl XykContext {
             dex_id,
             is_dex_chosen: scope.dex.is_some(),
         })
+    }
+}
+
+/// The dexes whose fees work as xyk's, which the fees, community-fees and
+/// fee-discounts commands of xyk serve
+#[derive(Clone, Copy)]
+pub enum FeesDex {
+    Xyk,
+    Amp,
+}
+
+/// The context of the fees, community-fees and fee-discounts commands
+#[derive(Clone)]
+pub struct FeesContext {
+    pub global_context: crate::GlobalContext,
+    pub dex_id: DexId,
+    pub dex: FeesDex,
+}
+
+impl From<XykContext> for FeesContext {
+    fn from(xyk_context: XykContext) -> Self {
+        Self {
+            global_context: xyk_context.global_context,
+            dex_id: xyk_context.dex_id,
+            dex: FeesDex::Xyk,
+        }
+    }
+}
+
+impl FeesDex {
+    pub fn events(self) -> DexEvents {
+        match self {
+            FeesDex::Xyk => DexEvents::Xyk,
+            FeesDex::Amp => DexEvents::Amp,
+        }
+    }
+}
+
+impl FeesContext {
+    /// The only account that can change who signs fee discounts
+    pub fn fee_discount_signer_setter(&self) -> AccountId {
+        match self.dex {
+            FeesDex::Xyk => CAN_MIGRATE.to_owned(),
+            FeesDex::Amp => self.dex_id.deployer.clone(),
+        }
     }
 }
 
@@ -234,13 +281,22 @@ pub fn all_pool_asset_ids(
     network_config: &near_cli_rs::config::NetworkConfig,
     block_reference: &near_primitives::types::BlockReference,
     dex_id: &DexId,
+    dex: FeesDex,
 ) -> color_eyre::eyre::Result<Vec<AssetId>> {
+    let pool_asset_ids: Vec<[AssetId; 2]> = match dex {
+        FeesDex::Xyk => crate::chain::xyk::all_pools(network_config, block_reference, dex_id)?
+            .into_iter()
+            .map(|(_, pool)| presentation::pool_assets(&pool).map(|(asset_id, _)| asset_id))
+            .collect(),
+        FeesDex::Amp => crate::chain::amp::all_pools(network_config, block_reference, dex_id)?
+            .into_iter()
+            .map(|(_, pool)| [pool.assets.0.asset_id, pool.assets.1.asset_id])
+            .collect(),
+    };
     let mut asset_ids: Vec<AssetId> = Vec::new();
-    for (_, pool) in crate::chain::xyk::all_pools(network_config, block_reference, dex_id)? {
-        for (asset_id, _) in presentation::pool_assets(&pool) {
-            if !asset_ids.contains(&asset_id) {
-                asset_ids.push(asset_id);
-            }
+    for asset_id in pool_asset_ids.into_iter().flatten() {
+        if !asset_ids.contains(&asset_id) {
+            asset_ids.push(asset_id);
         }
     }
     Ok(asset_ids)

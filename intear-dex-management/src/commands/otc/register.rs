@@ -1,4 +1,4 @@
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_cli_rs::commands::ActionContext;
 use otc_dex_types::RegisterAssetsArgs;
 
@@ -9,7 +9,7 @@ use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::asset_ids::AssetIdListArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, TransactionPlan, otc_storage};
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -128,6 +128,7 @@ impl RegisterAssetsContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

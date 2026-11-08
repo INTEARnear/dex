@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId};
+use intear_dex_common::{AssetId, TokenAmount};
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
@@ -15,7 +16,7 @@ use crate::errors::PreflightError;
 use crate::inputs::amount::AmountOrAllArg;
 use crate::inputs::asset_ids::AssetIdArg;
 use crate::inputs::funds::FundsDestinationArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
 /// A withdrawal to the wallet calls the asset's contract, and the engine back
@@ -198,7 +199,7 @@ impl WithdrawContext {
                             &WithdrawAssetsArgs {
                                 assets: vec![WithdrawRequest {
                                     asset_id: asset_id.clone(),
-                                    amount: requested_amount.map(U128),
+                                    amount: requested_amount.map(TokenAmount::new),
                                     to: to.clone(),
                                     to_inner_balance: destination == FundsDestinationArg::ToBalance,
                                 }],
@@ -221,6 +222,7 @@ impl WithdrawContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

@@ -1,11 +1,13 @@
 pub mod account_or_dex_id;
 pub mod amount;
+pub mod amplification;
 pub mod asset_amounts;
 pub mod asset_ids;
 pub mod dex_id;
 pub mod fees;
 pub mod funds;
 pub mod near_amount;
+pub mod oracle_key;
 pub mod percent;
 pub mod pool_id;
 pub mod share;

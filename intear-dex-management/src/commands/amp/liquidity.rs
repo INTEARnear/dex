@@ -1,0 +1,720 @@
+use amp_dex_types::{
+    AddLiquidityArgs, PoolView, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    TokenAmount,
+};
+use intear_dex_common::DexId;
+use intear_dex_types::AccountOrDexId;
+use near_cli_rs::commands::ActionContext;
+use near_cli_rs::network_view_at_block::{
+    ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
+};
+use near_primitives::gas::Gas;
+use near_primitives::types::AccountId;
+use serde_json::json;
+use strum::{EnumDiscriminants, EnumIter, EnumMessage};
+
+use super::presentation::pool_assets;
+use super::{AmpContext, PoolToWrite, amp_pool_id};
+use crate::chain::asset_metadata::AssetMetadataCache;
+use crate::chain::{amp, engine, fungible_token};
+use crate::commands::xyk::liquidity::shares_to_remove;
+use crate::commands::xyk::{
+    FeeBalanceKind, FeeBalances, amounts_in_pool_order, new_fee_balances_bytes,
+};
+use crate::deployment::ENGINE_ACCOUNT_ID;
+use crate::display::{self, OutputFormat};
+use crate::errors::PreflightError;
+use crate::inputs::amount::AmountArg;
+use crate::inputs::percent::PercentArg;
+use crate::inputs::pool_id::{PoolIdArg, PoolIdListArg};
+use crate::inputs::share::ShareArg;
+use crate::outcome::{DexEvents, ExpectedOutcome};
+use crate::planning::xyk_math::{
+    at_least_with_slippage, liquidity_for_shares, shares_for_liquidity,
+};
+use crate::planning::{
+    self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, amp_storage, format_near, storage,
+};
+use xyk_dex_types::PoolId;
+
+const ADD_LIQUIDITY_GAS: Gas = Gas::from_teragas(100);
+const REMOVE_LIQUIDITY_GAS: Gas = Gas::from_teragas(100);
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(context = AmpContext)]
+pub struct LiquidityCommands {
+    #[interactive_clap(subcommand)]
+    action: LiquidityAction,
+}
+
+#[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(context = AmpContext)]
+#[strum_discriminants(derive(EnumMessage, EnumIter))]
+/// What do you want to do with liquidity?
+pub enum LiquidityAction {
+    #[strum_discriminants(strum(
+        message = "show    - The pools an account has shares in, and what its part holds"
+    ))]
+    /// The pools an account has shares in, and what its part holds
+    Show(Show),
+    #[strum_discriminants(strum(
+        message = "add     - Add both assets of a pool, in its ratio, from the signer's balance on dex.intear.near"
+    ))]
+    /// Add both assets of a pool, in its ratio, from the signer's balance on dex.intear.near
+    Add(Add),
+    #[strum_discriminants(strum(
+        message = "remove  - Take liquidity out of a pool to the signer's wallet"
+    ))]
+    /// Take liquidity out of a pool to the signer's wallet
+    Remove(Remove),
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = AmpContext)]
+#[interactive_clap(output_context = ShowContext)]
+pub struct Show {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Whose liquidity?
+    account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(long)]
+    #[interactive_clap(skip_interactive_input)]
+    /// Only these pools, comma-separated ids (default: every pool)
+    pools: Option<PoolIdListArg>,
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_view_at_block::NetworkViewAtBlockArgs,
+}
+
+impl Show {
+    fn input_account_id(
+        context: &AmpContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
+            &context.global_context.config.credentials_home_dir,
+            "Whose liquidity?",
+        )
+    }
+}
+
+/// An account's part of a pool
+struct Position {
+    pool_id: PoolId,
+    pool: PoolView,
+    shares: u128,
+    share_of_pool: String,
+    amounts: (u128, u128),
+}
+
+fn positions(
+    network_config: &near_cli_rs::config::NetworkConfig,
+    block_reference: &near_primitives::types::BlockReference,
+    dex_id: &DexId,
+    account_id: &AccountId,
+    listed_pool_ids: Option<&[PoolId]>,
+) -> color_eyre::eyre::Result<Vec<Position>> {
+    let pools = match listed_pool_ids {
+        Some(pool_ids) => pool_ids
+            .iter()
+            .map(|pool_id| {
+                amp::pool(network_config, block_reference, dex_id, *pool_id)
+                    .map(|pool| (*pool_id, pool))
+            })
+            .collect::<color_eyre::eyre::Result<Vec<_>>>()?,
+        None => amp::all_pools(network_config, block_reference, dex_id)?,
+    };
+    if pools.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pool_shares = amp::pool_shares(
+        network_config,
+        block_reference,
+        dex_id,
+        pools.iter().map(|(pool_id, _)| *pool_id).collect(),
+        account_id,
+    )?;
+    let mut positions = Vec::new();
+    for ((pool_id, pool), shares) in pools.into_iter().zip(pool_shares) {
+        let Some(shares) =
+            shares.filter(|shares| !shares.is_zero() && !pool.total_shares.is_none())
+        else {
+            continue;
+        };
+        let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool);
+        let total_shares = pool.total_shares.get();
+        positions.push(Position {
+            pool_id,
+            shares: shares.get(),
+            share_of_pool: display::format_share(shares.get(), total_shares)?,
+            amounts: liquidity_for_shares(shares.get(), total_shares, (reserve_0, reserve_1))?,
+            pool,
+        });
+    }
+    Ok(positions)
+}
+
+#[derive(Clone)]
+pub struct ShowContext(ArgsForViewContext);
+
+impl ShowContext {
+    pub fn from_previous_context(
+        previous_context: AmpContext,
+        scope: &<Show as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let account_id: AccountId = scope.account_id.clone().into();
+        let listed_pool_ids = scope.pools.clone().map(|PoolIdListArg(pool_ids)| pool_ids);
+        let dex_id = previous_context.dex_id;
+        let output_format = previous_context.global_context.output_format;
+        let on_after_getting_block_reference_callback: OnAfterGettingBlockReferenceCallback =
+            std::sync::Arc::new(move |network_config, block_reference| {
+                let block_reference = engine::engine_view_block(network_config, block_reference)?;
+                let positions = positions(
+                    network_config,
+                    &block_reference,
+                    &dex_id,
+                    &account_id,
+                    listed_pool_ids.as_deref(),
+                )?;
+                let metadata_cache =
+                    AssetMetadataCache::new(network_config, block_reference.clone());
+                match output_format {
+                    OutputFormat::Table if positions.is_empty() => {
+                        println!("{account_id} has no liquidity on {dex_id}");
+                    }
+                    OutputFormat::Table => {
+                        let mut table =
+                            display::table(&["Pool", "Pair", "Shares", "Share", "Holds"]);
+                        for position in &positions {
+                            let [(asset_id_0, _), (asset_id_1, _)] = pool_assets(&position.pool);
+                            let metadata_0 = metadata_cache.get(&asset_id_0)?;
+                            let metadata_1 = metadata_cache.get(&asset_id_1)?;
+                            table.add_row(prettytable::row![
+                                format!("#{}", position.pool_id),
+                                format!(
+                                    "{} / {}",
+                                    display::asset_label(&asset_id_0, metadata_0.as_ref()),
+                                    display::asset_label(&asset_id_1, metadata_1.as_ref())
+                                ),
+                                position.shares,
+                                position.share_of_pool,
+                                format!(
+                                    "{} / {}",
+                                    display::format_amount(position.amounts.0, metadata_0.as_ref()),
+                                    display::format_amount(position.amounts.1, metadata_1.as_ref())
+                                ),
+                            ]);
+                        }
+                        print!("{table}");
+                    }
+                    OutputFormat::Json => {
+                        let mut positions_json = Vec::new();
+                        for position in &positions {
+                            let [(asset_id_0, _), (asset_id_1, _)] = pool_assets(&position.pool);
+                            positions_json.push(json!({
+                                "pool_id": position.pool_id,
+                                "shares": position.shares.to_string(),
+                                "share_of_pool": position.share_of_pool,
+                                "holds": [
+                                    {
+                                        "asset_id": asset_id_0,
+                                        "amount": display::amount_json(position.amounts.0, metadata_cache.get(&asset_id_0)?.as_ref()),
+                                    },
+                                    {
+                                        "asset_id": asset_id_1,
+                                        "amount": display::amount_json(position.amounts.1, metadata_cache.get(&asset_id_1)?.as_ref()),
+                                    },
+                                ],
+                            }));
+                        }
+                        display::print_json(&json!({
+                            "account_id": account_id,
+                            "dex_id": dex_id,
+                            "positions": positions_json,
+                        }))?;
+                    }
+                }
+                Ok(())
+            });
+        Ok(Self(ArgsForViewContext {
+            config: previous_context.global_context.config,
+            interacting_with_account_ids: vec![ENGINE_ACCOUNT_ID.to_owned()],
+            on_after_getting_block_reference_callback,
+        }))
+    }
+}
+
+impl From<ShowContext> for ArgsForViewContext {
+    fn from(item: ShowContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = AmpContext)]
+#[interactive_clap(output_context = AddContext)]
+pub struct Add {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account adds liquidity, from its balance on dex.intear.near?
+    signer_account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The pool id
+    pool_id: PoolIdArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// How much of one asset, e.g. '10 NEAR'
+    amount_0: AmountArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// How much of the other asset, e.g. '30 USDC'
+    amount_1: AmountArg,
+    #[interactive_clap(named_arg)]
+    /// How far the pool's ratio may move before the transaction
+    max_slippage: AddMaxSlippage,
+}
+
+impl Add {
+    fn input_signer_account_id(
+        context: &AmpContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        near_cli_rs::common::input_signer_account_id_from_used_account_list(
+            &context.global_context.config.credentials_home_dir,
+            "Which account adds liquidity, from its balance on dex.intear.near?",
+        )
+    }
+
+    fn input_pool_id(context: &AmpContext) -> color_eyre::eyre::Result<Option<PoolIdArg>> {
+        super::input_pool_id(context)
+    }
+
+    fn input_amount_0(_context: &AmpContext) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt("How much of one asset? e.g. '10 NEAR'")
+    }
+
+    fn input_amount_1(_context: &AmpContext) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt("How much of the other asset? e.g. '30 USDC'")
+    }
+}
+
+#[derive(Clone)]
+pub struct AddContext {
+    amp_context: AmpContext,
+    signer_id: AccountId,
+    pool_id: PoolId,
+    amounts: (AmountArg, AmountArg),
+}
+
+impl AddContext {
+    pub fn from_previous_context(
+        previous_context: AmpContext,
+        scope: &<Add as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        Ok(Self {
+            amp_context: previous_context,
+            signer_id: scope.signer_account_id.clone().into(),
+            pool_id: scope.pool_id.0,
+            amounts: (scope.amount_0.clone(), scope.amount_1.clone()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = AddContext)]
+#[interactive_clap(output_context = AddMaxSlippageContext)]
+pub struct AddMaxSlippage {
+    #[interactive_clap(skip_default_input_arg)]
+    /// The most the share price may move against you, e.g. 0.5%
+    percent: PercentArg,
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
+}
+
+impl AddMaxSlippage {
+    fn input_percent(_context: &AddContext) -> color_eyre::eyre::Result<Option<PercentArg>> {
+        crate::inputs::prompt("Max slippage? e.g. 0.5%")
+    }
+}
+
+#[derive(Clone)]
+pub struct AddMaxSlippageContext(ActionContext);
+
+impl AddMaxSlippageContext {
+    pub fn from_previous_context(
+        previous_context: AddContext,
+        scope: &<AddMaxSlippage as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let AddContext {
+            amp_context,
+            signer_id,
+            pool_id,
+            amounts,
+        } = previous_context;
+        let dex_id = amp_context.dex_id;
+        let PercentArg(max_slippage) = scope.percent;
+        Ok(Self(planning::write_action_context(
+            &amp_context.global_context,
+            signer_id,
+            move |preflight| {
+                preflight.ensure_engine_not_paused()?;
+                let signer_id = preflight.signer_id.clone();
+                let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
+                let (amount_0, amount_1) =
+                    amounts_in_pool_order(&pool.assets, &pool.pair_label(), &amounts)?;
+                for (side, amount) in [(0, amount_0), (1, amount_1)] {
+                    let (asset_id, metadata) = &pool.assets[side];
+                    preflight.ensure_engine_balance(asset_id, metadata.as_ref(), amount)?;
+                }
+                let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
+                let amounts_label = format!(
+                    "{} and {}",
+                    pool.format_amount(0, amount_0),
+                    pool.format_amount(1, amount_1)
+                );
+                let mut steps = Vec::new();
+                let mut function_calls = Vec::new();
+                let mut operations = Vec::new();
+                let mut storage_near = near_sdk::NearToken::from_yoctonear(0);
+                let is_registered = amp::pool_shares(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &dex_id,
+                    vec![pool_id],
+                    &signer_id,
+                )?
+                .first()
+                .copied()
+                .flatten()
+                .is_some();
+                if !is_registered {
+                    // Providers start keeping their fees, in fee balances of
+                    // both assets
+                    let [(asset_id_0, _), (asset_id_1, _)] = &pool.assets;
+                    let registration_bytes = amp_storage::liquidity_position_bytes(
+                        &dex_id,
+                        &signer_id,
+                        preflight.protocol_limits.extra_bytes_per_record,
+                    )?
+                    .checked_add(new_fee_balances_bytes(
+                        preflight,
+                        &dex_id,
+                        &[FeeBalances {
+                            kind: FeeBalanceKind::CollectedByOwner,
+                            account_id: signer_id.clone(),
+                            asset_ids: vec![asset_id_0.clone(), asset_id_1.clone()],
+                        }],
+                    )?)
+                    .ok_or_else(|| color_eyre::eyre::eyre!("Storage size overflow"))?;
+                    storage_near = storage::storage_cost(
+                        registration_bytes,
+                        preflight.protocol_limits.storage_byte_cost,
+                    )?;
+                    let registration_calls = preflight.registration_calls(
+                        &planning::storage_near_registrations(&signer_id, &dex_id),
+                    )?;
+                    steps.extend(registration_calls.steps);
+                    function_calls.extend(registration_calls.function_calls);
+                    steps.push(format!(
+                        "Register {signer_id} in {pool_label}, attaching {} from its wallet for the storage that takes; {dex_id} sends back what it doesn't use",
+                        format_near(storage_near)
+                    ));
+                    operations.push(planning::dex_call_operation(
+                        &dex_id,
+                        "register_liquidity",
+                        &RegisterLiquidityArgs {
+                            pool_id: amp_pool_id(pool_id),
+                        },
+                        &[(
+                            intear_dex_common::AssetId::Near,
+                            storage_near.as_yoctonear(),
+                        )],
+                    )?);
+                }
+                let min_shares_received = if pool.pool.total_shares.is_none() {
+                    // Everyone took their liquidity out, so this liquidity
+                    // sets the ratio again, and gets all the shares there are
+                    steps.push(format!(
+                        "Add {amounts_label} to {pool_label}, which has no liquidity, so this sets its ratio"
+                    ));
+                    None
+                } else {
+                    let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
+                    let expected_shares = shares_for_liquidity(
+                        (amount_0, amount_1),
+                        (reserve_0, reserve_1),
+                        pool.pool.total_shares.get(),
+                    )?;
+                    let min_shares = at_least_with_slippage(expected_shares, max_slippage)?;
+                    steps.push(format!(
+                        "Add up to {amounts_label} to {pool_label} for at least {min_shares} shares, {expected_shares} at the current ratio; what doesn't fit the ratio goes back to {signer_id}'s wallet"
+                    ));
+                    Some(ProviderShares::new(min_shares))
+                };
+                operations.push(planning::dex_call_operation(
+                    &dex_id,
+                    "add_liquidity",
+                    &AddLiquidityArgs {
+                        pool_id: amp_pool_id(pool_id),
+                        min_shares_received,
+                    },
+                    &[
+                        (pool.assets[0].0.clone(), amount_0),
+                        (pool.assets[1].0.clone(), amount_1),
+                    ],
+                )?);
+                function_calls.push(FunctionCall {
+                    method_name: "execute_operations",
+                    args: json!({ "operations": operations }).into(),
+                    deposit: if storage_near.is_zero() {
+                        ONE_YOCTO_NEAR
+                    } else {
+                        storage_near
+                    },
+                    gas: ADD_LIQUIDITY_GAS,
+                });
+                Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps,
+                    function_calls,
+                    expected_outcome: ExpectedOutcome {
+                        action_name: "liquidity addition",
+                        success_message: format!("Added liquidity to {pool_label}"),
+                        transfer_call: None,
+                        dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Amp,
+                        deployment: None,
+                    },
+                    deploy_code: None,
+                })
+            },
+        )))
+    }
+}
+
+impl From<AddMaxSlippageContext> for ActionContext {
+    fn from(item: AddMaxSlippageContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = AmpContext)]
+#[interactive_clap(output_context = RemoveContext)]
+pub struct Remove {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account removes its liquidity?
+    signer_account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The pool id
+    pool_id: PoolIdArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// How much: a percentage of your shares like 50%, all, or '<integer> raw-shares'
+    share: ShareArg,
+    #[interactive_clap(named_arg)]
+    /// How far the pool's reserves may move before the transaction
+    max_slippage: RemoveMaxSlippage,
+}
+
+impl Remove {
+    fn input_signer_account_id(
+        context: &AmpContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        near_cli_rs::common::input_signer_account_id_from_used_account_list(
+            &context.global_context.config.credentials_home_dir,
+            "Which account removes its liquidity?",
+        )
+    }
+
+    fn input_pool_id(context: &AmpContext) -> color_eyre::eyre::Result<Option<PoolIdArg>> {
+        super::input_pool_id(context)
+    }
+
+    fn input_share(_context: &AmpContext) -> color_eyre::eyre::Result<Option<ShareArg>> {
+        crate::inputs::prompt(
+            "How much? A percentage of your shares like 50%, all, or '<integer> raw-shares'",
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoveContext {
+    amp_context: AmpContext,
+    signer_id: AccountId,
+    pool_id: PoolId,
+    share: ShareArg,
+}
+
+impl RemoveContext {
+    pub fn from_previous_context(
+        previous_context: AmpContext,
+        scope: &<Remove as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        Ok(Self {
+            amp_context: previous_context,
+            signer_id: scope.signer_account_id.clone().into(),
+            pool_id: scope.pool_id.0,
+            share: scope.share,
+        })
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = RemoveContext)]
+#[interactive_clap(output_context = RemoveMaxSlippageContext)]
+pub struct RemoveMaxSlippage {
+    #[interactive_clap(skip_default_input_arg)]
+    /// The most the amounts may fall before the transaction, e.g. 0.5%
+    percent: PercentArg,
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
+}
+
+impl RemoveMaxSlippage {
+    fn input_percent(_context: &RemoveContext) -> color_eyre::eyre::Result<Option<PercentArg>> {
+        crate::inputs::prompt("Max slippage? e.g. 0.5%")
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoveMaxSlippageContext(ActionContext);
+
+impl RemoveMaxSlippageContext {
+    pub fn from_previous_context(
+        previous_context: RemoveContext,
+        scope: &<RemoveMaxSlippage as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let RemoveContext {
+            amp_context,
+            signer_id,
+            pool_id,
+            share,
+        } = previous_context;
+        let dex_id = amp_context.dex_id;
+        let PercentArg(max_slippage) = scope.percent;
+        Ok(Self(planning::write_action_context(
+            &amp_context.global_context,
+            signer_id,
+            move |preflight| {
+                preflight.ensure_engine_not_paused()?;
+                let signer_id = preflight.signer_id.clone();
+                let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
+                let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
+                let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
+                let total_shares = pool.pool.total_shares;
+                let owned_shares = amp::pool_shares(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &dex_id,
+                    vec![pool_id],
+                    &signer_id,
+                )?
+                .first()
+                .copied()
+                .flatten()
+                .map_or(0, |shares| shares.get());
+                if total_shares.is_none() || owned_shares == 0 {
+                    return Err(PreflightError::NoShares {
+                        owner: signer_id.clone(),
+                        dex_id: dex_id.clone(),
+                        pool_id,
+                    }
+                    .into_report());
+                }
+                let shares = shares_to_remove(share, owned_shares, preflight, &dex_id, pool_id)?;
+                let removal_label = format!(
+                    "{shares} shares ({} of the pool) from {pool_label}",
+                    display::format_share(shares, total_shares.get())?
+                );
+                let removed =
+                    liquidity_for_shares(shares, total_shares.get(), (reserve_0, reserve_1))?;
+                let minimums = (
+                    at_least_with_slippage(removed.0, max_slippage)?,
+                    at_least_with_slippage(removed.1, max_slippage)?,
+                );
+                let mut steps = Vec::new();
+                let mut function_calls = Vec::new();
+                // A token that can't reach the wallet comes back to the
+                // signer's balance on the engine, if the asset is registered
+                // there, and is stuck in the dex's balance otherwise
+                let registration_calls = preflight.registration_calls(&[
+                    (
+                        AccountOrDexId::Account(signer_id.clone()),
+                        pool.assets[0].0.clone(),
+                    ),
+                    (
+                        AccountOrDexId::Account(signer_id.clone()),
+                        pool.assets[1].0.clone(),
+                    ),
+                ])?;
+                steps.extend(registration_calls.steps);
+                function_calls.extend(registration_calls.function_calls);
+                steps.push(format!(
+                    "Remove {removal_label}: about {} and {}, at least {} and {}, to {signer_id}'s wallet",
+                    pool.format_amount(0, removed.0),
+                    pool.format_amount(1, removed.1),
+                    pool.format_amount(0, minimums.0),
+                    pool.format_amount(1, minimums.1),
+                ));
+                for (asset_id, metadata) in &pool.assets {
+                    if let intear_dex_common::AssetId::Nep141(token_id) = asset_id
+                        && !fungible_token::is_registered(
+                            &preflight.network_config,
+                            &preflight.block_reference,
+                            token_id,
+                            &signer_id,
+                        )?
+                    {
+                        steps.push(format!(
+                            "{signer_id} has no storage on {token_id}, so its {} goes into its balance on {ENGINE_ACCOUNT_ID} instead",
+                            display::asset_label(asset_id, metadata.as_ref())
+                        ));
+                    }
+                }
+                let shares_to_remove = match share {
+                    ShareArg::All => None,
+                    ShareArg::Percent(_) | ShareArg::RawShares(_) => {
+                        Some(ProviderShares::new(shares))
+                    }
+                };
+                function_calls.push(FunctionCall {
+                    method_name: "execute_operations",
+                    args: json!({
+                        "operations": [planning::dex_call_operation(
+                            &dex_id,
+                            "remove_liquidity",
+                            &RemoveLiquidityArgs {
+                                pool_id: amp_pool_id(pool_id),
+                                shares_to_remove,
+                                min_assets_received: Some((
+                                    TokenAmount::new(minimums.0),
+                                    TokenAmount::new(minimums.1),
+                                )),
+                            },
+                            &[],
+                        )?],
+                    })
+                    .into(),
+                    deposit: ONE_YOCTO_NEAR,
+                    gas: REMOVE_LIQUIDITY_GAS,
+                });
+                Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps,
+                    function_calls,
+                    expected_outcome: ExpectedOutcome {
+                        action_name: "liquidity removal",
+                        success_message: format!("Removed {removal_label}"),
+                        transfer_call: None,
+                        dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Amp,
+                        deployment: None,
+                    },
+                    deploy_code: None,
+                })
+            },
+        )))
+    }
+}
+
+impl From<RemoveMaxSlippageContext> for ActionContext {
+    fn from(item: RemoveMaxSlippageContext) -> Self {
+        item.0
+    }
+}

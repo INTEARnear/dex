@@ -1,4 +1,4 @@
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::config::NetworkConfig;
 use near_cli_rs::network_view_at_block::{
@@ -11,7 +11,7 @@ use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use xyk_dex_types::ClaimFeesArgs;
 
-use super::XykContext;
+use super::FeesContext;
 use super::fees::{WITHDRAWAL_TO_WALLET_GAS, selected_asset_ids, selection_label};
 use crate::chain::asset_metadata::AssetMetadataCache;
 use crate::chain::{engine, fungible_token, xyk};
@@ -25,14 +25,14 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 const CLAIM_FEES_ANYONE_GAS: Gas = Gas::from_teragas(60);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 pub struct CommunityFeesCommands {
     #[interactive_clap(subcommand)]
     action: CommunityFeesAction,
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = XykContext)]
+#[interactive_clap(context = FeesContext)]
 #[strum_discriminants(derive(EnumMessage, EnumIter))]
 /// What do you want to do with community fees?
 pub enum CommunityFeesAction {
@@ -75,7 +75,7 @@ fn claimable_fees_in_order(
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = ShowContext)]
 pub struct Show {
     #[interactive_clap(skip_default_input_arg)]
@@ -91,7 +91,7 @@ pub struct Show {
 
 impl Show {
     fn input_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
             &context.global_context.config.credentials_home_dir,
@@ -99,7 +99,7 @@ impl Show {
         )
     }
 
-    fn input_assets(_context: &XykContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
+    fn input_assets(_context: &FeesContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
         crate::inputs::prompt(
             "Which assets? Comma-separated asset ids, e.g. near,nep141:usdt.tether-token.near, or all",
         )
@@ -111,18 +111,19 @@ pub struct ShowContext(ArgsForViewContext);
 
 impl ShowContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<Show as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let account_id: AccountId = scope.account_id.clone().into();
         let selection = scope.assets.clone();
         let dex_id = previous_context.dex_id;
+        let dex = previous_context.dex;
         let output_format = previous_context.global_context.output_format;
         let on_after_getting_block_reference_callback: OnAfterGettingBlockReferenceCallback =
             std::sync::Arc::new(move |network_config, block_reference| {
                 let block_reference = engine::engine_view_block(network_config, block_reference)?;
                 let asset_ids =
-                    selected_asset_ids(&selection, network_config, &block_reference, &dex_id)?;
+                    selected_asset_ids(&selection, network_config, &block_reference, &dex_id, dex)?;
                 let claimable_fees = claimable_fees_in_order(
                     network_config,
                     &block_reference,
@@ -182,7 +183,7 @@ impl From<ShowContext> for ArgsForViewContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = XykContext)]
+#[interactive_clap(input_context = FeesContext)]
 #[interactive_clap(output_context = WithdrawContext)]
 pub struct Withdraw {
     #[interactive_clap(skip_default_input_arg)]
@@ -201,7 +202,7 @@ pub struct Withdraw {
 
 impl Withdraw {
     fn input_signer_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_signer_account_id_from_used_account_list(
             &context.global_context.config.credentials_home_dir,
@@ -210,7 +211,7 @@ impl Withdraw {
     }
 
     fn input_account_id(
-        context: &XykContext,
+        context: &FeesContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
             &context.global_context.config.credentials_home_dir,
@@ -218,7 +219,7 @@ impl Withdraw {
         )
     }
 
-    fn input_assets(_context: &XykContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
+    fn input_assets(_context: &FeesContext) -> color_eyre::eyre::Result<Option<AssetSelectionArg>> {
         crate::inputs::prompt(
             "Which assets? Comma-separated asset ids, e.g. near,nep141:usdt.tether-token.near, or all",
         )
@@ -230,12 +231,13 @@ pub struct WithdrawContext(ActionContext);
 
 impl WithdrawContext {
     pub fn from_previous_context(
-        previous_context: XykContext,
+        previous_context: FeesContext,
         scope: &<Withdraw as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let account_id: AccountId = scope.account_id.clone().into();
         let selection = scope.assets.clone();
         let dex_id = previous_context.dex_id;
+        let dex = previous_context.dex;
         Ok(Self(planning::write_action_context(
             &previous_context.global_context,
             scope.signer_account_id.clone().into(),
@@ -252,6 +254,7 @@ impl WithdrawContext {
                     &preflight.network_config,
                     &preflight.block_reference,
                     &dex_id,
+                    dex,
                 )?;
                 let claimable_fees = claimable_fees_in_order(
                     &preflight.network_config,
@@ -329,6 +332,7 @@ impl WithdrawContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: dex.events(),
                         deployment: None,
                     },
                     deploy_code: None,

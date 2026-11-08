@@ -4,6 +4,7 @@
 
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
+pub mod amp;
 pub mod dex;
 pub mod dex_code;
 pub mod engine;
@@ -30,6 +31,11 @@ pub enum TopLevelCommand {
     ))]
     /// The XYK dex (slimedragon.near/xyk unless --dex says otherwise)
     Xyk(self::xyk::XykCommands),
+    #[strum_discriminants(strum(
+        message = "amp     - The amp dex of pools rated at an oracle's prices (slimedragon.near/amp unless --dex says otherwise)"
+    ))]
+    /// The amp dex of pools rated at an oracle's prices (slimedragon.near/amp unless --dex says otherwise)
+    Amp(self::amp::AmpCommands),
     #[strum_discriminants(strum(
         message = "otc     - The OTC dex (slimedragon.near/otc unless --dex says otherwise)"
     ))]

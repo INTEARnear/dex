@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use intear_dex_types::{AccountOrDexId, AssetId, Caller, DepositMessage, expect};
+use intear_dex_common::{AssetId, Caller, TokenAmount, expect};
+use intear_dex_types::{AccountOrDexId, DepositMessage};
 use near_contract_standards::{
     fungible_token::receiver::FungibleTokenReceiver,
     non_fungible_token::{self, core::NonFungibleTokenReceiver},
@@ -17,15 +18,15 @@ impl DexEngine {
     pub fn deposit_near(&mut self, operations: Option<DepositMessage>) {
         let mut events = CallEvents::default();
         self.assert_not_paused();
-        let deposit = U128(near_sdk::env::attached_deposit().as_yoctonear());
+        let deposit = TokenAmount::new(near_sdk::env::attached_deposit().as_yoctonear());
         self.total_in_custody
             .entry(AssetId::Near)
             .and_modify(|b| {
-                b.0 = b.0.checked_add(deposit.0).unwrap_or_else(|| {
+                *b = b.checked_add(deposit).unwrap_or_else(|| {
                     panic!(
                         "Balance overflow for contract and asset Near: {} + {} > {}",
-                        b.0,
-                        deposit.0,
+                        b,
+                        deposit,
                         u128::MAX
                     )
                 })
@@ -54,7 +55,7 @@ impl DexEngine {
                 &mut events,
                 AccountOrDexId::Account(near_sdk::env::predecessor_account_id()),
                 AssetId::Near,
-                U128(near_sdk::env::attached_deposit().as_yoctonear()),
+                deposit,
             );
             IntearDexEvent::UserDeposit {
                 account_id: near_sdk::env::predecessor_account_id(),
@@ -77,6 +78,7 @@ impl FungibleTokenReceiver for DexEngine {
     ) -> PromiseOrValue<U128> {
         let mut events = CallEvents::default();
         self.assert_not_paused();
+        let amount = TokenAmount::new(amount.0);
         let contract_id = near_sdk::env::predecessor_account_id();
         let operations: Option<DepositMessage> = if msg.is_empty() {
             None
@@ -87,11 +89,11 @@ impl FungibleTokenReceiver for DexEngine {
         self.total_in_custody
             .entry(AssetId::Nep141(contract_id.clone()))
             .and_modify(|b| {
-                b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| {
+                *b = b.checked_add(amount).unwrap_or_else(|| {
                     panic!(
                         "Balance overflow for contract and asset Nep141: {} + {} > {}",
-                        b.0,
-                        amount.0,
+                        b,
+                        amount,
                         u128::MAX
                     )
                 })
@@ -160,10 +162,10 @@ impl NonFungibleTokenReceiver for DexEngine {
         self.total_in_custody
             .entry(AssetId::Nep171(contract_id.clone(), token_id.to_string()))
             .and_modify(|b| {
-                b.0 = b.0.checked_add(1).unwrap_or_else(|| {
+                *b = b.checked_add(TokenAmount::new(1)).unwrap_or_else(|| {
                     panic!(
                         "Balance overflow for contract and asset Nep171: {} + 1 > {}",
-                        b.0,
+                        b,
                         u128::MAX
                     )
                 })
@@ -182,7 +184,7 @@ impl NonFungibleTokenReceiver for DexEngine {
                 },
                 Some(HashMap::from_iter([(
                     AssetId::Nep171(contract_id, token_id),
-                    U128(1),
+                    TokenAmount::new(1),
                 )])),
                 message.referrer(),
                 message.referral_fees(),
@@ -193,12 +195,12 @@ impl NonFungibleTokenReceiver for DexEngine {
                 &mut events,
                 AccountOrDexId::Account(previous_owner_id.clone()),
                 AssetId::Nep171(contract_id.clone(), token_id.to_string()),
-                U128(1),
+                TokenAmount::new(1),
             );
             IntearDexEvent::UserDeposit {
                 account_id: previous_owner_id,
                 asset_id: AssetId::Nep171(contract_id, token_id),
-                amount: U128(1),
+                amount: TokenAmount::new(1),
             }
             .emit();
             None
@@ -227,6 +229,10 @@ impl DexEngine {
                 && previous_owner_ids.len() == amounts.len(),
             "Invalid input array lengths"
         );
+        let amounts: Vec<TokenAmount> = amounts
+            .into_iter()
+            .map(|U128(amount)| TokenAmount::new(amount))
+            .collect();
 
         let contract_id = near_sdk::env::predecessor_account_id();
 
@@ -248,11 +254,11 @@ impl DexEngine {
             self.total_in_custody
                 .entry(AssetId::Nep245(contract_id.clone(), token_id.clone()))
                 .and_modify(|b| {
-                    b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| {
+                    *b = b.checked_add(*amount).unwrap_or_else(|| {
                         panic!(
                             "Balance overflow for contract and asset Nep245: {} + {} > {}",
-                            b.0,
-                            amount.0,
+                            b,
+                            amount,
                             u128::MAX
                         )
                     })
@@ -264,12 +270,12 @@ impl DexEngine {
                 });
             attached_assets
                 .entry(AssetId::Nep245(contract_id.clone(), token_id.clone()))
-                .and_modify(|b: &mut U128| {
-                    b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| {
+                .and_modify(|b: &mut TokenAmount| {
+                    *b = b.checked_add(*amount).unwrap_or_else(|| {
                         panic!(
                             "Balance overflow for contract and asset Nep245: {} + {} > {}",
-                            b.0,
-                            amount.0,
+                            b,
+                            amount,
                             u128::MAX
                         )
                     })

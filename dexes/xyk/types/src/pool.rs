@@ -1,4 +1,4 @@
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_sdk::{AccountId, Timestamp, near, store::LookupMap};
 
 use crate::{

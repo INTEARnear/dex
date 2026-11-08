@@ -3,12 +3,12 @@
 use core::panic;
 use std::collections::HashMap;
 
-use intear_dex_types::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
-    SwapRequestAmount, SwapResponse, env, expect,
+use intear_dex_common::{
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, FeeBalances,
+    SwapRequest, SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, CurveType, NearToken, PanicOnDefault, PublicKey,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PublicKey,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -16,16 +16,15 @@ use near_sdk::{
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
     ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
-    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeeDiscountSignaturePayload,
-    FeePayoutType, FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
+    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeePayoutType, FeeReceiver,
+    GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
+    GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
     LiquidityPosition, LiquidityPositionView, LockPoolArgs, PRIVATE_POOL_TOTAL_SHARES,
     PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolType,
     PoolView, ProviderShares, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
     RemoveLiquidityResponse, RouteFraction, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
-    SignedFeeDiscount, SwapArgs, SwapReserves, SwapRoute, TokenAmount, TotalShares,
-    WithdrawFeesArgs, XykDexEvent,
-    math::{exact_in_amount_out, exact_out_amount_in},
+    SwapArgs, SwapReserves, TokenAmount, TotalShares, WithdrawFeesArgs, XykDexEvent,
+    math::{self, exact_in_amount_out, exact_out_amount_in},
 };
 
 #[global_allocator]
@@ -52,8 +51,8 @@ enum StorageKey {
 #[derive(PanicOnDefault)]
 pub struct XykDex {
     pools: Vector<Pool>,
-    fees_collected_by_users: LookupMap<(AccountId, AssetId), TokenAmount>,
-    fees_claimable_by_anyone: LookupMap<(AccountId, AssetId), TokenAmount>,
+    fees_collected_by_users: FeeBalances,
+    fees_claimable_by_anyone: FeeBalances,
     fee_discount_signer_public_key: Option<PublicKey>,
 }
 
@@ -75,37 +74,24 @@ impl Dex for XykDex {
             "Route fractions must add up to 100%"
         );
         let fee_discount = fee_discount.map(|signed_fee_discount| {
-            self.verify_fee_discount(signed_fee_discount, &routes, &request)
+            signed_fee_discount.verify(
+                self.fee_discount_signer_public_key.as_ref(),
+                &routes,
+                &request,
+            )
         });
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
-        let requested_amount = TokenAmount::new(requested_amount.0);
-        let mut route_amounts = routes
-            .into_iter()
-            .map(|route| {
-                let amount = route.fraction.of(requested_amount);
-                (route, amount)
-            })
-            .collect::<Vec<_>>();
-        // Fractions round down, so the first route also swaps what's left
-        let unsplit_amount = route_amounts
-            .iter()
-            .try_fold(requested_amount, |unsplit_amount, (_route, amount)| {
-                unsplit_amount.checked_sub(*amount)
-            })
-            .expect("Routes exceed the requested amount");
-        route_amounts[0].1 = route_amounts[0]
-            .1
-            .checked_add(unsplit_amount)
-            .expect("Overflow");
+        let route_amounts =
+            RouteFraction::split(requested_amount, routes.iter().map(|route| route.fraction));
 
         let mut response = SwapResponse {
-            amount_in: U128(0),
-            amount_out: U128(0),
+            amount_in: TokenAmount::ZERO,
+            amount_out: TokenAmount::ZERO,
         };
         let mut updated_pool_ids = Vec::new();
-        for (route, amount) in route_amounts {
+        for (route, amount) in routes.iter().zip(route_amounts) {
             let route_response = self.swap_route(
                 &route.pool_ids,
                 &request,
@@ -113,15 +99,13 @@ impl Dex for XykDex {
                 fee_discount,
                 &mut updated_pool_ids,
             );
-            response.amount_in.0 = response
+            response.amount_in = response
                 .amount_in
-                .0
-                .checked_add(route_response.amount_in.0)
+                .checked_add(route_response.amount_in)
                 .expect("Overflow");
-            response.amount_out.0 = response
+            response.amount_out = response
                 .amount_out
-                .0
-                .checked_add(route_response.amount_out.0)
+                .checked_add(route_response.amount_out)
                 .expect("Overflow");
         }
         self.fees_collected_by_users.flush();
@@ -142,93 +126,6 @@ impl Dex for XykDex {
 }
 
 impl XykDex {
-    /// Returns the verified fee discount fraction
-    fn verify_fee_discount(
-        &self,
-        signed_fee_discount: SignedFeeDiscount,
-        routes: &[SwapRoute],
-        request: &SwapRequest,
-    ) -> FeeDiscountFraction {
-        let SignedFeeDiscount {
-            discount,
-            signature,
-        } = signed_fee_discount;
-        expect!(
-            let Some(fee_discount_signer_public_key) = &self.fee_discount_signer_public_key,
-            "Fee discounts are disabled on this dex"
-        );
-        let signature_payload = FeeDiscountSignaturePayload {
-            chain_id: near_sdk::env::chain_id(),
-            engine_contract_id: env::engine_contract_id(),
-            dex_id: env::dex_id(),
-            discount: discount.clone(),
-        };
-        let hash =
-            near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
-        expect!(
-            match fee_discount_signer_public_key.curve_type() {
-                CurveType::ED25519 => {
-                    near_sdk::env::ed25519_verify(
-                        &signature.try_into().unwrap(),
-                        hash,
-                        fee_discount_signer_public_key.as_bytes()[1..]
-                            .try_into()
-                            .unwrap(),
-                    )
-                }
-                CurveType::SECP256K1 => {
-                    near_sdk::env::ecrecover(
-                        &hash,
-                        &signature[..signature.len().saturating_sub(1)],
-                        *signature.last().expect("Invalid signature"),
-                        true,
-                    ) == Some(
-                        fee_discount_signer_public_key.as_bytes()[1..]
-                            .try_into()
-                            .unwrap(),
-                    )
-                }
-                CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
-                    &signature.try_into().unwrap(),
-                    hash,
-                    fee_discount_signer_public_key.as_bytes()[1..]
-                        .try_into()
-                        .unwrap(),
-                ),
-            },
-            "Fee discount signature verification failed"
-        );
-        expect!(
-            discount.routes == routes,
-            "Fee discount is for another route"
-        );
-        expect!(
-            discount.asset_in == request.asset_in && discount.asset_out == request.asset_out,
-            "Fee discount is for other assets"
-        );
-        if let Some(trader_id) = &discount.trader_id {
-            expect!(
-                match env::caller() {
-                    Caller::Direct(account_id) => account_id == *trader_id,
-                    Caller::OnTransfer {
-                        alleged_sender,
-                        transfer_of,
-                    } => alleged_sender == *trader_id && transfer_of == request.asset_in,
-                },
-                "Fee discount is for another trader"
-            );
-        }
-        expect!(
-            discount.amount == request.amount,
-            "Fee discount is for another amount"
-        );
-        expect!(
-            near_sdk::env::block_height() <= discount.expiration_block_height,
-            "Fee discount expired"
-        );
-        discount.fee_discount
-    }
-
     /// Starts the fee balances of the account receivers of `fees`, in the assets that their
     /// payouts take fees in and the balances that their claim modes use, and flushes every
     /// started fee balance to storage
@@ -293,43 +190,39 @@ impl XykDex {
             SwapRequestAmount::ExactIn(_) => {
                 let mut hop_amount = amount;
                 for (pool_id, asset_in, asset_out) in hops {
-                    hop_amount = TokenAmount::new(
-                        self.swap_in_pool(
+                    hop_amount = self
+                        .swap_in_pool(
                             pool_id,
                             fee_discount,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
-                            SwapRequestAmount::ExactIn(U128(hop_amount.get())),
+                            SwapRequestAmount::ExactIn(hop_amount),
                         )
-                        .amount_out
-                        .0,
-                    );
+                        .amount_out;
                 }
                 SwapResponse {
-                    amount_in: U128(amount.get()),
-                    amount_out: U128(hop_amount.get()),
+                    amount_in: amount,
+                    amount_out: hop_amount,
                 }
             }
             SwapRequestAmount::ExactOut(_) => {
                 let mut hop_amount = amount;
                 for (pool_id, asset_in, asset_out) in hops.into_iter().rev() {
-                    hop_amount = TokenAmount::new(
-                        self.swap_in_pool(
+                    hop_amount = self
+                        .swap_in_pool(
                             pool_id,
                             fee_discount,
                             updated_pool_ids,
                             asset_in,
                             asset_out,
-                            SwapRequestAmount::ExactOut(U128(hop_amount.get())),
+                            SwapRequestAmount::ExactOut(hop_amount),
                         )
-                        .amount_in
-                        .0,
-                    );
+                        .amount_in;
                 }
                 SwapResponse {
-                    amount_in: U128(hop_amount.get()),
-                    amount_out: U128(amount.get()),
+                    amount_in: hop_amount,
+                    amount_out: amount,
                 }
             }
         }
@@ -377,12 +270,10 @@ impl XykDex {
 
         let amount_in = match amount {
             SwapRequestAmount::ExactIn(exact_amount_in) => {
-                let exact_amount_in = TokenAmount::new(exact_amount_in.0);
                 expect!(!exact_amount_in.is_zero(), "Amount must be greater than 0");
                 exact_amount_in
             }
             SwapRequestAmount::ExactOut(exact_amount_out) => {
-                let exact_amount_out = TokenAmount::new(exact_amount_out.0);
                 expect!(!exact_amount_out.is_zero(), "Amount must be greater than 0");
                 expect!(
                     exact_amount_out < balances[out_index],
@@ -456,7 +347,7 @@ impl XykDex {
                     output: balances[out_index],
                 },
             ),
-            SwapRequestAmount::ExactOut(exact_amount_out) => TokenAmount::new(exact_amount_out.0),
+            SwapRequestAmount::ExactOut(exact_amount_out) => exact_amount_out,
         };
         balances[in_index] = balances[in_index]
             .checked_add(amount_in_after_fees)
@@ -513,7 +404,7 @@ impl XykDex {
                         );
                         let fee_added_to_liquidity = match payout_type {
                             FeePayoutType::Reinvest => {
-                                let reinvested_shares = ProviderShares::minted_for_reinvested(
+                                let reinvested_shares = math::shares_minted_for_reinvested(
                                     payout_amount,
                                     *total_shares,
                                     balances[payout_asset_index],
@@ -550,12 +441,7 @@ impl XykDex {
                     ),
                 };
                 fees_breakdown.push((receiver.clone(), payout_asset_id.clone(), payout_amount));
-                fee_balances
-                    .entry((account_id, payout_asset_id.clone()))
-                    .and_modify(|balance| {
-                        *balance = balance.checked_add(payout_amount).expect("Overflow")
-                    })
-                    .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
+                fee_balances.credit(&account_id, payout_asset_id, payout_amount);
             }
             // The pool's liquidity and providers took both what they kept of the asset in, and
             // what they converted to the asset out
@@ -588,8 +474,8 @@ impl XykDex {
             updated_pool_ids.push(pool_id);
         }
         let response = SwapResponse {
-            amount_in: U128(amount_in.get()),
-            amount_out: U128(amount_out.get()),
+            amount_in,
+            amount_out,
         };
         XykDexEvent::Swap {
             pool_id,
@@ -607,7 +493,7 @@ impl XykDex {
 /// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
 /// that `payout_type` takes fees in, which reinvesting takes in none
 fn start_fee_balances(
-    fee_balances: &mut LookupMap<(AccountId, AssetId), TokenAmount>,
+    fee_balances: &mut FeeBalances,
     account_id: &AccountId,
     asset_ids: PoolAssets<&AssetId>,
     payout_type: FeePayoutType,
@@ -616,18 +502,16 @@ fn start_fee_balances(
         return;
     }
     for fee_asset_index in AssetIndex::BOTH {
-        fee_balances
-            .entry((
-                account_id.clone(),
-                asset_ids[payout_type.asset_index(fee_asset_index)].clone(),
-            ))
-            .or_default();
+        fee_balances.start(
+            account_id,
+            asset_ids[payout_type.asset_index(fee_asset_index)],
+        );
     }
 }
 
 /// Adds pool fees that a liquidity provider earned to the fees it collected
 fn credit_liquidity_fees(
-    fees_collected_by_users: &mut LookupMap<(AccountId, AssetId), TokenAmount>,
+    fees_collected_by_users: &mut FeeBalances,
     pool_id: PoolId,
     account_id: &AccountId,
     asset_ids: PoolAssets<&AssetId>,
@@ -641,10 +525,7 @@ fn credit_liquidity_fees(
         if amount.is_zero() {
             continue;
         }
-        fees_collected_by_users
-            .entry((account_id.clone(), asset_id.clone()))
-            .and_modify(|balance| *balance = balance.checked_add(amount).expect("Overflow"))
-            .or_insert_with(|| panic!("Fee asset not registered; this is a bug"));
+        fees_collected_by_users.credit(account_id, asset_id, amount);
     }
     XykDexEvent::LiquidityFeesCollected {
         pool_id,
@@ -668,9 +549,9 @@ impl XykDex {
         );
         Self {
             pools: Vector::new(StorageKey::Pools),
-            fees_collected_by_users: LookupMap::new(StorageKey::FeesCollectedByUsers),
+            fees_collected_by_users: FeeBalances::new(StorageKey::FeesCollectedByUsers),
             fee_discount_signer_public_key: None,
-            fees_claimable_by_anyone: LookupMap::new(StorageKey::FeesClaimableByAnyone),
+            fees_claimable_by_anyone: FeeBalances::new(StorageKey::FeesClaimableByAnyone),
         }
     }
 
@@ -678,7 +559,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn set_fee_discount_signer(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -706,7 +587,7 @@ impl XykDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -747,19 +628,18 @@ impl XykDex {
         );
 
         let storage_usage_before = near_sdk::env::storage_usage();
+        let protocol_fee_receiver_id = PROTOCOL_FEE_RECEIVER_ID.to_owned();
         self.fees_collected_by_users
-            .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.0.clone()))
-            .or_default();
+            .start(&protocol_fee_receiver_id, &assets.0);
         self.fees_collected_by_users
-            .entry((PROTOCOL_FEE_RECEIVER_ID.to_owned(), assets.1.clone()))
-            .or_default();
+            .start(&protocol_fee_receiver_id, &assets.1);
         self.register_fee_receivers(&fees, (&assets.0, &assets.1));
 
         let mut attached_near = NearToken::from_yoctonear(
             attached_assets
                 .remove(&AssetId::Near)
                 .expect("Near should be attached for storage")
-                .0,
+                .get(),
         );
 
         let is_public_pool = match pool_type {
@@ -797,7 +677,7 @@ impl XykDex {
                             .expect("Not enough NEAR attached for initial liquidity and storage");
                     } else {
                         expect!(
-                            attached_assets.remove(asset_id) == Some(U128(amount.get())),
+                            attached_assets.remove(asset_id) == Some(amount),
                             "Attached {asset_id} must be equal to its initial liquidity"
                         );
                     }
@@ -907,7 +787,7 @@ impl XykDex {
                     .remove(&assets.1)
                     .expect("Launched asset not found");
                 expect!(
-                    attached_launched_asset.0 > 0,
+                    !attached_launched_asset.is_zero(),
                     "Launched asset amount must be greater than 0"
                 );
                 expect!(
@@ -921,7 +801,7 @@ impl XykDex {
                     },
                     launched_asset: AssetWithBalance {
                         asset_id: assets.1.clone(),
-                        balance: TokenAmount::new(attached_launched_asset.0),
+                        balance: attached_launched_asset,
                     },
                     fees: fees.clone(),
                     phantom_liquidity,
@@ -983,7 +863,7 @@ impl XykDex {
             {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         caller_id.clone(),
                     ),
@@ -1002,7 +882,7 @@ impl XykDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1015,8 +895,12 @@ impl XykDex {
         let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .unwrap_or_default()
+                .get(),
+        );
         expect!(
             attached_assets.is_empty(),
             "No assets other than NEAR should be attached"
@@ -1069,7 +953,7 @@ impl XykDex {
             {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         caller_id.clone(),
                     ),
@@ -1088,7 +972,7 @@ impl XykDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1137,8 +1021,6 @@ impl XykDex {
                     attached_assets.is_empty(),
                     "No assets other than the two pool assets should be attached"
                 );
-                let attached_amount_0 = TokenAmount::new(attached_amount_0.0);
-                let attached_amount_1 = TokenAmount::new(attached_amount_1.0);
                 assets.0.balance = assets
                     .0
                     .balance
@@ -1182,7 +1064,7 @@ impl XykDex {
                     "No assets other than the two pool assets should be attached"
                 );
                 expect!(
-                    attached_amount_0.0 > 0 && attached_amount_1.0 > 0,
+                    !attached_amount_0.is_zero() && !attached_amount_1.is_zero(),
                     "Amounts must be greater than 0"
                 );
                 expect!(
@@ -1190,8 +1072,6 @@ impl XykDex {
                     "User has not registered using register_liquidity"
                 );
                 let mut asset_withdraw_requests = Vec::new();
-                let attached_amount_0 = TokenAmount::new(attached_amount_0.0);
-                let attached_amount_1 = TokenAmount::new(attached_amount_1.0);
                 let (shares_to_mint, added_amount_0, added_amount_1) = if total_shares.is_none() {
                     expect!(
                         min_shares_received.is_none(),
@@ -1241,7 +1121,7 @@ impl XykDex {
                         if let Some(refund_amount) = attached_amount.checked_sub(deposited_amount) {
                             asset_withdraw_requests.push(AssetWithdrawRequest {
                                 asset_id: asset.asset_id.clone(),
-                                amount: U128(refund_amount.get()),
+                                amount: refund_amount,
                                 withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                                     caller_id.clone(),
                                 ),
@@ -1328,7 +1208,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn remove_liquidity(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1527,14 +1407,14 @@ impl XykDex {
             asset_withdraw_requests: vec![
                 AssetWithdrawRequest {
                     asset_id: asset_id_0,
-                    amount: U128(withdrawn_amount_0.get()),
+                    amount: withdrawn_amount_0,
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         withdraw_to.clone(),
                     ),
                 },
                 AssetWithdrawRequest {
                     asset_id: asset_id_1,
-                    amount: U128(withdrawn_amount_1.get()),
+                    amount: withdrawn_amount_1,
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(withdraw_to),
                 },
             ],
@@ -1549,7 +1429,7 @@ impl XykDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1563,8 +1443,12 @@ impl XykDex {
         else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .unwrap_or_default()
+                .get(),
+        );
         expect!(
             attached_assets.is_empty(),
             "No assets other than NEAR should be attached"
@@ -1631,7 +1515,7 @@ impl XykDex {
             asset_withdraw_requests: if !leftover.is_zero() {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         caller_id.clone(),
                     ),
@@ -1648,7 +1532,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn collect_liquidity_fees(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1696,7 +1580,7 @@ impl XykDex {
         &mut self,
         #[serializer(borsh)]
         #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1758,8 +1642,12 @@ impl XykDex {
             (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
         );
 
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .unwrap_or_default()
+                .get(),
+        );
         expect!(
             attached_near >= storage_cost,
             "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
@@ -1774,7 +1662,7 @@ impl XykDex {
             {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         caller_id.clone(),
                     ),
@@ -1791,7 +1679,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn withdraw_fees(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1803,29 +1691,10 @@ impl XykDex {
         };
         expect!(attached_assets.is_empty(), "No assets should be attached");
 
-        let mut asset_withdraw_requests = Vec::new();
-        for asset_id in assets {
-            let Some(balance) = self
-                .fees_collected_by_users
-                .get(&(caller_id.clone(), asset_id.clone()))
-                .cloned()
-            else {
-                continue;
-            };
-            if balance.is_zero() {
-                continue;
-            }
-            self.fees_collected_by_users
-                .insert((caller_id.clone(), asset_id.clone()), TokenAmount::ZERO);
-            asset_withdraw_requests.push(AssetWithdrawRequest {
-                asset_id,
-                amount: U128(balance.get()),
-                withdrawal_type: AssetWithdrawalType::ToInternalUserBalance(caller_id.clone()),
-            });
-        }
-
         DexCallResponse {
-            asset_withdraw_requests,
+            asset_withdraw_requests: self
+                .fees_collected_by_users
+                .withdraw_to_engine(&caller_id, assets),
             ..Default::default()
         }
     }
@@ -1834,7 +1703,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn lock_pool(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1876,7 +1745,7 @@ impl XykDex {
         &mut self,
         #[allow(unused_mut)]
         #[serializer(borsh)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1886,18 +1755,19 @@ impl XykDex {
         let Ok(RegisterFeeAssetsArgs { asset_ids }) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
-        let attached_near =
-            NearToken::from_yoctonear(attached_assets.remove(&AssetId::Near).unwrap_or_default().0);
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .unwrap_or_default()
+                .get(),
+        );
         let storage_usage_before = near_sdk::env::storage_usage();
         expect!(attached_assets.is_empty(), "No assets should be attached");
         for asset_id in asset_ids {
-            if self
-                .fees_collected_by_users
-                .insert((caller_id.clone(), asset_id.clone()), TokenAmount::ZERO)
-                .is_some()
-            {
-                panic!("Asset {asset_id} already registered");
-            }
+            expect!(
+                self.fees_collected_by_users.start(&caller_id, &asset_id),
+                "Asset {asset_id} already registered"
+            );
         }
         self.fees_collected_by_users.flush();
         let storage_usage_after = near_sdk::env::storage_usage();
@@ -1912,7 +1782,7 @@ impl XykDex {
             asset_withdraw_requests: if !leftover.is_zero() {
                 vec![AssetWithdrawRequest {
                     asset_id: AssetId::Near,
-                    amount: U128(leftover.as_yoctonear()),
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         caller_id.clone(),
                     ),
@@ -1929,7 +1799,7 @@ impl XykDex {
     #[result_serializer(borsh)]
     pub fn claim_fees_anyone(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -1948,15 +1818,13 @@ impl XykDex {
         let mut asset_withdraw_requests = Vec::new();
         for asset_id in asset_ids {
             expect!(
-                let Some(balance) = self
-                    .fees_claimable_by_anyone
-                    .insert((account_id.clone(), asset_id.clone()), TokenAmount::ZERO),
+                let Some(balance) = self.fees_claimable_by_anyone.take(&account_id, &asset_id),
                 "{account_id} has no fees in {asset_id} that anyone can claim"
             );
             if !balance.is_zero() {
                 asset_withdraw_requests.push(AssetWithdrawRequest {
                     asset_id,
-                    amount: U128(balance.get()),
+                    amount: balance,
                     withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
                         account_id.clone(),
                     ),
@@ -2047,14 +1915,8 @@ impl XykDex {
             account_id,
             asset_ids,
         } = args;
-        asset_ids
-            .into_iter()
-            .filter_map(|asset_id| {
-                self.fees_collected_by_users
-                    .get(&(account_id.clone(), asset_id.clone()))
-                    .map(|balance| (asset_id, *balance))
-            })
-            .collect()
+        self.fees_collected_by_users
+            .balances(&account_id, asset_ids)
     }
 
     #[result_serializer(borsh)]
@@ -2066,14 +1928,8 @@ impl XykDex {
             account_id,
             asset_ids,
         } = args;
-        asset_ids
-            .into_iter()
-            .filter_map(|asset_id| {
-                self.fees_claimable_by_anyone
-                    .get(&(account_id.clone(), asset_id.clone()))
-                    .map(|balance| (asset_id, *balance))
-            })
-            .collect()
+        self.fees_claimable_by_anyone
+            .balances(&account_id, asset_ids)
     }
 
     #[result_serializer(borsh)]

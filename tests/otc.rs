@@ -1,8 +1,8 @@
 use crate::common::*;
 
+use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapOperationAmount,
-    SwapRequestAmount, WithdrawAmount,
+    AccountOrDexId, Operation, ReferralFees, SwapOperationAmount, WithdrawAmount,
 };
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::AccountId;
@@ -312,8 +312,8 @@ async fn test_otc_regular_flow() {
         user_id: deployer.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -339,8 +339,8 @@ async fn test_otc_regular_flow() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity::default(),
     };
 
@@ -361,7 +361,7 @@ async fn test_otc_regular_flow() {
         ),
         attached_assets: HashMap::from_iter([(
             AssetId::Near,
-            U128(trade_amount_near.as_yoctonear()),
+            TokenAmount::new(trade_amount_near.as_yoctonear()),
         )]),
     }];
 
@@ -551,7 +551,7 @@ async fn test_otc_relayed_by_third_party() {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
                 args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
+                attached_assets: HashMap::from_iter([(AssetId::Near, TokenAmount::new(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
         .transact()
@@ -606,8 +606,8 @@ async fn test_otc_relayed_by_third_party() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity::default(),
     };
 
@@ -633,8 +633,8 @@ async fn test_otc_relayed_by_third_party() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -804,8 +804,8 @@ async fn test_otc_single_intent_from_one_account_fails() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity::default(),
     };
 
@@ -976,7 +976,7 @@ async fn test_otc_mismatching_intents_fail() {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
                 args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
+                attached_assets: HashMap::from_iter([(AssetId::Near, TokenAmount::new(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
         .transact()
@@ -1022,8 +1022,8 @@ async fn test_otc_mismatching_intents_fail() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity::default(),
     };
 
@@ -1049,8 +1049,8 @@ async fn test_otc_mismatching_intents_fail() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(mismatched_ft_amount),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(mismatched_ft_amount),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -1265,7 +1265,7 @@ async fn test_otc_three_intents_with_same_value() {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
                 args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
+                attached_assets: HashMap::from_iter([(AssetId::Near, TokenAmount::new(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
         .transact()
@@ -1316,7 +1316,7 @@ async fn test_otc_three_intents_with_same_value() {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
                 args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
+                attached_assets: HashMap::from_iter([(AssetId::Near, TokenAmount::new(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
         .transact()
@@ -1379,8 +1379,8 @@ async fn test_otc_three_intents_with_same_value() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft1),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft1),
         validity: Validity::default(),
     };
 
@@ -1406,8 +1406,8 @@ async fn test_otc_three_intents_with_same_value() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Nep141(ft2.id().clone()),
-        amount_in: U128(trade_amount_ft1),
-        amount_out: U128(trade_amount_ft2),
+        amount_in: TokenAmount::new(trade_amount_ft1),
+        amount_out: TokenAmount::new(trade_amount_ft2),
         validity: Validity::default(),
     };
 
@@ -1433,8 +1433,8 @@ async fn test_otc_three_intents_with_same_value() {
         user_id: user3.id().clone(),
         asset_in: AssetId::Nep141(ft2.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft2),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft2),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -1684,7 +1684,7 @@ async fn test_otc_nonces() {
                 dex_id: dex_id.clone(),
                 method: "storage_deposit".to_string(),
                 args: Base64VecU8(near_sdk::borsh::to_vec(&StorageDepositArgs).unwrap()),
-                attached_assets: HashMap::from_iter([(AssetId::Near, U128(storage_deposit_for_otc.as_yoctonear()))]),
+                attached_assets: HashMap::from_iter([(AssetId::Near, TokenAmount::new(storage_deposit_for_otc.as_yoctonear()))]),
             }],
         }))
         .transact()
@@ -1741,8 +1741,8 @@ async fn test_otc_nonces() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity {
             expiry: None,
             only_for_whitelisted_parties: None,
@@ -1770,8 +1770,8 @@ async fn test_otc_nonces() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -1823,8 +1823,8 @@ async fn test_otc_nonces() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity {
             expiry: None,
             only_for_whitelisted_parties: None,
@@ -1852,8 +1852,8 @@ async fn test_otc_nonces() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -1910,8 +1910,8 @@ async fn test_otc_nonces() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block)),
             only_for_whitelisted_parties: None,
@@ -1939,8 +1939,8 @@ async fn test_otc_nonces() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -2000,8 +2000,8 @@ async fn test_otc_nonces() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block_short)),
             only_for_whitelisted_parties: None,
@@ -2029,8 +2029,8 @@ async fn test_otc_nonces() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -2087,8 +2087,8 @@ async fn test_otc_nonces() {
         user_id: user1.id().clone(),
         asset_in: AssetId::Near,
         asset_out: AssetId::Nep141(ft1.id().clone()),
-        amount_in: U128(trade_amount_near.as_yoctonear()),
-        amount_out: U128(trade_amount_ft),
+        amount_in: TokenAmount::new(trade_amount_near.as_yoctonear()),
+        amount_out: TokenAmount::new(trade_amount_ft),
         validity: Validity {
             expiry: None,
             only_for_whitelisted_parties: None,
@@ -2116,8 +2116,8 @@ async fn test_otc_nonces() {
         user_id: user2.id().clone(),
         asset_in: AssetId::Nep141(ft1.id().clone()),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity::default(),
     };
 
@@ -2184,7 +2184,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
     let maker_otc_ft = 500_000_000u128;
     let trade_amount_near = NearToken::from_near(2);
     let trade_amount_ft = 100_000_000u128;
-    let fee_fraction = 10_000; // 1%
+    let fee_fraction = FeeFraction::new(10_000); // 1%
 
     let wasms = get_compiled_wasms().await;
     let TestContext {
@@ -2298,8 +2298,8 @@ async fn check_otc_swap(maker_key_type: KeyType) {
         user_id: maker.id().clone(),
         asset_in: ft_asset.clone(),
         asset_out: AssetId::Near,
-        amount_in: U128(trade_amount_ft),
-        amount_out: U128(trade_amount_near.as_yoctonear()),
+        amount_in: TokenAmount::new(trade_amount_ft),
+        amount_out: TokenAmount::new(trade_amount_near.as_yoctonear()),
         validity: Validity {
             expiry: Some(ExpiryCondition::BlockHeight(expiry_block_height)),
             only_for_whitelisted_parties: Some(vec![trader.id().clone()]),
@@ -2327,9 +2327,9 @@ async fn check_otc_swap(maker_key_type: KeyType) {
     };
     let referral_fees = ReferralFees(vec![(referrer.id().clone(), fee_fraction)]);
     let fee = referral_fees
-        .amounts_on_top_of(U128(trade_amount_near.as_yoctonear()))
+        .amounts_on_top_of(TokenAmount::new(trade_amount_near.as_yoctonear()))
         .into_iter()
-        .map(|(_, fee)| fee.0)
+        .map(|(_, fee)| fee.get())
         .sum::<u128>();
     let near_in_with_fee = trade_amount_near.as_yoctonear() + fee;
     let swap = |trader: &Account, message: &Base64VecU8, amount_out: u128| {
@@ -2343,8 +2343,8 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                     message: message.clone(),
                     asset_in: AssetId::Near,
                     asset_out: ft_asset.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(amount_out))),
-                    constraint: Some(U128(near_in_with_fee)),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(amount_out))),
+                    constraint: Some(TokenAmount::new(near_in_with_fee)),
                 }],
                 "referral_fees": referral_fees,
             }))
@@ -2393,7 +2393,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
             "trader": trader.id(),
             "asset_in": AssetId::Near,
             "asset_out": ft_asset,
-            "amount": SwapRequestAmount::ExactOut(U128(trade_amount_ft)),
+            "amount": SwapRequestAmount::ExactOut(TokenAmount::new(trade_amount_ft)),
             "referral_fees": referral_fees,
         }))
         .await
@@ -2543,7 +2543,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                 message: signed(maker_trade(), 5),
                 asset_in: AssetId::Near,
                 asset_out: ft_asset.clone(),
-                amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(trade_amount_ft))),
+                amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(trade_amount_ft))),
                 constraint: None,
             }])
             .unwrap(),
@@ -2568,8 +2568,8 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                     message: signed(maker_trade(), 6),
                     asset_in: AssetId::Near,
                     asset_out: ft_asset.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(trade_amount_ft))),
-                    constraint: Some(U128(trade_amount_near.as_yoctonear())),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(trade_amount_ft))),
+                    constraint: Some(TokenAmount::new(trade_amount_near.as_yoctonear())),
                 },
                 Operation::Withdraw {
                     asset_id: ft_asset.clone(),

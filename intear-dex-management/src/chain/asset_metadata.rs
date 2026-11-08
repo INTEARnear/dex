@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use color_eyre::eyre::Context;
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::types::BlockReference;
 

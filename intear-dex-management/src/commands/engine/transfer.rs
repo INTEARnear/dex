@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId, Operation};
+use intear_dex_common::{AssetId, TokenAmount};
+use intear_dex_types::{AccountOrDexId, Operation};
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
@@ -13,7 +14,7 @@ use crate::errors::PreflightError;
 use crate::inputs::account_or_dex_id::AccountOrDexIdArg;
 use crate::inputs::amount::AmountArg;
 use crate::inputs::asset_ids::AssetIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near};
 
 const TRANSFER_GAS: Gas = Gas::from_teragas(15);
@@ -197,7 +198,7 @@ impl TransferReceiverContext {
                 operations.push(Operation::TransferAsset {
                     to: receiver.clone(),
                     asset_id: asset_id.clone(),
-                    amount: U128(raw_amount),
+                    amount: TokenAmount::new(raw_amount),
                 });
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
@@ -214,6 +215,7 @@ impl TransferReceiverContext {
                         success_message: format!("Transferred {description}"),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

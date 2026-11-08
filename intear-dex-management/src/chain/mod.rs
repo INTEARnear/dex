@@ -1,4 +1,5 @@
 pub mod account;
+pub mod amp;
 pub mod asset_metadata;
 pub mod custody;
 pub mod engine;
@@ -10,7 +11,7 @@ pub mod xyk;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, Report, eyre};
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
@@ -146,4 +147,42 @@ pub fn view_json<ViewResult: serde::de::DeserializeOwned>(
             String::from_utf8_lossy(&result)
         )
     })
+}
+
+/// Whether a dex of pools, an xyk or amp dex, has state, and whether its code
+/// can read it
+pub enum PoolDexState {
+    Missing,
+    Readable,
+    Unreadable,
+}
+
+/// The pool count view of the dex tells: it panics without state, and when
+/// the code can't read it
+pub fn pool_dex_state(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<PoolDexState> {
+    let error = match xyk::pool_count(network_config, block_reference, dex_id) {
+        Ok(_) => return Ok(PoolDexState::Readable),
+        Err(error) => error,
+    };
+    match error.downcast_ref::<ViewPanicked>() {
+        Some(view_panicked)
+            if view_panicked
+                .panic_message
+                .contains(errors::NOT_INITIALIZED) =>
+        {
+            Ok(PoolDexState::Missing)
+        }
+        Some(view_panicked)
+            if view_panicked
+                .panic_message
+                .contains(errors::UNREADABLE_STATE) =>
+        {
+            Ok(PoolDexState::Unreadable)
+        }
+        _ => Err(error),
+    }
 }

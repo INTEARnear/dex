@@ -5,10 +5,10 @@ use near_sdk::json_types::Base64VecU8;
 use serde_json::json;
 
 use super::XykContext;
-use crate::chain::xyk::{self, XykState};
+use crate::chain::{self, PoolDexState};
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, xyk_storage};
 
 const INIT_GAS: Gas = Gas::from_teragas(50);
@@ -52,14 +52,14 @@ impl InitContext {
             move |preflight| {
                 preflight.ensure_engine_not_paused()?;
                 preflight.ensure_dex_exists(&dex_id)?;
-                match xyk::state(
+                match chain::pool_dex_state(
                     &preflight.network_config,
                     &preflight.block_reference,
                     &dex_id,
                 )? {
-                    XykState::Missing => {}
-                    XykState::Readable | XykState::Unreadable => {
-                        return Err(PreflightError::XykAlreadyInitialized {
+                    PoolDexState::Missing => {}
+                    PoolDexState::Readable | PoolDexState::Unreadable => {
+                        return Err(PreflightError::AlreadyInitialized {
                             dex_id: dex_id.clone(),
                         }
                         .into_report());
@@ -101,6 +101,7 @@ impl InitContext {
                         success_message: format!("Initialized {dex_id}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,

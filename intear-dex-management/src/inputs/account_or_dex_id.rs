@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
-use intear_dex_types::{AccountOrDexId, DexId};
+use intear_dex_common::DexId;
+use intear_dex_types::AccountOrDexId;
 use near_primitives::types::AccountId;
 
 #[derive(Clone)]

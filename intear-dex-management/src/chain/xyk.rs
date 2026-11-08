@@ -1,10 +1,10 @@
 use color_eyre::eyre::eyre;
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::types::BlockReference;
 use std::collections::HashMap;
 
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_primitives::types::AccountId;
 use near_sdk::PublicKey;
 use near_sdk::json_types::U128;
@@ -13,16 +13,7 @@ use xyk_dex_types::{
     PoolView, ProviderShares,
 };
 
-use super::ViewPanicked;
 use super::engine::dex_view;
-use crate::errors;
-
-/// Whether an xyk dex has state, and whether its code can read it
-pub enum XykState {
-    Missing,
-    Readable,
-    Unreadable,
-}
 
 pub fn pool_count(
     network_config: &NetworkConfig,
@@ -88,35 +79,6 @@ pub fn pool(
             Err(error) => eyre!("Pool #{pool_id} doesn't exist on {dex_id}: {error}"),
         }
     })
-}
-
-/// Its views tell: they panic without state, and when the code can't read it
-pub fn state(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-    dex_id: &DexId,
-) -> color_eyre::eyre::Result<XykState> {
-    let error = match pool_count(network_config, block_reference, dex_id) {
-        Ok(_) => return Ok(XykState::Readable),
-        Err(error) => error,
-    };
-    match error.downcast_ref::<ViewPanicked>() {
-        Some(view_panicked)
-            if view_panicked
-                .panic_message
-                .contains(errors::NOT_INITIALIZED) =>
-        {
-            Ok(XykState::Missing)
-        }
-        Some(view_panicked)
-            if view_panicked
-                .panic_message
-                .contains(errors::UNREADABLE_STATE) =>
-        {
-            Ok(XykState::Unreadable)
-        }
-        _ => Err(error),
-    }
 }
 
 /// The shares an account has in each of `pool_ids`: `None` where it isn't

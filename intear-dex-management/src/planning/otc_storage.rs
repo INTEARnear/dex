@@ -3,7 +3,7 @@
 //! deposited on the dex, so the CLI tops that up first when it can't pay.
 
 use color_eyre::eyre::eyre;
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use near_sdk::PublicKey;
 

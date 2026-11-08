@@ -3,28 +3,21 @@ use crate::common::*;
 use intear_dex::oracle::{
     GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
 };
+use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, FeeFraction, IntearDexEvent, Operation, SwapAdvancedMode,
-    SwapOperationAmount, SwapOption, SwapRequestAmount, WithdrawAmount,
+    AccountOrDexId, Operation, SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
-use near_jsonrpc_client::{JsonRpcClient, methods};
+use near_jsonrpc_client::methods;
 use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
-use near_primitives::action::{Action, FunctionCallAction};
-use near_primitives::transaction::{
-    NonceMode, SignedTransaction, Transaction, TransactionNonce, TransactionV1,
-};
 use near_primitives::types::{BlockReference, Finality};
-use near_primitives::views::{
-    AccessKeyPermissionView, AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView,
-    FinalExecutionStatus, GasKeyNoncesView, QueryRequest, TxExecutionStatus,
-};
+use near_primitives::views::{AccessKeyPermissionView, AccessKeyView, QueryRequest};
 use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json::json;
 use near_sdk::{
-    AccountId, Gas, NearToken, PublicKeyHandle,
+    AccountId, Gas, NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base64VecU8, U128},
     near,
@@ -32,7 +25,7 @@ use near_sdk::{
 use near_workspaces::network::Sandbox;
 use near_workspaces::operations::TransactionStatus;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::{Account, Contract, Worker};
+use near_workspaces::{Contract, Worker};
 use std::collections::HashMap;
 use std::time::Duration;
 use test_dex_types::{
@@ -235,7 +228,7 @@ async fn test_minimal_flow() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Near,
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount)),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
         }))
         .transact()
         .await
@@ -594,7 +587,7 @@ async fn test_withdraw_failures() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Nep141(ft1.id().clone()),
-            "amount": WithdrawAmount::Exact(U128(ft_withdraw_attempt)),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(ft_withdraw_attempt)),
             "withdraw_to": user2.id(),
         }))
         .transact()
@@ -617,7 +610,7 @@ async fn test_withdraw_failures() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Near,
-            "amount": WithdrawAmount::Exact(U128(near_withdraw_amount.as_yoctonear())),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(near_withdraw_amount.as_yoctonear())),
             "withdraw_to": nonexistent_account,
         }))
         .transact()
@@ -662,7 +655,7 @@ async fn test_withdraw_failures() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Nep141(ft1.id().clone()),
-            "amount": WithdrawAmount::Exact(U128(ft_withdraw_attempt)),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(ft_withdraw_attempt)),
             "withdraw_to": user2.id(),
         }))
         .transact()
@@ -809,7 +802,7 @@ async fn test_total_in_custody_consistency() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Nep141(ft.id().clone()),
-            "amount": WithdrawAmount::Exact(U128(ft_withdraw_attempt)),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(ft_withdraw_attempt)),
             "withdraw_to": user2.id(),
         }))
         .transact()
@@ -839,7 +832,7 @@ async fn test_total_in_custody_consistency() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Near,
-            "amount": WithdrawAmount::Exact(U128(near_withdraw_amount.as_yoctonear())),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(near_withdraw_amount.as_yoctonear())),
         }))
         .transact()
         .await
@@ -853,7 +846,7 @@ async fn test_total_in_custody_consistency() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Nep141(ft.id().clone()),
-            "amount": WithdrawAmount::Exact(U128(ft_successful_withdraw)),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(ft_successful_withdraw)),
             "withdraw_to": user1.id(),
         }))
         .transact()
@@ -991,7 +984,7 @@ async fn test_execute_operations() {
                 id: dex_id_string.clone(),
             }),
             asset_id: AssetId::Near,
-            amount: U128(transfer_amount.as_yoctonear()),
+            amount: TokenAmount::new(transfer_amount.as_yoctonear()),
         },
         Operation::SwapSimple {
             dex_id: DexId {
@@ -1001,14 +994,14 @@ async fn test_execute_operations() {
             message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             asset_in: AssetId::Near,
             asset_out: AssetId::Near,
-            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
                 swap_amount.as_yoctonear(),
             ))),
             constraint: None,
         },
         Operation::Withdraw {
             asset_id: AssetId::Near,
-            amount: WithdrawAmount::Exact(U128(withdraw_amount.as_yoctonear())),
+            amount: WithdrawAmount::Exact(TokenAmount::new(withdraw_amount.as_yoctonear())),
             to: None,
             rescue_address: None,
         },
@@ -1162,7 +1155,7 @@ async fn test_ft_transfer_call_failure_reverts() {
 
     let operations = vec![Operation::Withdraw {
         asset_id: AssetId::Nep141(ft1.id().clone()),
-        amount: WithdrawAmount::Exact(U128(ft_withdraw_attempt)),
+        amount: WithdrawAmount::Exact(TokenAmount::new(ft_withdraw_attempt)),
         to: None,
         rescue_address: None,
     }];
@@ -1386,7 +1379,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
             ),
             attached_assets: HashMap::from_iter([(
                 AssetId::Near,
-                U128(pool_creation_fee.as_yoctonear()),
+                TokenAmount::new(pool_creation_fee.as_yoctonear()),
             )]),
         },
         Operation::DexCall {
@@ -1406,7 +1399,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
             ),
             attached_assets: HashMap::from_iter([(
                 AssetId::Near,
-                U128(pool_creation_fee.as_yoctonear()),
+                TokenAmount::new(pool_creation_fee.as_yoctonear()),
             )]),
         },
         Operation::DexCall {
@@ -1417,8 +1410,14 @@ async fn test_execute_operations_liquidity_and_swaps() {
             method: "add_liquidity".to_string(),
             args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 0 }).unwrap()),
             attached_assets: HashMap::from_iter([
-                (AssetId::Near, U128(lp1_near_amount.as_yoctonear())),
-                (AssetId::Nep141(ft1.id().clone()), U128(lp1_ft1_amount)),
+                (
+                    AssetId::Near,
+                    TokenAmount::new(lp1_near_amount.as_yoctonear()),
+                ),
+                (
+                    AssetId::Nep141(ft1.id().clone()),
+                    TokenAmount::new(lp1_ft1_amount),
+                ),
             ]),
         },
         Operation::DexCall {
@@ -1429,8 +1428,14 @@ async fn test_execute_operations_liquidity_and_swaps() {
             method: "add_liquidity".to_string(),
             args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 1 }).unwrap()),
             attached_assets: HashMap::from_iter([
-                (AssetId::Nep141(ft1.id().clone()), U128(lp2_ft1_amount)),
-                (AssetId::Nep141(ft2.id().clone()), U128(lp2_ft2_amount)),
+                (
+                    AssetId::Nep141(ft1.id().clone()),
+                    TokenAmount::new(lp2_ft1_amount),
+                ),
+                (
+                    AssetId::Nep141(ft2.id().clone()),
+                    TokenAmount::new(lp2_ft2_amount),
+                ),
             ]),
         },
         Operation::SwapSimple {
@@ -1443,7 +1448,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
             ),
             asset_in: AssetId::Near,
             asset_out: AssetId::Nep141(ft1.id().clone()),
-            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
                 swap_amount_in.as_yoctonear(),
             ))),
             constraint: None,
@@ -1696,7 +1701,7 @@ async fn test_operations_with_ft_deposit() {
                 id: dex_id_string.clone(),
             }),
             asset_id: AssetId::Nep141(ft1.id().clone()),
-            amount: U128(ft_transfer_to_dex),
+            amount: TokenAmount::new(ft_transfer_to_dex),
         },
         Operation::SwapSimple {
             dex_id: DexId {
@@ -1706,7 +1711,9 @@ async fn test_operations_with_ft_deposit() {
             message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Same).unwrap()),
             asset_in: AssetId::Nep141(ft1.id().clone()),
             asset_out: AssetId::Nep141(ft1.id().clone()),
-            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(ft_swap_amount))),
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                ft_swap_amount,
+            ))),
             constraint: None,
         },
         Operation::Withdraw {
@@ -2166,7 +2173,7 @@ async fn test_regular_flow() {
             }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_in.as_yoctonear())),
         }))
         .transact()
         .await
@@ -2217,7 +2224,7 @@ async fn test_regular_flow() {
             "method": "remove_liquidity",
             "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&RemoveLiquidityArgs {
                 pool_id,
-                assets_to_remove: (U128(remove_liquidity_near.as_yoctonear()), U128(remove_liquidity_ft)),
+                assets_to_remove: (TokenAmount::new(remove_liquidity_near.as_yoctonear()), TokenAmount::new(remove_liquidity_ft)),
             }).unwrap()),
             "attached_assets": {},
         }))
@@ -2259,7 +2266,7 @@ async fn test_regular_flow() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Near,
-            "amount": WithdrawAmount::Exact(U128(withdraw_near_amount.as_yoctonear())),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(withdraw_near_amount.as_yoctonear())),
         }))
         .transact()
         .await
@@ -2300,7 +2307,7 @@ async fn test_regular_flow() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Nep141(ft1.id().clone()),
-            "amount": WithdrawAmount::Exact(U128(withdraw_ft_amount)),
+            "amount": WithdrawAmount::Exact(TokenAmount::new(withdraw_ft_amount)),
             "withdraw_to": null,
         }))
         .transact()
@@ -2350,14 +2357,14 @@ async fn test_regular_flow() {
             assets: (
                 AssetWithBalance {
                     asset_id: AssetId::Near,
-                    balance: U128(
+                    balance: TokenAmount::new(
                         add_liquidity_near.as_yoctonear() + swap_amount_in.as_yoctonear()
                             - remove_liquidity_near.as_yoctonear()
                     ),
                 },
                 AssetWithBalance {
                     asset_id: AssetId::Nep141(ft1.id().clone()),
-                    balance: U128(add_liquidity_ft - 90909 - remove_liquidity_ft),
+                    balance: TokenAmount::new(add_liquidity_ft - 90909 - remove_liquidity_ft),
                 },
             ),
             owner_id: deployer.id().clone(),
@@ -2558,7 +2565,7 @@ async fn test_swap_constraints() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_in.as_yoctonear())),
             "constraint": U128(expected_output),
         }))
         .transact()
@@ -2578,7 +2585,7 @@ async fn test_swap_constraints() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_in.as_yoctonear())),
             "constraint": U128(1_000_000),
         }))
         .transact()
@@ -2597,7 +2604,7 @@ async fn test_swap_constraints() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactOut(U128(exact_output)),
+            "amount": SwapRequestAmount::ExactOut(TokenAmount::new(exact_output)),
             // 1 near should be more than enough
             "constraint": U128(NearToken::from_near(1).as_yoctonear()),
         }))
@@ -2619,7 +2626,7 @@ async fn test_swap_constraints() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactOut(U128(exact_output)),
+            "amount": SwapRequestAmount::ExactOut(TokenAmount::new(exact_output)),
             "constraint": U128(1),
         }))
         .transact()
@@ -2818,7 +2825,7 @@ async fn test_simulate_swap_simple() {
             "trader": user1.id().clone(),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_in.as_yoctonear())),
         }))
         .await
         .unwrap()
@@ -2834,7 +2841,7 @@ async fn test_simulate_swap_simple() {
             "message": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap()),
             "asset_in": AssetId::Near,
             "asset_out": AssetId::Nep141(ft1.id().clone()),
-            "amount": SwapRequestAmount::ExactIn(U128(swap_amount_in.as_yoctonear())),
+            "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_in.as_yoctonear())),
         }))
         .transact()
         .await
@@ -2898,7 +2905,7 @@ async fn test_withdraw_at_least() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Near,
-            "amount": WithdrawAmount::Full { at_least: Some(U128(initial_near_deposit.as_yoctonear())) },
+            "amount": WithdrawAmount::Full { at_least: Some(TokenAmount::new(initial_near_deposit.as_yoctonear())) },
         }))
         .transact()
         .await
@@ -2932,7 +2939,7 @@ async fn test_withdraw_at_least() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "asset_id": AssetId::Near,
-            "amount": WithdrawAmount::Full { at_least: Some(U128(NearToken::from_near(4).as_yoctonear())) },
+            "amount": WithdrawAmount::Full { at_least: Some(TokenAmount::new(NearToken::from_near(4).as_yoctonear())) },
         }))
         .transact()
         .await
@@ -3288,11 +3295,11 @@ async fn test_total_storage_balances() {
         .args_json(json!({
             "operations": [
                 Operation::StorageDeposit {
-                    amount: U128(dex_storage_deposit_amount.as_yoctonear()),
+                    amount: TokenAmount::new(dex_storage_deposit_amount.as_yoctonear()),
                     r#for: Some(AccountOrDexId::Dex(dex_id.clone())),
                 },
                 Operation::StorageDeposit {
-                    amount: U128(user_storage_deposit_amount.as_yoctonear()),
+                    amount: TokenAmount::new(user_storage_deposit_amount.as_yoctonear()),
                     r#for: Some(AccountOrDexId::Account(user4.id().clone())),
                 },
             ],
@@ -3978,8 +3985,8 @@ async fn test_referral_fees() {
     let second_swap_amount = 200_000_000u128;
     let exact_out_amount = 10_000_000u128;
     let deposited_swap_amount = 50_000_000u128;
-    let user2_fee_fraction = 20_000u32; // 2%
-    let user3_fee_fraction = 10_000u32; // 1%
+    let user2_fee_fraction = FeeFraction::new(20_000); // 2%
+    let user3_fee_fraction = FeeFraction::new(10_000); // 1%
 
     let wasms = get_compiled_wasms().await;
     let TestContext {
@@ -4052,7 +4059,7 @@ async fn test_referral_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(pool_creation_fee.as_yoctonear()),
+                        TokenAmount::new(pool_creation_fee.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -4062,8 +4069,8 @@ async fn test_referral_fees() {
                         near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 0 }).unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -4104,14 +4111,15 @@ async fn test_referral_fees() {
     let unregistered_referrer: AccountId = "unregistered.test.near".parse().unwrap();
     let swap_message =
         Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap());
-    let ft1_to_ft2 = |amount: SwapRequestAmount, constraint: Option<U128>| Operation::SwapSimple {
-        dex_id: dex_id.clone(),
-        message: swap_message.clone(),
-        asset_in: ft1_asset_id.clone(),
-        asset_out: ft2_asset_id.clone(),
-        amount: SwapOperationAmount::Amount(amount),
-        constraint,
-    };
+    let ft1_to_ft2 =
+        |amount: SwapRequestAmount, constraint: Option<TokenAmount>| Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: swap_message.clone(),
+            asset_in: ft1_asset_id.clone(),
+            asset_out: ft2_asset_id.clone(),
+            amount: SwapOperationAmount::Amount(amount),
+            constraint,
+        };
     let execute = |operations: Vec<Operation>, referral_fees: Vec<(AccountId, FeeFraction)>| {
         user1
             .call(dex_engine_contract.id(), "execute_operations")
@@ -4155,7 +4163,7 @@ async fn test_referral_fees() {
     let dex_balance = AccountOrDexId::Dex(dex_id.clone());
     let fee_of = |amount: u128, fee_fraction: FeeFraction| {
         amount
-            .checked_mul(fee_fraction as u128)
+            .checked_mul(u128::from(fee_fraction.get()))
             .unwrap()
             .checked_div(1_000_000)
             .unwrap()
@@ -4169,13 +4177,13 @@ async fn test_referral_fees() {
     ];
     let user2_fee = fee_of(first_swap_amount, user2_fee_fraction);
     let (simulated_amount_in, simulated_amount_out) = simulate(
-        SwapRequestAmount::ExactIn(U128(first_swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(first_swap_amount)),
         referral_fees.clone(),
     )
     .await;
     assert_eq!(simulated_amount_in, U128(first_swap_amount));
     let (_, amount_out_without_fee) = simulate(
-        SwapRequestAmount::ExactIn(U128(first_swap_amount - user2_fee)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(first_swap_amount - user2_fee)),
         vec![],
     )
     .await;
@@ -4183,7 +4191,7 @@ async fn test_referral_fees() {
     let dex_ft1_before = balance(dex_balance.clone(), &ft1_asset_id).await;
     let result = execute(
         vec![ft1_to_ft2(
-            SwapRequestAmount::ExactIn(U128(first_swap_amount)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(first_swap_amount)),
             None,
         )],
         referral_fees,
@@ -4212,7 +4220,10 @@ async fn test_referral_fees() {
     // Only the first swap of the operations pays referral fees
     let result = execute(
         vec![
-            ft1_to_ft2(SwapRequestAmount::ExactIn(U128(second_swap_amount)), None),
+            ft1_to_ft2(
+                SwapRequestAmount::ExactIn(TokenAmount::new(second_swap_amount)),
+                None,
+            ),
             Operation::SwapSimple {
                 dex_id: dex_id.clone(),
                 message: swap_message.clone(),
@@ -4237,13 +4248,16 @@ async fn test_referral_fees() {
 
     // For an exact output, the fee is added on top of what the dex takes, rounded up, so it's
     // the referrer's fraction of the total input, which the constraint limits
-    let (dex_amount_in, _) =
-        simulate(SwapRequestAmount::ExactOut(U128(exact_out_amount)), vec![]).await;
-    let user3_fee = (dex_amount_in.0 * user3_fee_fraction as u128)
-        .div_ceil(1_000_000 - user3_fee_fraction as u128);
+    let (dex_amount_in, _) = simulate(
+        SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount)),
+        vec![],
+    )
+    .await;
+    let user3_fee = (dex_amount_in.0 * u128::from(user3_fee_fraction.get()))
+        .div_ceil(1_000_000 - u128::from(user3_fee_fraction.get()));
     let total_amount_in = dex_amount_in.0 + user3_fee;
     let (simulated_amount_in, simulated_amount_out) = simulate(
-        SwapRequestAmount::ExactOut(U128(exact_out_amount)),
+        SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount)),
         vec![(user3.id().clone(), user3_fee_fraction)],
     )
     .await;
@@ -4253,8 +4267,8 @@ async fn test_referral_fees() {
     );
     let result = execute(
         vec![ft1_to_ft2(
-            SwapRequestAmount::ExactOut(U128(exact_out_amount)),
-            Some(U128(total_amount_in - 1)),
+            SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount)),
+            Some(TokenAmount::new(total_amount_in - 1)),
         )],
         vec![(user3.id().clone(), user3_fee_fraction)],
     )
@@ -4266,8 +4280,8 @@ async fn test_referral_fees() {
     );
     let result = execute(
         vec![ft1_to_ft2(
-            SwapRequestAmount::ExactOut(U128(exact_out_amount)),
-            Some(U128(total_amount_in)),
+            SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount)),
+            Some(TokenAmount::new(total_amount_in)),
         )],
         vec![(user3.id().clone(), user3_fee_fraction)],
     )
@@ -4294,7 +4308,7 @@ async fn test_referral_fees() {
             "amount": U128(deposited_swap_amount),
             "msg": json!({
                 "operations": [
-                    ft1_to_ft2(SwapRequestAmount::ExactIn(U128(deposited_swap_amount)), None),
+                    ft1_to_ft2(SwapRequestAmount::ExactIn(TokenAmount::new(deposited_swap_amount)), None),
                     Operation::Withdraw {
                         asset_id: ft2_asset_id.clone(),
                         amount: WithdrawAmount::PreviousSwapOutput,
@@ -4322,21 +4336,21 @@ async fn test_referral_fees() {
         (
             referrers
                 .iter()
-                .map(|referrer| (referrer.clone(), 1_000))
+                .map(|referrer| (referrer.clone(), FeeFraction::new(1_000)))
                 .collect(),
             "At most 5 referrers are allowed",
         ),
         (
             vec![
-                (referrers[0].clone(), 30_000),
-                (referrers[1].clone(), 20_001),
+                (referrers[0].clone(), FeeFraction::new(30_000)),
+                (referrers[1].clone(), FeeFraction::new(20_001)),
             ],
             "Referral fees must add up to at most 50000",
         ),
     ] {
         let result = execute(
             vec![ft1_to_ft2(
-                SwapRequestAmount::ExactIn(U128(first_swap_amount)),
+                SwapRequestAmount::ExactIn(TokenAmount::new(first_swap_amount)),
                 None,
             )],
             referral_fees,
@@ -4446,7 +4460,7 @@ async fn test_swap_advanced() {
                         ),
                         attached_assets: HashMap::from_iter([(
                             AssetId::Near,
-                            U128(pool_creation_fee.as_yoctonear()),
+                            TokenAmount::new(pool_creation_fee.as_yoctonear()),
                         )]),
                     },
                     Operation::DexCall {
@@ -4456,8 +4470,8 @@ async fn test_swap_advanced() {
                             near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id }).unwrap(),
                         ),
                         attached_assets: HashMap::from_iter([
-                            (ft1_asset_id.clone(), U128(add_liquidity_ft1)),
-                            (ft2_asset_id.clone(), U128(add_liquidity_ft2)),
+                            (ft1_asset_id.clone(), TokenAmount::new(add_liquidity_ft1)),
+                            (ft2_asset_id.clone(), TokenAmount::new(add_liquidity_ft2)),
                         ]),
                     },
                 ],
@@ -4499,7 +4513,7 @@ async fn test_swap_advanced() {
         message: Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id }).unwrap()),
     };
     let swap_advanced = |amount: SwapRequestAmount,
-                         constraint: Option<U128>,
+                         constraint: Option<TokenAmount>,
                          pool_ids: &[u64],
                          mode: SwapAdvancedMode| Operation::SwapAdvanced {
         asset_in: ft1_asset_id.clone(),
@@ -4555,14 +4569,14 @@ async fn test_swap_advanced() {
                 near_sdk::borsh::from_slice(&view.await.unwrap().json::<Base64VecU8>().unwrap().0)
                     .unwrap();
             let pool = pool.unwrap();
-            (pool.assets.0.balance.0, pool.assets.1.balance.0)
+            (pool.assets.0.balance.get(), pool.assets.1.balance.get())
         }
     };
 
     // FindBest swaps on the option with the most output, and skips the options that fail
     let worse_pool_before = pool_balances(worse_pool_id).await;
     let result = execute(vec![swap_advanced(
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
         None,
         &[worse_pool_id, missing_pool_id, better_pool_id],
         SwapAdvancedMode::FindBest,
@@ -4594,19 +4608,19 @@ async fn test_swap_advanced() {
     // For an exact output, FindBest swaps on the option that takes the least input
     let (worse_amount_in, _) = simulate(
         worse_pool_id,
-        SwapRequestAmount::ExactOut(U128(swap_amount)),
+        SwapRequestAmount::ExactOut(TokenAmount::new(swap_amount)),
     )
     .await;
     let (better_amount_in, _) = simulate(
         better_pool_id,
-        SwapRequestAmount::ExactOut(U128(swap_amount)),
+        SwapRequestAmount::ExactOut(TokenAmount::new(swap_amount)),
     )
     .await;
     assert!(better_amount_in < worse_amount_in);
     let worse_pool_before = pool_balances(worse_pool_id).await;
     let result = execute(vec![swap_advanced(
-        SwapRequestAmount::ExactOut(U128(swap_amount)),
-        Some(better_amount_in),
+        SwapRequestAmount::ExactOut(TokenAmount::new(swap_amount)),
+        Some(TokenAmount::new(better_amount_in.0)),
         &[worse_pool_id, better_pool_id],
         SwapAdvancedMode::FindBest,
     )])
@@ -4620,11 +4634,14 @@ async fn test_swap_advanced() {
     assert_eq!(pool_balances(worse_pool_id).await, worse_pool_before);
 
     // FallbackQueue swaps on the first option that works, even if a later one is better
-    let (_, worse_amount_out) =
-        simulate(worse_pool_id, SwapRequestAmount::ExactIn(U128(swap_amount))).await;
+    let (_, worse_amount_out) = simulate(
+        worse_pool_id,
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+    )
+    .await;
     let better_pool_before = pool_balances(better_pool_id).await;
     let result = execute(vec![swap_advanced(
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
         None,
         &[missing_pool_id, worse_pool_id, better_pool_id],
         SwapAdvancedMode::FallbackQueue,
@@ -4639,17 +4656,20 @@ async fn test_swap_advanced() {
     assert_eq!(pool_balances(better_pool_id).await, better_pool_before);
 
     // FallbackQueue skips the options that don't meet the constraint
-    let (_, worse_amount_out) =
-        simulate(worse_pool_id, SwapRequestAmount::ExactIn(U128(swap_amount))).await;
+    let (_, worse_amount_out) = simulate(
+        worse_pool_id,
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+    )
+    .await;
     let (_, better_amount_out) = simulate(
         better_pool_id,
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
     )
     .await;
     let worse_pool_before = pool_balances(worse_pool_id).await;
     let result = execute(vec![swap_advanced(
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
-        Some(U128(worse_amount_out.0 + 1)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+        Some(TokenAmount::new(worse_amount_out.0 + 1)),
         &[worse_pool_id, better_pool_id],
         SwapAdvancedMode::FallbackQueue,
     )])
@@ -4673,14 +4693,14 @@ async fn test_swap_advanced() {
     // Should fail, without changing balances
     let (_, better_amount_out) = simulate(
         better_pool_id,
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
     )
     .await;
-    let unreachable_constraint = Some(U128(better_amount_out.0 + 1));
+    let unreachable_constraint = Some(TokenAmount::new(better_amount_out.0 + 1));
     for (operation, expected_error) in [
         (
             swap_advanced(
-                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
                 None,
                 &[],
                 SwapAdvancedMode::FindBest,
@@ -4689,7 +4709,7 @@ async fn test_swap_advanced() {
         ),
         (
             swap_advanced(
-                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
                 None,
                 &[missing_pool_id, missing_pool_id],
                 SwapAdvancedMode::FindBest,
@@ -4698,7 +4718,7 @@ async fn test_swap_advanced() {
         ),
         (
             swap_advanced(
-                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
                 unreachable_constraint,
                 &[worse_pool_id, better_pool_id],
                 SwapAdvancedMode::FindBest,
@@ -4707,7 +4727,7 @@ async fn test_swap_advanced() {
         ),
         (
             swap_advanced(
-                SwapRequestAmount::ExactIn(U128(swap_amount)),
+                SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
                 unreachable_constraint,
                 &[worse_pool_id, better_pool_id],
                 SwapAdvancedMode::FallbackQueue,
@@ -4727,7 +4747,7 @@ async fn test_swap_advanced() {
     // SwapAdvanced works with assets transferred with the operations
     let (_, better_amount_out) = simulate(
         better_pool_id,
-        SwapRequestAmount::ExactIn(U128(swap_amount)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
     )
     .await;
     let result = user1
@@ -4961,78 +4981,13 @@ async fn test_deploy_code_chunks() {
     );
 }
 
-fn oracle_key_handle(oracle_key: &SecretKey) -> PublicKeyHandle {
-    PublicKeyHandle::from(
-        oracle_key
-            .public_key()
-            .to_string()
-            .parse::<near_sdk::PublicKey>()
-            .unwrap(),
-    )
-}
-
-/// Call the dex engine in a transaction that `key`, a gas key of the engine
-/// account such as an oracle key, signs. near-workspaces can't sign with gas keys.
-async fn call_engine_with_gas_key(
-    sandbox: &Worker<Sandbox>,
-    dex_engine_contract: &Contract,
-    key: &SecretKey,
-    method_name: &str,
-    args: near_sdk::serde_json::Value,
-) -> FinalExecutionOutcomeView {
-    let client = JsonRpcClient::connect(sandbox.rpc_addr());
-    let QueryResponseKind::GasKeyNonces(GasKeyNoncesView { nonces }) = client
-        .call(methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::None),
-            request: QueryRequest::ViewGasKeyNonces {
-                account_id: dex_engine_contract.id().clone(),
-                public_key: key.public_key(),
-            },
-        })
-        .await
-        .unwrap()
-        .kind
-    else {
-        panic!("{} is not a gas key", key.public_key());
-    };
-    let block_hash = client
-        .call(methods::block::RpcBlockRequest {
-            block_reference: BlockReference::Finality(Finality::None),
-        })
-        .await
-        .unwrap()
-        .header
-        .hash;
-    let transaction = Transaction::V1(TransactionV1 {
-        signer_id: dex_engine_contract.id().clone(),
-        public_key: key.public_key(),
-        nonce: TransactionNonce::from_nonce_and_index(nonces[0] + 1, 0),
-        receiver_id: dex_engine_contract.id().clone(),
-        block_hash,
-        actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
-            method_name: method_name.to_string(),
-            args: args.to_string().into_bytes(),
-            gas: near_primitives::types::Gas::from_teragas(300),
-            deposit: NearToken::ZERO,
-        }))],
-        nonce_mode: NonceMode::Monotonic,
-    });
-    let signature = key.sign(transaction.get_hash_and_size().0.as_ref());
-    client
-        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
-            signed_transaction: SignedTransaction::new(signature, transaction),
-        })
-        .await
-        .unwrap()
-}
-
 /// The gas balance of a gas key of the dex engine, or None if it doesn't exist
 async fn gas_key_balance(
     sandbox: &Worker<Sandbox>,
     dex_engine_contract: &Contract,
     key: &SecretKey,
 ) -> Option<NearToken> {
-    let response = JsonRpcClient::connect(sandbox.rpc_addr())
+    let response = sandbox_rpc_client(sandbox)
         .call(methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::None),
             request: QueryRequest::ViewAccessKey {
@@ -5059,87 +5014,6 @@ async fn gas_key_balance(
     }
 }
 
-/// Add an oracle key of `key_type` to the dex engine with `deposit` for its
-/// storage and gas
-async fn create_oracle_key(
-    dex_engine_contract: &Contract,
-    payer: &Account,
-    key_type: KeyType,
-    deposit: NearToken,
-) -> SecretKey {
-    let oracle_key = SecretKey::from_random(key_type);
-    let result = payer
-        .call(dex_engine_contract.id(), "create_oracle_key")
-        .max_gas()
-        .deposit(deposit)
-        .args_json(json!({
-            "oracle_key": oracle_key.public_key(),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    oracle_key
-}
-
-/// The operations of `transactions`, sent with `transact_async`, that wait for
-/// `request`, by the `nonce` of their `oracle_request` events, once all of them
-/// started waiting
-async fn waiting_for_oracle_request(
-    sandbox: &Worker<Sandbox>,
-    transactions: &[&TransactionStatus],
-    request: &[u8],
-) -> Vec<Base64VecU8> {
-    // At once, since operations stop waiting after 200 blocks
-    let mut queries = tokio::task::JoinSet::new();
-    for transaction in transactions {
-        let client = JsonRpcClient::connect(sandbox.rpc_addr());
-        let query = methods::tx::RpcTransactionStatusRequest {
-            transaction_info: methods::tx::TransactionInfo::TransactionId {
-                tx_hash: near_primitives::hash::CryptoHash(transaction.hash().0),
-                sender_account_id: transaction.sender_id().clone(),
-            },
-            wait_until: TxExecutionStatus::None,
-        };
-        let request = request.to_vec();
-        queries.spawn(async move {
-            // Asks again until the sandbox, which is slow with many transactions
-            // at once, runs the transaction
-            for _ in 0..100 {
-                match client.call(&query).await {
-                    Ok(response) => {
-                        let waiting = response
-                            .final_execution_outcome
-                            .into_iter()
-                            .flat_map(|outcome| outcome.into_outcome().receipts_outcome)
-                            .flat_map(|receipt| receipt.outcome.logs)
-                            .filter_map(|log| {
-                                let event = log.strip_prefix("EVENT_JSON:")?;
-                                let Ok(IntearDexEvent::OracleRequest {
-                                    request: event_request,
-                                    nonce,
-                                    ..
-                                }) = near_sdk::serde_json::from_str(event)
-                                else {
-                                    return None;
-                                };
-                                (event_request.0 == request).then_some(nonce)
-                            })
-                            .collect::<Vec<_>>();
-                        if !waiting.is_empty() {
-                            return waiting;
-                        }
-                    }
-                    Err(err) => println!("Asking again after: {err}"),
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-            panic!("Operations didn't start waiting for the request");
-        });
-    }
-    queries.join_all().await.into_iter().flatten().collect()
-}
-
 /// Wait for a transaction sent with `transact_async`, asking again when the
 /// sandbox is too busy to answer, as it is after many receipts at once
 async fn wait_for_transaction(transaction: TransactionStatus) -> ExecutionFinalResult {
@@ -5152,20 +5026,6 @@ async fn wait_for_transaction(transaction: TransactionStatus) -> ExecutionFinalR
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     panic!("Transaction didn't finish");
-}
-
-/// Assert that the oracle transaction and all of its receipts succeeded
-fn assert_gas_key_call_success(outcome: &FinalExecutionOutcomeView) -> Result<(), String> {
-    let failed = !matches!(outcome.status, FinalExecutionStatus::SuccessValue(_))
-        || outcome
-            .receipts_outcome
-            .iter()
-            .any(|receipt| matches!(receipt.outcome.status, ExecutionStatusView::Failure(_)));
-    if failed {
-        println!("{outcome:#?}");
-        return Err("Not successful".to_string());
-    }
-    Ok(())
 }
 
 #[tokio::test]
@@ -5291,7 +5151,9 @@ async fn test_oracle() {
             ),
             asset_in,
             asset_out,
-            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount))),
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                amount,
+            ))),
             constraint: None,
         };
     let withdraw_swap_output = |asset_id: AssetId| Operation::Withdraw {

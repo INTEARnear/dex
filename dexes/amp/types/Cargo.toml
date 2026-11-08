@@ -1,0 +1,17 @@
+[package]
+name = "amp-dex-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+near-sdk = { version = "5", default-features = false }
+intear-dex-common = { path = "../../../intear-dex-common" }
+ethnum = "1.5.3"
+
+[dev-dependencies]
+# The types are near-sdk types, which only build outside of a contract with this
+near-sdk = { version = "5", default-features = false, features = ["non-contract-usage"] }
+
+[features]
+abi = ["near-sdk/abi", "intear-dex-common/abi"]
+dex = ["intear-dex-common/dex"]

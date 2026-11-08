@@ -1,5 +1,6 @@
 use color_eyre::eyre::{Context, bail};
-use intear_dex_types::{AccountOrDexId, AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
 use near_jsonrpc_client::methods::block::RpcBlockRequest;

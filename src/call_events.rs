@@ -1,8 +1,6 @@
-use intear_dex_types::{AccountOrDexId, AssetId, BalanceUpdate, DexEventData, IntearDexEvent};
-use near_sdk::{
-    base64::{Engine, prelude::BASE64_STANDARD},
-    json_types::U128,
-};
+use intear_dex_common::{AssetId, TokenAmount};
+use intear_dex_types::{AccountOrDexId, BalanceUpdate, DexEventData, IntearDexEvent};
+use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 
 #[derive(Default)]
 pub struct CallEvents {
@@ -11,7 +9,12 @@ pub struct CallEvents {
 }
 
 impl CallEvents {
-    pub fn balance_updated(&mut self, owner: AccountOrDexId, asset_id: AssetId, balance: U128) {
+    pub fn balance_updated(
+        &mut self,
+        owner: AccountOrDexId,
+        asset_id: AssetId,
+        balance: TokenAmount,
+    ) {
         match self
             .balance_updates
             .iter_mut()

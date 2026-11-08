@@ -3,40 +3,41 @@
 //! rest back, so the CLI attaches what these add up to.
 
 use color_eyre::eyre::eyre;
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use xyk_dex_types::FeeConfigurationV2;
 
 use super::storage::dex_storage_record_bytes;
 
 // Each xyk collection lives under a one-byte prefix, a StorageKey variant
-const COLLECTION_PREFIX_BYTES: usize = 1;
-const POOL_ID_BYTES: usize = 4;
+pub(super) const COLLECTION_PREFIX_BYTES: usize = 1;
+pub(super) const POOL_ID_BYTES: usize = 4;
 // Pools are elements of a vector, keyed by their index
-const POOL_KEY_BYTES: usize = COLLECTION_PREFIX_BYTES + POOL_ID_BYTES;
-const U32_BYTES: usize = 4;
-const U128_BYTES: usize = 16;
-const ENUM_TAG_BYTES: usize = 1;
+pub(super) const POOL_KEY_BYTES: usize = COLLECTION_PREFIX_BYTES + POOL_ID_BYTES;
+pub(super) const U32_BYTES: usize = 4;
+pub(super) const U128_BYTES: usize = 16;
+pub(super) const ENUM_TAG_BYTES: usize = 1;
 const BOOL_BYTES: usize = 1;
 // A public pool's share map is stored as its prefix: the StorageKey variant
 // and the pool id, as a length-prefixed byte vector
-const SHARE_MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES + POOL_ID_BYTES;
+pub(super) const SHARE_MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES + POOL_ID_BYTES;
 // A 256-bit fee growth in both assets
-const FEE_GROWTH_BYTES: usize = U128_BYTES * 4;
+pub(super) const FEE_GROWTH_BYTES: usize = U128_BYTES * 4;
 // A 256-bit share growth
 const SHARE_GROWTH_BYTES: usize = U128_BYTES * 2;
 // The shares, fee growth and share growth of each of the four payout groups
-const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES + SHARE_GROWTH_BYTES) * 4;
+pub(super) const PAYOUT_GROUPS_BYTES: usize =
+    (U128_BYTES + FEE_GROWTH_BYTES + SHARE_GROWTH_BYTES) * 4;
 // A provider's payout, shares, and the fee and share growth it last collected at
 const LIQUIDITY_POSITION_BYTES: usize =
     ENUM_TAG_BYTES + U128_BYTES + FEE_GROWTH_BYTES + SHARE_GROWTH_BYTES;
 
 // near-sdk keeps a contract's state under the key STATE
-const STATE_KEY_BYTES: usize = 5;
+pub(super) const STATE_KEY_BYTES: usize = 5;
 // A near-sdk map or vector is stored as its prefix, a byte vector; a vector
 // also stores its length before that
-const MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES;
-const VECTOR_BYTES: usize = U32_BYTES + MAP_BYTES;
+pub(super) const MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES;
+pub(super) const VECTOR_BYTES: usize = U32_BYTES + MAP_BYTES;
 
 /// The state that initializing an xyk dex stores: the pool vector, the maps
 /// of collected fees, unused referral settings and community fees, no fee
@@ -66,14 +67,16 @@ pub enum NewPoolKind<'owner> {
     Launch,
 }
 
-fn sum_bytes(parts: &[usize]) -> color_eyre::eyre::Result<usize> {
+pub(super) fn sum_bytes(parts: &[usize]) -> color_eyre::eyre::Result<usize> {
     parts
         .iter()
         .try_fold(0usize, |sum, part| sum.checked_add(*part))
         .ok_or_else(|| eyre!("Storage size overflow"))
 }
 
-fn borsh_bytes(value: &impl near_sdk::borsh::BorshSerialize) -> color_eyre::eyre::Result<usize> {
+pub(super) fn borsh_bytes(
+    value: &impl near_sdk::borsh::BorshSerialize,
+) -> color_eyre::eyre::Result<usize> {
     Ok(near_sdk::borsh::to_vec(value)?.len())
 }
 

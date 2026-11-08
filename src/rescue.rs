@@ -1,4 +1,4 @@
-use intear_dex_types::{AssetId, expect};
+use intear_dex_common::{AssetId, TokenAmount, expect};
 use near_contract_standards::{
     fungible_token::core::ext_ft_core,
     non_fungible_token::{Token, core::ext_nft_core},
@@ -35,7 +35,7 @@ impl DexEngine {
         let near_in_custody = NearToken::from_yoctonear(
             self.total_in_custody
                 .get(&AssetId::Near)
-                .map_or(0, |amount| amount.0),
+                .map_or(0, |amount| amount.get()),
         );
         let owed = near_in_custody
             .checked_add(storage_balances_total)
@@ -56,13 +56,19 @@ impl DexEngine {
     /// The contract must be paused, so that no withdrawals are in
     /// flight while the untracked balance is calculated.
     #[private] // callable by admin
-    pub fn rescue(&mut self, asset_id: AssetId, amount: Option<U128>, to: AccountId) -> Promise {
+    pub fn rescue(
+        &mut self,
+        asset_id: AssetId,
+        amount: Option<TokenAmount>,
+        to: AccountId,
+    ) -> Promise {
         self.assert_paused_for_rescue();
         let current_account_id = near_sdk::env::current_account_id();
         match &asset_id {
             AssetId::Near => {
                 let untracked = self.untracked_near();
-                let amount = amount.map_or(untracked, |amount| NearToken::from_yoctonear(amount.0));
+                let amount =
+                    amount.map_or(untracked, |amount| NearToken::from_yoctonear(amount.get()));
                 expect!(!amount.is_zero(), "Nothing to rescue");
                 expect!(
                     amount <= untracked,
@@ -97,7 +103,7 @@ impl DexEngine {
                 ),
             AssetId::Nep171(contract_id, token_id) => {
                 expect!(
-                    amount.is_none_or(|amount| amount.0 == 1),
+                    amount.is_none_or(|amount| amount == TokenAmount::new(1)),
                     "NFT amount must be 1"
                 );
                 ext_nft_core::ext(contract_id.clone())
@@ -116,27 +122,27 @@ impl DexEngine {
     pub fn after_rescue_balance_nep141_nep245_query(
         &mut self,
         asset_id: AssetId,
-        amount: Option<U128>,
+        amount: Option<TokenAmount>,
         to: AccountId,
         #[callback_result] balance: Result<U128, PromiseError>,
     ) -> Promise {
         self.assert_paused_for_rescue();
         let balance =
             balance.unwrap_or_else(|err| panic!("Failed to query balance of {asset_id}: {err:?}"));
-        let in_custody = self.total_in_custody.get(&asset_id).map_or(0, |b| b.0);
+        let in_custody = self.total_in_custody.get(&asset_id).map_or(0, |b| b.get());
         let untracked = balance.0.checked_sub(in_custody).unwrap_or_else(|| {
             panic!(
                 "{asset_id} deficit: balance {} < custody {in_custody}",
                 balance.0
             )
         });
-        let amount = amount.map_or(untracked, |amount| amount.0);
+        let amount = amount.map_or(untracked, |amount| amount.get());
         expect!(amount != 0, "Nothing to rescue");
         expect!(
             amount <= untracked,
             "Can't rescue {amount} {asset_id}, only {untracked} is untracked"
         );
-        Self::transfer_asset_promise(&asset_id, U128(amount), to)
+        Self::transfer_asset_promise(&asset_id, TokenAmount::new(amount), to)
     }
 
     #[private]
@@ -155,9 +161,13 @@ impl DexEngine {
             "{asset_id} is owned by {}",
             token.owner_id
         );
-        let in_custody = self.total_in_custody.get(&asset_id).map_or(0, |b| b.0);
-        expect!(in_custody == 0, "{asset_id} is in custody");
-        Self::transfer_asset_promise(&asset_id, U128(1), to)
+        let in_custody = self
+            .total_in_custody
+            .get(&asset_id)
+            .copied()
+            .unwrap_or(TokenAmount::ZERO);
+        expect!(in_custody == TokenAmount::ZERO, "{asset_id} is in custody");
+        Self::transfer_asset_promise(&asset_id, TokenAmount::new(1), to)
     }
 }
 

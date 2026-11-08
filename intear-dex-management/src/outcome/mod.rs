@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use amp_dex_types::AmpDexEvent;
 use color_eyre::Section;
 use color_eyre::eyre::{Context, Report, eyre};
-use intear_dex_types::{
-    AccountOrDexId, AssetId, BalanceUpdate, DexEventData, DexId, IntearDexEvent,
-};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::{AccountOrDexId, BalanceUpdate, DexEventData, IntearDexEvent};
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::errors::{ActionErrorKind, FunctionCallError, TxExecutionError};
 use near_primitives::types::{AccountId, BlockReference, Finality};
@@ -31,7 +31,18 @@ pub struct ExpectedOutcome {
     pub transfer_call: Option<ExpectedTransferCall>,
     /// The dex the transaction calls, for hints about its failures
     pub dex_id: Option<DexId>,
+    pub dex_events: DexEvents,
     pub deployment: Option<ExpectedDeployment>,
+}
+
+/// Which dex's events the dex that the transaction calls logs, to tell what
+/// they say
+#[derive(Clone, Copy)]
+pub enum DexEvents {
+    Xyk,
+    Amp,
+    /// The transaction calls no dex, or one whose events this tool doesn't read
+    NotRead,
 }
 
 /// The engine reports the hash of the code it stored, which has to be the
@@ -227,13 +238,13 @@ pub fn report_outcome(
                 for BalanceUpdate {
                     owner,
                     asset_id,
-                    balance: U128(balance),
+                    balance,
                 } in balance_updates
                 {
                     if let AccountOrDexId::Account(account_id) = owner {
                         latest_balances.insert(
                             (account_id.to_string(), asset_id.to_string()),
-                            (account_id, asset_id, balance),
+                            (account_id, asset_id, balance.get()),
                         );
                     }
                 }
@@ -256,13 +267,32 @@ pub fn report_outcome(
                             format!("{ENGINE_ACCOUNT_ID} logged invalid dex events")
                         })?;
                 for DexEventData { dex_id, event, .. } in dex_events {
-                    // Only the xyk dex logs through the engine's `dex_event`
-                    let xyk_event: XykDexEvent = near_sdk::borsh::from_slice(&event).wrap_err_with(|| {
+                    let unreadable_event = || {
                         format!(
                             "This version of intear-dex-management can't read an event of {dex_id}"
                         )
-                    })?;
-                    activity_lines.push(xyk_event_line(&dex_id, xyk_event, &metadata_cache)?);
+                    };
+                    match expected_outcome.dex_events {
+                        DexEvents::Xyk => {
+                            let xyk_event: XykDexEvent = near_sdk::borsh::from_slice(&event)
+                                .wrap_err_with(unreadable_event)?;
+                            activity_lines.push(xyk_event_line(
+                                &dex_id,
+                                xyk_event,
+                                &metadata_cache,
+                            )?);
+                        }
+                        DexEvents::Amp => {
+                            let amp_event: AmpDexEvent = near_sdk::borsh::from_slice(&event)
+                                .wrap_err_with(unreadable_event)?;
+                            activity_lines.push(amp_event_line(
+                                &dex_id,
+                                amp_event,
+                                &metadata_cache,
+                            )?);
+                        }
+                        DexEvents::NotRead => {}
+                    }
                 }
             }
             // Dexes send storage NEAR they didn't use, refunds and removed
@@ -271,12 +301,12 @@ pub fn report_outcome(
                 from: AccountOrDexId::Dex(dex_id),
                 to,
                 asset_id,
-                amount: U128(amount),
+                amount,
             } => {
                 let metadata = metadata_cache.get(&asset_id)?;
                 activity_lines.push(format!(
                     "{dex_id} sent {} to {to}'s wallet",
-                    display::format_amount(amount, metadata.as_ref())
+                    display::format_amount(amount.get(), metadata.as_ref())
                 ));
             }
             IntearDexEvent::DexDeployed { dex_id, code_hash } => {
@@ -286,11 +316,11 @@ pub fn report_outcome(
             IntearDexEvent::UserBalanceUpdate {
                 account_id,
                 asset_id,
-                balance: U128(balance),
+                balance,
             } => {
                 latest_balances.insert(
                     (account_id.to_string(), asset_id.to_string()),
-                    (account_id, asset_id, balance),
+                    (account_id, asset_id, balance.get()),
                 );
             }
             #[allow(deprecated)]
@@ -524,6 +554,100 @@ fn xyk_event_line(
             )
         }
         XykDexEvent::LiquidityFeesCollected {
+            pool_id,
+            account_id,
+            asset_0,
+            asset_1,
+            amount_0,
+            amount_1,
+        } => format!(
+            "{account_id} collected {} and {} of fees from pool #{pool_id} of {dex_id}",
+            format_amount(amount_0.get(), &asset_0)?,
+            format_amount(amount_1.get(), &asset_1)?
+        ),
+    })
+}
+
+/// What an amp event says happened, in one line
+fn amp_event_line(
+    dex_id: &DexId,
+    event: AmpDexEvent,
+    metadata_cache: &AssetMetadataCache,
+) -> color_eyre::eyre::Result<String> {
+    let format_amount = |raw: u128, asset_id: &AssetId| -> color_eyre::eyre::Result<String> {
+        Ok(display::format_amount(
+            raw,
+            metadata_cache.get(asset_id)?.as_ref(),
+        ))
+    };
+    Ok(match event {
+        AmpDexEvent::PoolUpdated { pool_id, pool } => format!(
+            "Pool #{pool_id} of {dex_id} now holds {} and {}, with amplification {}",
+            format_amount(pool.assets.0.balance.get(), &pool.assets.0.asset_id)?,
+            format_amount(pool.assets.1.balance.get(), &pool.assets.1.asset_id)?,
+            pool.amplification
+        ),
+        AmpDexEvent::Swap {
+            pool_id,
+            asset_in,
+            asset_out,
+            amount_in,
+            amount_out,
+            price,
+            ..
+        } => format!(
+            "Pool #{pool_id} of {dex_id} swapped {} for {} at the oracle's median price {price}",
+            format_amount(amount_in.get(), &asset_in)?,
+            format_amount(amount_out.get(), &asset_out)?
+        ),
+        AmpDexEvent::LiquidityAdded {
+            pool_id,
+            asset_0,
+            asset_1,
+            added_amount_0,
+            added_amount_1,
+            minted_shares,
+            new_owned_shares,
+            new_total_shares: U128(new_total_shares),
+            ..
+        } => format!(
+            "Added {} and {} to pool #{pool_id} of {dex_id} for {minted_shares} shares, {} of the pool",
+            format_amount(added_amount_0.get(), &asset_0)?,
+            format_amount(added_amount_1.get(), &asset_1)?,
+            display::format_share(new_owned_shares.get(), new_total_shares)?
+        ),
+        AmpDexEvent::LiquidityRemoved {
+            pool_id,
+            asset_0,
+            asset_1,
+            removed_amount_0,
+            removed_amount_1,
+            burned_shares,
+            ..
+        } => format!(
+            "Removed {} and {} from pool #{pool_id} of {dex_id} for {burned_shares} shares",
+            format_amount(removed_amount_0.get(), &asset_0)?,
+            format_amount(removed_amount_1.get(), &asset_1)?
+        ),
+        AmpDexEvent::LiquidityFeePayoutSet {
+            pool_id,
+            account_id,
+            payout_type,
+        } => {
+            let (verb, asset) = match payout_type {
+                amp_dex_types::FeePayoutType::KeepBoth => ("keeps", ""),
+                amp_dex_types::FeePayoutType::ConvertToFirstAsset => {
+                    ("takes", " in its first asset")
+                }
+                amp_dex_types::FeePayoutType::ConvertToSecondAsset => {
+                    ("takes", " in its second asset")
+                }
+            };
+            format!(
+                "{account_id} now {verb} its part of the fees of pool #{pool_id} of {dex_id}{asset}"
+            )
+        }
+        AmpDexEvent::LiquidityFeesCollected {
             pool_id,
             account_id,
             asset_0,

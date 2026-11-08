@@ -49,7 +49,7 @@ impl AccountContext {
     ) -> color_eyre::eyre::Result<Self> {
         let account_id: AccountId = scope.account_id.clone().into();
         let asset_ids = scope.assets.clone().map_or_else(
-            || vec![intear_dex_types::AssetId::Near],
+            || vec![intear_dex_common::AssetId::Near],
             |AssetIdListArg(asset_ids)| asset_ids,
         );
         let dex_id = previous_context.dex_id;

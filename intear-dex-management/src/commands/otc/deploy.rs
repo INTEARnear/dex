@@ -1,6 +1,6 @@
 use color_eyre::Section;
 use color_eyre::eyre::eyre;
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::types::AccountId;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
@@ -8,7 +8,7 @@ use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use super::OtcContext;
 use crate::commands::dex_code;
 use crate::deployment::{DEFAULT_OTC_DEX_NAME, ENGINE_ACCOUNT_ID};
-use crate::outcome::{ExpectedDeployment, ExpectedOutcome};
+use crate::outcome::{DexEvents, ExpectedDeployment, ExpectedOutcome};
 use crate::planning::{self, TransactionPlan, otc_storage};
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -97,7 +97,7 @@ impl BuildContext {
         previous_context: DeployContext,
         _scope: &<Build as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let code = dex_code::build_dex_package("otc-dex")?;
+        let code = dex_code::build_dex_package("otc-dex", &[])?;
         Ok(Self(deploy_action_context(previous_context, code)))
     }
 }
@@ -182,6 +182,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                 success_message: format!("Deployed {code_label} to {dex_id}"),
                 transfer_call: None,
                 dex_id: Some(dex_id.clone()),
+                dex_events: DexEvents::NotRead,
                 deployment: Some(ExpectedDeployment {
                     dex_id: dex_id.clone(),
                     code_hash,

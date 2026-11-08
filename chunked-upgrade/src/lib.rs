@@ -1,4 +1,4 @@
-use intear_dex_types::expect;
+use intear_dex_common::expect;
 use near_sdk::{CryptoHash, Gas, GasWeight, NearToken, Promise, near};
 
 const UPLOADED_CODE_KEY: &[u8] = b"uploaded_code";

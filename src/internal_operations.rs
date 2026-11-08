@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use intear_dex_common::{
+    AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest, DexCallResponse, DexId,
+    SwapRequest, SwapRequestAmount, SwapResponse, TokenAmount, expect,
+};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, AssetWithdrawRequest, AssetWithdrawalType, DexCallRequest,
-    DexCallResponse, DexEventData, DexId, DirectWithdrawAmount, Operation, ReferralFees,
-    SwapAdvancedMode, SwapOperationAmount, SwapOption, SwapRequest, SwapRequestAmount,
-    SwapResponse, WithdrawAmount, expect,
+    AccountOrDexId, DexEventData, DirectWithdrawAmount, Operation, ReferralFees, SwapAdvancedMode,
+    SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -24,8 +26,8 @@ use crate::{
 pub enum TradeAccount<'a> {
     User(AccountId),
     Sandboxed {
-        assets: &'a mut HashMap<AssetId, U128>,
-        trader: intear_dex_types::Caller,
+        assets: &'a mut HashMap<AssetId, TokenAmount>,
+        trader: intear_dex_common::Caller,
     },
 }
 
@@ -41,22 +43,25 @@ pub(crate) struct SimulatedSwap {
     dex_id: DexId,
     request: SwapRequest,
     response: SwapResponse,
-    referral_fees_paid: Vec<(AccountId, U128)>,
+    referral_fees_paid: Vec<(AccountId, TokenAmount)>,
     pending_storage_updates: PendingStorageUpdates,
     dex_events: Vec<DexEventData>,
 }
 
 impl SimulatedSwap {
-    pub(crate) fn total_amount_in(&self) -> U128 {
+    pub(crate) fn total_amount_in(&self) -> TokenAmount {
         amount_in_with_fees(self.response.amount_in, &self.referral_fees_paid)
     }
 
-    pub(crate) fn amount_out(&self) -> U128 {
+    pub(crate) fn amount_out(&self) -> TokenAmount {
         self.response.amount_out
     }
 
     /// Why the swap doesn't meet `constraint`, if it doesn't
-    fn constraint_violation_message(&self, constraint: Option<U128>) -> Option<&'static str> {
+    fn constraint_violation_message(
+        &self,
+        constraint: Option<TokenAmount>,
+    ) -> Option<&'static str> {
         let constraint = constraint?;
         match self.request.amount {
             SwapRequestAmount::ExactIn(_) if self.amount_out() < constraint => {
@@ -71,9 +76,9 @@ impl SimulatedSwap {
 }
 
 impl TradeAccount<'_> {
-    fn caller(&self) -> intear_dex_types::Caller {
+    fn caller(&self) -> intear_dex_common::Caller {
         match self {
-            TradeAccount::User(account) => intear_dex_types::Caller::Direct(account.clone()),
+            TradeAccount::User(account) => intear_dex_common::Caller::Direct(account.clone()),
             TradeAccount::Sandboxed { trader, .. } => trader.clone(),
         }
     }
@@ -184,9 +189,9 @@ impl DexEngine {
         trader: TradeAccount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
-        constraint: Option<U128>,
+        constraint: Option<TokenAmount>,
         oracle_response: Option<&OracleResponse>,
-    ) -> (U128, U128) {
+    ) -> (TokenAmount, TokenAmount) {
         let swap = self
             .internal_simulate_swap_simple(
                 dex_id,
@@ -210,8 +215,8 @@ impl DexEngine {
         swap: SimulatedSwap,
         trader: TradeAccount,
         referrer: Option<AccountId>,
-        constraint: Option<U128>,
-    ) -> (U128, U128) {
+        constraint: Option<TokenAmount>,
+    ) -> (TokenAmount, TokenAmount) {
         if let Some(violation_message) = swap.constraint_violation_message(constraint) {
             panic!("{violation_message}");
         }
@@ -271,9 +276,8 @@ impl DexEngine {
                 let anon_swap_balance_in = assets
                     .get_mut(&swap_request.asset_in)
                     .expect("Asset in not found in anonymous assets");
-                anon_swap_balance_in.0 = anon_swap_balance_in
-                    .0
-                    .checked_sub(total_amount_in.0)
+                *anon_swap_balance_in = anon_swap_balance_in
+                    .checked_sub(total_amount_in)
                     .expect("Not enough input balance in anonymous assets");
                 self.internal_increase_assets(
                     events,
@@ -299,9 +303,8 @@ impl DexEngine {
                 );
                 let anon_swap_balance_out =
                     assets.entry(swap_request.asset_out.clone()).or_default();
-                anon_swap_balance_out.0 = anon_swap_balance_out
-                    .0
-                    .checked_add(response.amount_out.0)
+                *anon_swap_balance_out = anon_swap_balance_out
+                    .checked_add(response.amount_out)
                     .expect("Balance overflow");
             }
         }
@@ -331,9 +334,9 @@ impl DexEngine {
         trader: TradeAccount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
-        constraint: Option<U128>,
+        constraint: Option<TokenAmount>,
         oracle_response: Option<&OracleResponse>,
-    ) -> (U128, U128) {
+    ) -> (TokenAmount, TokenAmount) {
         expect!(!options.is_empty(), "At least one swap option is required");
         let mut best: Option<SimulatedSwap> = None;
         for option in options {
@@ -393,8 +396,8 @@ impl DexEngine {
         &self,
         amount: SwapOperationAmount,
         asset_in: &AssetId,
-        last_output: &Option<(AssetId, U128)>,
-        anon_swap_available_assets: Option<&HashMap<AssetId, U128>>,
+        last_output: &Option<(AssetId, TokenAmount)>,
+        anon_swap_available_assets: Option<&HashMap<AssetId, TokenAmount>>,
         by: &AccountId,
     ) -> SwapRequestAmount {
         match amount {
@@ -451,9 +454,9 @@ impl DexEngine {
         dex_id: DexId,
         method: String,
         args: Base64VecU8,
-        attached_assets: HashMap<AssetId, U128>,
-        trader: intear_dex_types::Caller,
-        anon_swap_available_assets: Option<&mut HashMap<AssetId, U128>>,
+        attached_assets: HashMap<AssetId, TokenAmount>,
+        trader: intear_dex_common::Caller,
+        anon_swap_available_assets: Option<&mut HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         oracle_response: Option<&OracleResponse>,
     ) -> Base64VecU8 {
@@ -504,7 +507,7 @@ impl DexEngine {
                 anon_swap_available_assets
                     .entry(asset_id.clone())
                     .and_modify(|b| {
-                        b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                        *b = b.checked_sub(amount).unwrap_or_else(|| {
                             panic!("Not enough balance for attached deposit of {asset_id}")
                         });
                     })
@@ -569,24 +572,24 @@ impl DexEngine {
         }
 
         if !response.add_storage_deposit.is_zero() {
+            let storage_deposit = TokenAmount::new(response.add_storage_deposit.as_yoctonear());
             self.internal_decrease_assets(
                 events,
                 AccountOrDexId::Dex(dex_id.clone()),
                 AssetId::Near,
-                U128(response.add_storage_deposit.as_yoctonear()),
+                storage_deposit,
             );
             self.total_in_custody
                 .entry(AssetId::Near)
                 .and_modify(|b| {
-                    b.0 = b.0.checked_sub(response.add_storage_deposit.as_yoctonear())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Balance underflow for contract and asset Near: {} - {} < {}",
-                                b.0,
-                                response.add_storage_deposit.as_yoctonear(),
-                                u128::MIN,
-                            )
-                        })
+                    *b = b.checked_sub(storage_deposit).unwrap_or_else(|| {
+                        panic!(
+                            "Balance underflow for contract and asset Near: {} - {} < {}",
+                            b,
+                            storage_deposit,
+                            u128::MIN,
+                        )
+                    })
                 })
                 .or_insert_with(|| {
                     panic!(
@@ -609,7 +612,7 @@ impl DexEngine {
         &self,
         dex_id: DexId,
         message: Base64VecU8,
-        trader: intear_dex_types::Caller,
+        trader: intear_dex_common::Caller,
         asset_in: AssetId,
         asset_out: AssetId,
         amount: SwapRequestAmount,
@@ -668,7 +671,7 @@ impl DexEngine {
                 }
             }
             .into_iter()
-            .filter(|(_, fee)| fee.0 > 0)
+            .filter(|(_, fee)| !fee.is_zero())
             .collect(),
             dex_id,
             request: swap_request,
@@ -719,13 +722,13 @@ impl DexEngine {
         let asset_balances = self.asset_balances_or_new(&r#for);
         for asset_id in &asset_ids {
             if !asset_balances.contains_key(asset_id) {
-                asset_balances.insert(asset_id.clone(), U128(0));
+                asset_balances.insert(asset_id.clone(), TokenAmount::ZERO);
             }
         }
         asset_balances.flush();
         for asset_id in asset_ids {
             if self.total_in_custody.get(&asset_id).is_none() {
-                self.total_in_custody.insert(asset_id, U128(0));
+                self.total_in_custody.insert(asset_id, TokenAmount::ZERO);
             }
         }
         self.user_balances.flush();
@@ -752,29 +755,27 @@ impl DexEngine {
                 let balance = self
                     .asset_balance_of(withdraw_from.clone(), asset_id.clone())
                     .unwrap_or_default();
-                if balance >= at_least.unwrap_or_default() {
+                let at_least = at_least.unwrap_or_default();
+                if balance >= at_least {
                     balance
                 } else {
-                    panic!(
-                        "Not enough balance for withdraw {asset_id}: {} < {at_least:?}",
-                        balance.0,
-                    );
+                    panic!("Not enough balance for withdraw {asset_id}: {balance} < {at_least}");
                 }
             }
             DirectWithdrawAmount::Exact(amount) => amount,
         };
-        if amount.0 == 0 {
+        if amount.is_zero() {
             return PromiseOrValue::Value(true);
         }
         self.internal_decrease_assets(events, withdraw_from.clone(), asset_id.clone(), amount);
         self.total_in_custody
             .entry(asset_id.clone())
             .and_modify(|b| {
-                b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                *b = b.checked_sub(amount).unwrap_or_else(|| {
                     panic!(
                         "Balance underflow for contract and asset {asset_id}: {} - {} < {}",
-                        b.0,
-                        amount.0,
+                        b,
+                        amount,
                         u128::MIN,
                     )
                 })
@@ -798,7 +799,7 @@ impl DexEngine {
     fn internal_withdraw_unchecked(
         &mut self,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
         withdraw_to: AccountId,
         withdraw_from: AccountOrDexId,
     ) -> PromiseOrValue<bool> {
@@ -816,7 +817,7 @@ impl DexEngine {
     /// Sends assets from this contract's account, without touching any balances.
     pub(crate) fn transfer_asset_promise(
         asset_id: &AssetId,
-        amount: U128,
+        amount: TokenAmount,
         to: AccountId,
     ) -> Promise {
         const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
@@ -824,11 +825,11 @@ impl DexEngine {
         const GAS_FOR_MT_TRANSFER: Gas = Gas::from_tgas(10);
 
         match asset_id {
-            AssetId::Near => Promise::new(to).transfer(NearToken::from_yoctonear(amount.0)),
+            AssetId::Near => Promise::new(to).transfer(NearToken::from_yoctonear(amount.get())),
             AssetId::Nep141(contract_id) => ext_ft_core::ext(contract_id.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(GAS_FOR_FT_TRANSFER)
-                .ft_transfer(to, amount, None),
+                .ft_transfer(to, U128(amount.get()), None),
             AssetId::Nep171(contract_id, token_id) => ext_nft_core::ext(contract_id.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(GAS_FOR_NFT_TRANSFER)
@@ -855,8 +856,8 @@ impl DexEngine {
         &mut self,
         events: &mut CallEvents,
         operations: Vec<Operation>,
-        trader: intear_dex_types::Caller,
-        mut anon_swap_available_assets: Option<HashMap<AssetId, U128>>,
+        trader: intear_dex_common::Caller,
+        mut anon_swap_available_assets: Option<HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         mut referral_fees_of_first_swap: ReferralFees,
         oracle_response: Option<&OracleResponse>,
@@ -909,8 +910,8 @@ impl DexEngine {
                                         *asset_balance
                                     } else {
                                         panic!(
-                                            "Not enough balance for withdrawal of {asset_id}: {} < {:?}",
-                                            asset_balance.0, at_least,
+                                            "Not enough balance for withdrawal of {asset_id}: {} < {}",
+                                            asset_balance, at_least,
                                         );
                                     }
                                 } else {
@@ -933,10 +934,9 @@ impl DexEngine {
                                 ),
                             },
                         };
-                        if amount.0 > 0 {
-                            asset_balance.0 = asset_balance
-                                .0
-                                .checked_sub(amount.0)
+                        if !amount.is_zero() {
+                            *asset_balance = asset_balance
+                                .checked_sub(amount)
                                 .expect("Not enough balance in anonymous assets");
                             let rescue_address = if self.asset_is_registered(
                                 AccountOrDexId::Account(by.clone()),
@@ -957,11 +957,11 @@ impl DexEngine {
                             self.total_in_custody
                             .entry(asset_id.clone())
                             .and_modify(|b| {
-                                b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                                *b = b.checked_sub(amount).unwrap_or_else(|| {
                                     panic!(
                                         "Balance underflow for contract and asset {asset_id}: {} - {} < {}",
-                                        b.0,
-                                        amount.0,
+                                        b,
+                                        amount,
                                         u128::MIN,
                                     )
                                 })
@@ -1104,9 +1104,8 @@ impl DexEngine {
                         let asset_balance = assets
                             .get_mut(&asset_id)
                             .expect("Asset to transfer not found in anonymous assets");
-                        asset_balance.0 = asset_balance
-                            .0
-                            .checked_sub(amount.0)
+                        *asset_balance = asset_balance
+                            .checked_sub(amount)
                             .expect("Not enough balance in anonymous assets");
                         self.internal_increase_assets(events, to, asset_id, amount);
                     }
@@ -1125,9 +1124,8 @@ impl DexEngine {
                         let near_balance = sandboxed_assets
                             .get_mut(&AssetId::Near)
                             .expect("Near balance not found in anonymous assets");
-                        near_balance.0 = near_balance
-                            .0
-                            .checked_sub(amount.0)
+                        *near_balance = near_balance
+                            .checked_sub(amount)
                             .expect("Not enough near balance in anonymous assets");
                     } else {
                         self.internal_decrease_assets(
@@ -1140,11 +1138,11 @@ impl DexEngine {
                     self.total_in_custody
                         .entry(AssetId::Near)
                         .and_modify(|b| {
-                            b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                            *b = b.checked_sub(amount).unwrap_or_else(|| {
                                 panic!(
                                     "Balance underflow for contract and asset Near: {} - {} < {}",
-                                    b.0,
-                                    amount.0,
+                                    b,
+                                    amount,
                                     u128::MIN,
                                 )
                             })
@@ -1159,14 +1157,14 @@ impl DexEngine {
                             self.user_storage_balances.storage_deposit(
                                 account,
                                 Some(false),
-                                NearToken::from_yoctonear(amount.0),
+                                NearToken::from_yoctonear(amount.get()),
                             );
                         }
                         Some(AccountOrDexId::Dex(dex_id)) => {
                             self.dex_storage_balances.storage_deposit(
                                 dex_id,
                                 Some(false),
-                                NearToken::from_yoctonear(amount.0),
+                                NearToken::from_yoctonear(amount.get()),
                             );
                         }
                         None => {
@@ -1181,30 +1179,32 @@ impl DexEngine {
         }
         for (asset_id, amount) in anon_swap_available_assets.unwrap_or_default() {
             expect!(
-                amount.0 == 0,
+                amount.is_zero(),
                 "Sandboxed assets must be empty after execution. Did you forget to withdraw {} {asset_id}?",
-                amount.0
+                amount
             );
         }
         None
     }
 }
 
-fn amount_in_after_fees(amount_in: U128, referral_fees_paid: &[(AccountId, U128)]) -> U128 {
+fn amount_in_after_fees(
+    amount_in: TokenAmount,
+    referral_fees_paid: &[(AccountId, TokenAmount)],
+) -> TokenAmount {
     referral_fees_paid
         .iter()
-        .try_fold(amount_in.0, |amount, (_, fee)| amount.checked_sub(fee.0))
-        .map(U128)
+        .try_fold(amount_in, |amount, (_, fee)| amount.checked_sub(*fee))
         .expect("Referral fees exceed the amount in")
 }
 
-fn amount_in_with_fees(dex_amount_in: U128, referral_fees_paid: &[(AccountId, U128)]) -> U128 {
+fn amount_in_with_fees(
+    dex_amount_in: TokenAmount,
+    referral_fees_paid: &[(AccountId, TokenAmount)],
+) -> TokenAmount {
     referral_fees_paid
         .iter()
-        .try_fold(dex_amount_in.0, |amount, (_, fee)| {
-            amount.checked_add(fee.0)
-        })
-        .map(U128)
+        .try_fold(dex_amount_in, |amount, (_, fee)| amount.checked_add(*fee))
         .expect("Overflow")
 }
 
@@ -1214,7 +1214,7 @@ impl DexEngine {
     pub fn after_withdraw(
         &mut self,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
         withdraw_to: AccountId,
         withdraw_from: AccountOrDexId,
         #[callback_result] result: Result<(), PromiseError>,
@@ -1264,11 +1264,11 @@ impl DexEngine {
                 self.total_in_custody
                     .entry(asset_id.clone())
                     .and_modify(|b| {
-                        b.0 = b.0.checked_add(amount.0).unwrap_or_else(|| {
+                        *b = b.checked_add(amount).unwrap_or_else(|| {
                             panic!(
                                 "Balance overflow for contract and asset {asset_id}: {} + {} > {}",
-                                b.0,
-                                amount.0,
+                                b,
+                                amount,
                                 u128::MAX
                             )
                         });

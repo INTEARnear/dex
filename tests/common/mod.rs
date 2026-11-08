@@ -1,14 +1,28 @@
 #![allow(unused)]
 
 use intear_dex::storage_management::TotalStorageBalances;
-use intear_dex_types::{AccountOrDexId, AssetId, DexId, Operation};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation};
 use near_contract_standards::storage_management::StorageBalance;
 use near_crypto::{KeyType, SecretKey};
+use near_jsonrpc_client::{JsonRpcClient, methods};
+use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_primitives::action::{Action, FunctionCallAction};
+use near_primitives::transaction::{
+    NonceMode, SignedTransaction, Transaction, TransactionNonce, TransactionV1,
+};
+use near_primitives::types::{BlockReference, Finality};
+use near_primitives::views::{
+    ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus, GasKeyNoncesView,
+    QueryRequest, TxExecutionStatus,
+};
+use near_sdk::PublicKeyHandle;
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
-use near_sdk::json_types::Base64VecU8;
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use near_sdk::serde_json::json;
 use near_sdk::{AccountId, NearToken, json_types::U128};
 use near_workspaces::network::{Mainnet, Sandbox, ValidatorKey};
+use near_workspaces::operations::TransactionStatus;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
@@ -25,6 +39,7 @@ pub struct CompiledWasms {
     pub test_dex_wasm: Vec<u8>,
     pub otc_dex_wasm: Vec<u8>,
     pub xyk_dex_wasm: Vec<u8>,
+    pub amp_dex_wasm: Vec<u8>,
     pub ft_wasm: Vec<u8>,
 }
 
@@ -103,6 +118,8 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 Some(wasm) => wasm,
                 None => compile_dex(workspace_root, &release_wasm_directory, "xyk-dex").await,
             };
+            let amp_dex_wasm =
+                compile_dex(workspace_root, &release_wasm_directory, "amp-dex").await;
 
             println!("Compilation complete");
 
@@ -112,6 +129,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 test_dex_wasm,
                 otc_dex_wasm,
                 xyk_dex_wasm,
+                amp_dex_wasm,
                 ft_wasm: include_bytes!("../assets/ft.wasm").to_vec(),
             }
         })
@@ -1065,4 +1083,195 @@ pub async fn assert_untracked_near(
         .into());
     }
     Ok(untracked_near)
+}
+
+/// A JSON-RPC client of the sandbox with connections of its own. The clients
+/// of `JsonRpcClient::connect` share their connections between all tests,
+/// and a connection fails a request when the test that opened it ends, which
+/// another test on the shared sandbox can be waiting on.
+pub fn sandbox_rpc_client(sandbox: &Worker<Sandbox>) -> JsonRpcClient {
+    JsonRpcClient::new_client().connect(sandbox.rpc_addr())
+}
+
+pub fn oracle_key_handle(oracle_key: &SecretKey) -> PublicKeyHandle {
+    PublicKeyHandle::from(
+        oracle_key
+            .public_key()
+            .to_string()
+            .parse::<near_sdk::PublicKey>()
+            .unwrap(),
+    )
+}
+
+/// Call the dex engine in a transaction that `key`, a gas key of the engine
+/// account such as an oracle key, signs. near-workspaces can't sign with gas keys.
+pub async fn call_engine_with_gas_key(
+    sandbox: &Worker<Sandbox>,
+    dex_engine_contract: &Contract,
+    key: &SecretKey,
+    method_name: &str,
+    args: near_sdk::serde_json::Value,
+) -> FinalExecutionOutcomeView {
+    let client = sandbox_rpc_client(sandbox);
+    let QueryResponseKind::GasKeyNonces(GasKeyNoncesView { nonces }) = client
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+            request: QueryRequest::ViewGasKeyNonces {
+                account_id: dex_engine_contract.id().clone(),
+                public_key: key.public_key(),
+            },
+        })
+        .await
+        .unwrap()
+        .kind
+    else {
+        panic!("{} is not a gas key", key.public_key());
+    };
+    let block_hash = client
+        .call(methods::block::RpcBlockRequest {
+            block_reference: BlockReference::Finality(Finality::None),
+        })
+        .await
+        .unwrap()
+        .header
+        .hash;
+    let transaction = Transaction::V1(TransactionV1 {
+        signer_id: dex_engine_contract.id().clone(),
+        public_key: key.public_key(),
+        nonce: TransactionNonce::from_nonce_and_index(nonces[0] + 1, 0),
+        receiver_id: dex_engine_contract.id().clone(),
+        block_hash,
+        actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
+            method_name: method_name.to_string(),
+            args: args.to_string().into_bytes(),
+            gas: near_primitives::types::Gas::from_teragas(300),
+            deposit: NearToken::ZERO,
+        }))],
+        nonce_mode: NonceMode::Monotonic,
+    });
+    let signature = key.sign(transaction.get_hash_and_size().0.as_ref());
+    client
+        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            signed_transaction: SignedTransaction::new(signature, transaction),
+        })
+        .await
+        .unwrap()
+}
+
+/// Add an oracle key of `key_type` to the dex engine with `deposit` for its
+/// storage and gas
+pub async fn create_oracle_key(
+    dex_engine_contract: &Contract,
+    payer: &Account,
+    key_type: KeyType,
+    deposit: NearToken,
+) -> SecretKey {
+    let oracle_key = SecretKey::from_random(key_type);
+    let result = payer
+        .call(dex_engine_contract.id(), "create_oracle_key")
+        .max_gas()
+        .deposit(deposit)
+        .args_json(json!({
+            "oracle_key": oracle_key.public_key(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    oracle_key
+}
+
+/// The operations of `transactions`, sent with `transact_async`, that wait for
+/// `request`, by the `nonce` of their `oracle_request` events, once all of them
+/// started waiting
+pub async fn waiting_for_oracle_request(
+    sandbox: &Worker<Sandbox>,
+    transactions: &[&TransactionStatus],
+    request: &[u8],
+) -> Vec<Base64VecU8> {
+    // At once, since operations stop waiting after 200 blocks
+    let mut queries = tokio::task::JoinSet::new();
+    for transaction in transactions {
+        let client = sandbox_rpc_client(sandbox);
+        let query = methods::tx::RpcTransactionStatusRequest {
+            transaction_info: methods::tx::TransactionInfo::TransactionId {
+                tx_hash: near_primitives::hash::CryptoHash(transaction.hash().0),
+                sender_account_id: transaction.sender_id().clone(),
+            },
+            wait_until: TxExecutionStatus::None,
+        };
+        let request = request.to_vec();
+        queries.spawn(async move {
+            // Asks again until the sandbox, which is slow with many transactions
+            // at once, runs the transaction
+            for _ in 0..100 {
+                match client.call(&query).await {
+                    Ok(response) => {
+                        let waiting = response
+                            .final_execution_outcome
+                            .into_iter()
+                            .flat_map(|outcome| outcome.into_outcome().receipts_outcome)
+                            .flat_map(|receipt| receipt.outcome.logs)
+                            .filter_map(|log| {
+                                let event = log.strip_prefix("EVENT_JSON:")?;
+                                let Ok(IntearDexEvent::OracleRequest {
+                                    request: event_request,
+                                    nonce,
+                                    ..
+                                }) = near_sdk::serde_json::from_str(event)
+                                else {
+                                    return None;
+                                };
+                                (event_request.0 == request).then_some(nonce)
+                            })
+                            .collect::<Vec<_>>();
+                        if !waiting.is_empty() {
+                            return waiting;
+                        }
+                    }
+                    Err(err) => println!("Asking again after: {err}"),
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            panic!("Operations didn't start waiting for the request");
+        });
+    }
+    queries.join_all().await.into_iter().flatten().collect()
+}
+
+/// Assert that the oracle transaction and all of its receipts succeeded
+pub fn assert_gas_key_call_success(outcome: &FinalExecutionOutcomeView) -> Result<(), String> {
+    let failed = !matches!(outcome.status, FinalExecutionStatus::SuccessValue(_))
+        || outcome
+            .receipts_outcome
+            .iter()
+            .any(|receipt| matches!(receipt.outcome.status, ExecutionStatusView::Failure(_)));
+    if failed {
+        println!("{outcome:#?}");
+        return Err("Not successful".to_string());
+    }
+    Ok(())
+}
+
+/// Respond to `request` with `response` with `oracle_key`, resuming the operations of `nonces`
+pub async fn oracle_respond(
+    sandbox: &Worker<Sandbox>,
+    dex_engine_contract: &Contract,
+    oracle_key: &SecretKey,
+    request: &[u8],
+    response: Vec<u8>,
+    nonces: Vec<Base64VecU8>,
+) -> FinalExecutionOutcomeView {
+    call_engine_with_gas_key(
+        sandbox,
+        dex_engine_contract,
+        oracle_key,
+        "oracle_respond",
+        json!({
+            "request_hash": Base58CryptoHash::from(near_sdk::env::sha256_array(request)),
+            "response": Base64VecU8(response),
+            "nonces": nonces,
+        }),
+    )
+    .await
 }

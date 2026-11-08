@@ -9,4 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
-intear-dex-types = { path = "../intear-dex-types" }
+intear-dex-common = { path = "../intear-dex-common" }

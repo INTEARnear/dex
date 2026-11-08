@@ -1,4 +1,4 @@
-use intear_dex_types::{AssetId, SwapRequest};
+use intear_dex_common::{AssetId, SwapRequest};
 use near_sdk::{
     AccountId,
     borsh::{BorshDeserialize, io::Read},

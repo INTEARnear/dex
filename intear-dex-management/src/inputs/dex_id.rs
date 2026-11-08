@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 
 #[derive(Clone)]
 pub struct DexIdArg(pub DexId);

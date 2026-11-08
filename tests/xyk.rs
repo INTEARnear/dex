@@ -1,8 +1,8 @@
 use crate::common::*;
 
+use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexEventData, DexId, Operation, SwapOperationAmount,
-    SwapRequestAmount, WithdrawAmount,
+    AccountOrDexId, DexEventData, Operation, SwapOperationAmount, WithdrawAmount,
 };
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::AccountId;
@@ -320,7 +320,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -328,8 +328,8 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -380,7 +380,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -583,9 +583,9 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1_deployer)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2_deployer)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1_deployer)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2_deployer)),
                     ]),
                 },
             ],
@@ -671,7 +671,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     args: Base64VecU8(near_sdk::borsh::to_vec(&RegisterLiquidityArgs { pool_id: first_pool_id }).unwrap()),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(NearToken::from_millinear(10).as_yoctonear()),
+                        TokenAmount::new(NearToken::from_millinear(10).as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -679,8 +679,8 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1_user1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2_user1)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1_user1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2_user1)),
                     ]),
                 },
             ],
@@ -749,7 +749,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -1026,7 +1026,7 @@ async fn test_xyk_lock_pool() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -1037,8 +1037,8 @@ async fn test_xyk_lock_pool() {
                         min_shares_received: None,
                     }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -1242,9 +1242,18 @@ async fn test_xyk_multi_user_liquidity() {
                     .unwrap(),
                 ),
                 attached_assets: HashMap::from_iter([
-                    (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                    (AssetId::Nep141(ft1.id().clone()), U128(ft1_amount)),
-                    (AssetId::Nep141(ft2.id().clone()), U128(ft2_amount)),
+                    (
+                        AssetId::Near,
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
+                    ),
+                    (
+                        AssetId::Nep141(ft1.id().clone()),
+                        TokenAmount::new(ft1_amount),
+                    ),
+                    (
+                        AssetId::Nep141(ft2.id().clone()),
+                        TokenAmount::new(ft2_amount),
+                    ),
                 ]),
             }]
         } else {
@@ -1260,7 +1269,7 @@ async fn test_xyk_multi_user_liquidity() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(NearToken::from_millinear(10).as_yoctonear()),
+                        TokenAmount::new(NearToken::from_millinear(10).as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -1274,8 +1283,14 @@ async fn test_xyk_multi_user_liquidity() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(ft1_amount)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(ft2_amount)),
+                        (
+                            AssetId::Nep141(ft1.id().clone()),
+                            TokenAmount::new(ft1_amount),
+                        ),
+                        (
+                            AssetId::Nep141(ft2.id().clone()),
+                            TokenAmount::new(ft2_amount),
+                        ),
                     ]),
                 },
             ]
@@ -1451,9 +1466,9 @@ async fn test_xyk_create_public_pool_with_initial_liquidity() {
                         attached_assets: HashMap::from_iter([
                             (
                                 AssetId::Near,
-                                U128(storage_deposit_for_pool.as_yoctonear() + initial_liquidity_near),
+                                TokenAmount::new(storage_deposit_for_pool.as_yoctonear() + initial_liquidity_near),
                             ),
-                            (AssetId::Nep141(ft1.id().clone()), U128(attached_ft1)),
+                            (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(attached_ft1)),
                         ]),
                     },
                 ],
@@ -1676,7 +1691,7 @@ async fn test_xyk_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -1684,8 +1699,8 @@ async fn test_xyk_fees() {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -1721,7 +1736,7 @@ async fn test_xyk_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -1903,7 +1918,7 @@ async fn test_xyk_scheduled_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -1911,8 +1926,8 @@ async fn test_xyk_scheduled_fees() {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -1961,7 +1976,7 @@ async fn test_xyk_scheduled_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -2156,7 +2171,7 @@ async fn test_xyk_exact_output() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -2164,8 +2179,8 @@ async fn test_xyk_exact_output() {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: first_pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -2228,7 +2243,7 @@ async fn test_xyk_exact_output() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(exact_output_ft2))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(exact_output_ft2))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -2370,9 +2385,9 @@ async fn test_xyk_pool_fees() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (AssetId::Nep141(ft1.id().clone()), U128(add_liquidity_ft1)),
-                        (AssetId::Nep141(ft2.id().clone()), U128(add_liquidity_ft2)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -2414,7 +2429,7 @@ async fn test_xyk_pool_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -2610,11 +2625,11 @@ async fn test_xyk_launch_pool_flow() {
                     attached_assets: HashMap::from_iter([
                         (
                             AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
+                            TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                         ),
                         (
                             AssetId::Nep141(ft2.id().clone()),
-                            U128(launch_liquidity_ft2),
+                            TokenAmount::new(launch_liquidity_ft2),
                         ),
                     ]),
                 },
@@ -2665,7 +2680,7 @@ async fn test_xyk_launch_pool_flow() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -2808,7 +2823,9 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
         ),
         asset_in,
         asset_out,
-        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount_in))),
+        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+            amount_in,
+        ))),
         constraint: None,
     };
 
@@ -2834,8 +2851,8 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (AssetId::Nep141(ft2.id().clone()), U128(launch_liquidity_ft2)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(launch_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -2971,11 +2988,11 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                     attached_assets: HashMap::from_iter([
                         (
                             AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
+                            TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                         ),
                         (
                             AssetId::Nep141(ft2.id().clone()),
-                            U128(launch_liquidity_ft2),
+                            TokenAmount::new(launch_liquidity_ft2),
                         ),
                     ]),
                 },
@@ -2984,7 +3001,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(LAST_CREATED_POOL_ID_MARKER)).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3117,11 +3134,11 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     attached_assets: HashMap::from_iter([
                         (
                             AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
+                            TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                         ),
                         (
                             AssetId::Nep141(ft2.id().clone()),
-                            U128(launch_liquidity_ft2),
+                            TokenAmount::new(launch_liquidity_ft2),
                         ),
                     ]),
                 },
@@ -3153,7 +3170,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3234,7 +3251,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: launched_asset_id.clone(),
                     asset_out: AssetId::Near,
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(sell_amount_ft2))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3387,9 +3404,9 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                         attached_assets: HashMap::from_iter([
                             (
                                 AssetId::Near,
-                                U128(storage_deposit_for_pool.as_yoctonear()),
+                                TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                             ),
-                            (launched_asset_id.clone(), U128(launch_liquidity_ft2)),
+                            (launched_asset_id.clone(), TokenAmount::new(launch_liquidity_ft2)),
                         ]),
                     },
                 ],
@@ -3451,7 +3468,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: quote_asset_id.clone(),
                     asset_out: launched_asset_id.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(ft1_swap_in))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(ft1_swap_in))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3509,7 +3526,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: launched_asset_id.clone(),
                     asset_out: quote_asset_id.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(sell_amount_ft2))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3642,11 +3659,11 @@ async fn test_xyk_launch_pool_restrictions() {
                     attached_assets: HashMap::from_iter([
                         (
                             AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
+                            TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                         ),
                         (
                             AssetId::Nep141(ft2.id().clone()),
-                            U128(launch_liquidity_ft2),
+                            TokenAmount::new(launch_liquidity_ft2),
                         ),
                     ]),
                 },
@@ -3705,7 +3722,7 @@ async fn test_xyk_launch_pool_restrictions() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft2.id().clone()),
                     asset_out: AssetId::Near,
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(ft2_for_failed_swap))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(ft2_for_failed_swap))),
                     constraint: None,
                 },
             ],
@@ -3812,11 +3829,11 @@ async fn test_xyk_launch_pool_community_fees() {
                     attached_assets: HashMap::from_iter([
                         (
                             AssetId::Near,
-                            U128(storage_deposit_for_pool.as_yoctonear()),
+                            TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                         ),
                         (
                             AssetId::Nep141(ft2.id().clone()),
-                            U128(launch_liquidity_ft2),
+                            TokenAmount::new(launch_liquidity_ft2),
                         ),
                     ]),
                 },
@@ -3897,7 +3914,7 @@ async fn test_xyk_launch_pool_community_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Near,
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(near_swap_in))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -3972,7 +3989,7 @@ async fn test_xyk_launch_pool_community_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: AssetId::Nep141(ft2.id().clone()),
                     asset_out: AssetId::Near,
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(sell_amount_ft2))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -4139,7 +4156,7 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
             ],
@@ -4519,7 +4536,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -4527,8 +4544,8 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     method: "add_liquidity".to_string(),
                     args: Base64VecU8(near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id, min_shares_received: None }).unwrap()),
                     attached_assets: HashMap::from_iter([
-                        (ft1_asset_id.clone(), U128(add_liquidity_ft1)),
-                        (ft2_asset_id.clone(), U128(add_liquidity_ft2)),
+                        (ft1_asset_id.clone(), TokenAmount::new(add_liquidity_ft1)),
+                        (ft2_asset_id.clone(), TokenAmount::new(add_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -4622,16 +4639,16 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
 
     let current_block_height = sandbox.view_block().await.unwrap().height();
     let full_fee_discount_for_user1 = FeeDiscount {
-        routes: SwapArgs::single_pool(pool_id).routes,
+        route: SwapArgs::single_pool(pool_id).routes,
         asset_in: ft1_asset_id.clone(),
         asset_out: ft2_asset_id.clone(),
         trader_id: Some(user1.id().clone()),
-        amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        amount: SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
         fee_discount: FULL_FEE_DISCOUNT,
         expiration_block_height: current_block_height + 1_000,
     };
     let full_exact_out_fee_discount_for_user1 = FeeDiscount {
-        amount: SwapRequestAmount::ExactOut(U128(exact_amount_out_ft2)),
+        amount: SwapRequestAmount::ExactOut(TokenAmount::new(exact_amount_out_ft2)),
         ..full_fee_discount_for_user1.clone()
     };
 
@@ -4646,7 +4663,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
             dex_engine_contract.id(),
             &dex_id,
         )),
-        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
     )
     .await
     .unwrap();
@@ -4692,7 +4709,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
             dex_engine_contract.id(),
             &dex_id,
         )),
-        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
     )
     .await
     .unwrap();
@@ -4728,7 +4745,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
             dex_engine_contract.id(),
             &dex_id,
         )),
-        SwapRequestAmount::ExactOut(U128(exact_amount_out_ft2)),
+        SwapRequestAmount::ExactOut(TokenAmount::new(exact_amount_out_ft2)),
     )
     .await
     .unwrap();
@@ -4753,7 +4770,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
     let ft2_before = user1_balance(&ft2_asset_id).await;
     let result = swap_ft1_to_ft2(
         near_sdk::borsh::to_vec(&pool_id).unwrap(),
-        SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
     )
     .await
     .unwrap();
@@ -4784,7 +4801,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount signature verification failed",
         ),
         (
@@ -4798,7 +4815,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                     id: "other-dex".to_string(),
                 },
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount signature verification failed",
         ),
         (
@@ -4816,13 +4833,13 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 )
                 .signature,
             },
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount signature verification failed",
         ),
         (
             sign_fee_discount(
                 FeeDiscount {
-                    routes: SwapArgs::single_pool(PoolId::new(pool_id.get() + 1)).routes,
+                    route: SwapArgs::single_pool(PoolId::new(pool_id.get() + 1)).routes,
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
@@ -4830,7 +4847,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount is for another route",
         ),
         (
@@ -4845,7 +4862,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount is for other assets",
         ),
         (
@@ -4859,13 +4876,13 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount is for another trader",
         ),
         (
             sign_fee_discount(
                 FeeDiscount {
-                    amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1 + 1)),
+                    amount: SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1 + 1)),
                     ..full_fee_discount_for_user1.clone()
                 },
                 &fee_discount_signer,
@@ -4873,7 +4890,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount is for another amount",
         ),
         (
@@ -4884,7 +4901,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactOut(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactOut(TokenAmount::new(swap_amount_ft1)),
             "Fee discount is for another amount",
         ),
         (
@@ -4898,7 +4915,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount expired",
         ),
         (
@@ -4912,7 +4929,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                 dex_engine_contract.id(),
                 &dex_id,
             ),
-            SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
             "Fee discount can't exceed 100%",
         ),
     ];
@@ -4962,11 +4979,11 @@ async fn test_xyk_fee_discount_without_signer() {
     let chain_id = sandbox.status().await.unwrap().chain_id;
     let fee_discount = sign_fee_discount(
         FeeDiscount {
-            routes: SwapArgs::single_pool(PoolId::new(0)).routes,
+            route: SwapArgs::single_pool(PoolId::new(0)).routes,
             asset_in: AssetId::Nep141(ft1.id().clone()),
             asset_out: AssetId::Nep141(ft2.id().clone()),
             trader_id: None,
-            amount: SwapRequestAmount::ExactIn(U128(1)),
+            amount: SwapRequestAmount::ExactIn(TokenAmount::new(1)),
             fee_discount: FULL_FEE_DISCOUNT,
             expiration_block_height: u64::MAX,
         },
@@ -4990,7 +5007,7 @@ async fn test_xyk_fee_discount_without_signer() {
                     }).unwrap()),
                     asset_in: AssetId::Nep141(ft1.id().clone()),
                     asset_out: AssetId::Nep141(ft2.id().clone()),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(1))),
                     constraint: None,
                 },
             ],
@@ -5089,9 +5106,9 @@ async fn test_xyk_route_fee_discount() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (assets.0, U128(liquidity)),
-                        (assets.1, U128(liquidity)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (assets.0, TokenAmount::new(liquidity)),
+                        (assets.1, TokenAmount::new(liquidity)),
                     ]),
                 }],
             }))
@@ -5147,7 +5164,7 @@ async fn test_xyk_route_fee_discount() {
                     ),
                     asset_in: ft1_asset_id.clone(),
                     asset_out: ft3_asset_id.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
                         swap_amount_ft1,
                     ))),
                     constraint: None,
@@ -5169,18 +5186,18 @@ async fn test_xyk_route_fee_discount() {
 
     let current_block_height = sandbox.view_block().await.unwrap().height();
     let full_fee_discount = FeeDiscount {
-        routes: routes.clone(),
+        route: routes.clone(),
         asset_in: ft1_asset_id.clone(),
         asset_out: ft3_asset_id.clone(),
         trader_id: Some(user1.id().clone()),
-        amount: SwapRequestAmount::ExactIn(U128(swap_amount_ft1)),
+        amount: SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1)),
         fee_discount: FULL_FEE_DISCOUNT,
         expiration_block_height: current_block_height + 1_000,
     };
 
     // A discount for the first pool only doesn't apply to a route through both
     let result = swap_ft1_to_ft3(Some(FeeDiscount {
-        routes: vec![route(100, vec![first_pool_id])],
+        route: vec![route(100, vec![first_pool_id])],
         ..full_fee_discount.clone()
     }))
     .await;
@@ -5326,7 +5343,7 @@ async fn test_xyk_reinvest_pool_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
             ],
@@ -5362,9 +5379,9 @@ async fn test_xyk_reinvest_pool_fees() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (ft1_asset_id.clone(), U128(creator_liquidity_ft1)),
-                        (ft2_asset_id.clone(), U128(creator_liquidity_ft2)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (ft1_asset_id.clone(), TokenAmount::new(creator_liquidity_ft1)),
+                        (ft2_asset_id.clone(), TokenAmount::new(creator_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -5391,7 +5408,7 @@ async fn test_xyk_reinvest_pool_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(NearToken::from_millinear(10).as_yoctonear()),
+                        TokenAmount::new(NearToken::from_millinear(10).as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -5405,8 +5422,8 @@ async fn test_xyk_reinvest_pool_fees() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (ft1_asset_id.clone(), U128(provider_liquidity_ft1)),
-                        (ft2_asset_id.clone(), U128(provider_liquidity_ft2)),
+                        (ft1_asset_id.clone(), TokenAmount::new(provider_liquidity_ft1)),
+                        (ft2_asset_id.clone(), TokenAmount::new(provider_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -5450,7 +5467,7 @@ async fn test_xyk_reinvest_pool_fees() {
                     message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(first_pool_id)).unwrap()),
                     asset_in: ft1_asset_id.clone(),
                     asset_out: ft2_asset_id.clone(),
-                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(swap_amount_ft1))),
+                    amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
                 },
                 Operation::Withdraw {
@@ -5764,9 +5781,9 @@ async fn test_xyk_collect_liquidity_fees() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (AssetId::Near, U128(storage_deposit_for_pool.as_yoctonear())),
-                        (ft1_asset_id.clone(), U128(creator_liquidity_ft1)),
-                        (ft2_asset_id.clone(), U128(creator_liquidity_ft2)),
+                        (AssetId::Near, TokenAmount::new(storage_deposit_for_pool.as_yoctonear())),
+                        (ft1_asset_id.clone(), TokenAmount::new(creator_liquidity_ft1)),
+                        (ft2_asset_id.clone(), TokenAmount::new(creator_liquidity_ft2)),
                     ]),
                 },
                 Operation::DexCall {
@@ -5784,7 +5801,7 @@ async fn test_xyk_collect_liquidity_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(storage_deposit_for_pool.as_yoctonear()),
+                        TokenAmount::new(storage_deposit_for_pool.as_yoctonear()),
                     )]),
                 },
             ],
@@ -5811,7 +5828,7 @@ async fn test_xyk_collect_liquidity_fees() {
                     ),
                     attached_assets: HashMap::from_iter([(
                         AssetId::Near,
-                        U128(NearToken::from_millinear(10).as_yoctonear()),
+                        TokenAmount::new(NearToken::from_millinear(10).as_yoctonear()),
                     )]),
                 },
                 Operation::DexCall {
@@ -5825,8 +5842,8 @@ async fn test_xyk_collect_liquidity_fees() {
                         .unwrap(),
                     ),
                     attached_assets: HashMap::from_iter([
-                        (ft1_asset_id.clone(), U128(provider_liquidity_ft1)),
-                        (ft2_asset_id.clone(), U128(provider_liquidity_ft2)),
+                        (ft1_asset_id.clone(), TokenAmount::new(provider_liquidity_ft1)),
+                        (ft2_asset_id.clone(), TokenAmount::new(provider_liquidity_ft2)),
                     ]),
                 },
             ],
@@ -5866,7 +5883,7 @@ async fn test_xyk_collect_liquidity_fees() {
                         message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(public_pool_id)).unwrap()),
                         asset_in: asset_in.clone(),
                         asset_out: asset_out.clone(),
-                        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount))),
+                        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(amount))),
                         constraint: None,
                     },
                     Operation::Withdraw {

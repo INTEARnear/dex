@@ -1,4 +1,4 @@
-use intear_dex_types::{DexId, expect};
+use intear_dex_common::{DexId, expect};
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };

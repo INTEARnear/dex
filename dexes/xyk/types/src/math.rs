@@ -2,12 +2,11 @@ use std::num::NonZeroU128;
 
 use ethnum::U256;
 
-use crate::{CurrentFees, FULL_FEE_FRACTION, SwapReserves, TokenAmount};
+use intear_dex_common::mul_div;
 
-/// Returns `a * b / c`, rounded down. Panics if the result doesn't fit into u128.
-pub(crate) fn mul_div(a: u128, b: u128, c: NonZeroU128) -> u128 {
-    mul_add_div(a, b, 0, c)
-}
+use crate::{
+    CurrentFees, FULL_FEE_FRACTION, ProviderShares, SwapReserves, TokenAmount, TotalShares,
+};
 
 /// Returns `a * b / (c + d)`, rounded down. Panics if the result doesn't fit into u128.
 fn mul_div_sum(a: u128, b: u128, c: u128, d: u128) -> u128 {
@@ -45,6 +44,27 @@ fn mul_div_u256_sum(a: u128, b: u128, c: u128, d: u128) -> u128 {
     #[allow(clippy::arithmetic_side_effects)]
     let quotient = U256::from(a) * U256::from(b) / (U256::from(c) + U256::from(d));
     u128::try_from(quotient).expect("Value must be less than 128 bits")
+}
+
+/// The shares for `fee` put back into one side of a pool with `reserve` of its asset, rounded
+/// down. After it goes in, the pool is worth twice its new reserve of that asset at its price, so
+/// shares worth the fee own `fee / (2 * (reserve + fee))` of the pool.
+pub fn shares_minted_for_reinvested(
+    fee: TokenAmount,
+    total_shares: TotalShares,
+    reserve: TokenAmount,
+) -> ProviderShares {
+    let pool_value_before_minting = reserve
+        .get()
+        .checked_mul(2)
+        .and_then(|double_reserve| double_reserve.checked_add(fee.get()))
+        .and_then(NonZeroU128::new)
+        .expect("Pool value overflow");
+    ProviderShares::new(mul_div(
+        fee.get(),
+        total_shares.get(),
+        pool_value_before_minting,
+    ))
 }
 
 /// What a swap gets out of a pool with `reserves` for `amount_in_after_fees` of the asset put in,

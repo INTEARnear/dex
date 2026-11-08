@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId};
+use intear_dex_common::AssetId;
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
@@ -13,7 +14,7 @@ use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::amount::AmountArg;
 use crate::inputs::asset_ids::AssetIdArg;
-use crate::outcome::{ExpectedOutcome, ExpectedTransferCall};
+use crate::outcome::{DexEvents, ExpectedOutcome, ExpectedTransferCall};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near};
 
 pub const DEPOSIT_NEAR_GAS: Gas = Gas::from_teragas(10);
@@ -143,6 +144,7 @@ impl DepositContext {
                                 success_message,
                                 transfer_call: None,
                                 dex_id: None,
+                                dex_events: DexEvents::NotRead,
                                 deployment: None,
                             },
                             deploy_code: None,
@@ -238,6 +240,7 @@ impl DepositContext {
                                     metadata,
                                 }),
                                 dex_id: None,
+                                dex_events: DexEvents::NotRead,
                                 deployment: None,
                             },
                             deploy_code: None,

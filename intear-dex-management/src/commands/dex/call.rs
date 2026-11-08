@@ -12,7 +12,7 @@ use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::asset_amounts::AssetAmountsArg;
 use crate::inputs::dex_id::DexIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
 /// The code of an arbitrary dex is unknown, so its calls get a generous
@@ -140,6 +140,7 @@ impl CallContext {
                         success_message: format!("Called {method} on {dex_id}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

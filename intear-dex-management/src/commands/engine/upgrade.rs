@@ -16,7 +16,7 @@ use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use crate::chain::{account, engine};
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, CallArgs, FunctionCall, Preflight, TransactionPlan, storage};
 
 /// NEAR's 1.5 MiB limit on a transaction, less 4 KiB for the rest of it
@@ -310,6 +310,7 @@ impl StoreChunkContext {
                         ),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                 })
@@ -365,6 +366,7 @@ impl DeployContext {
                     success_message: success_message.clone(),
                     transfer_call: None,
                     dex_id: None,
+                    dex_events: DexEvents::NotRead,
                     deployment: None,
                 };
                 let chunks = built.chunks();

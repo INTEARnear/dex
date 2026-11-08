@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::chain::engine;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
 
 const SET_TRUSTED_CODE_DEPLOYER_GAS: Gas = Gas::from_teragas(10);
@@ -96,6 +96,7 @@ impl SetTrustedCodeDeployerContext {
                         ),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

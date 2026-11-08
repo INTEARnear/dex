@@ -1,362 +1,377 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-mod engine_api;
+use std::{collections::HashMap, fmt::Display};
 
-use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
-
-pub use engine_api::{
-    AccountOrDexId, BalanceUpdate, DepositMessage, DexEventData, DirectWithdrawAmount,
-    FULL_FEE_FRACTION, FeeFraction, IntearDexEvent, MAX_REFERRAL_FEE_FRACTION, MAX_REFERRERS,
-    Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
+use intear_dex_common::{
+    AssetId, DexId, FULL_FEE_FRACTION, FeeFraction, SwapRequest, SwapRequestAmount, TokenAmount,
+    expect, fraction_of,
 };
-use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use near_sdk::{
-    AccountId, NearToken,
-    json_types::{Base64VecU8, U128},
+    AccountId, PublicKeyHandle,
+    json_types::{Base58CryptoHash, Base64VecU8},
     near,
+    serde::Deserialize,
 };
 
 pub const CAN_PAUSE: &[&str] = &["slimedragon.near", "pause.slimedragon.near"];
 
-/// Request for a swap operation.
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh, json])]
-pub struct SwapRequest {
-    /// Custom message to be passed to the dex. For example,
-    /// it could be the pool ID or route.
-    pub message: Base64VecU8,
-    /// The asset the user has requested to be swapped in.
-    pub asset_in: AssetId,
-    /// The asset the user has requested to be swapped out.
-    pub asset_out: AssetId,
-    /// The amount of the asset the user has requested to be
-    /// swapped. The response `amount_in` or `amount_out`
-    /// must match this amount.
-    pub amount: SwapRequestAmount,
-    /// The account ID of the referrer.
-    pub referrer: Option<AccountId>,
-}
+/// The most all referrers of a swap can charge together
+pub const MAX_REFERRAL_FEE_FRACTION: FeeFraction = FeeFraction::new(FULL_FEE_FRACTION.get() / 20); // 5%
+pub const MAX_REFERRERS: usize = 5;
 
-/// The swap operation was successful, release `amount_out`
-/// to the user and take `amount_in` from the user.
-///
-/// To mark operation as unsuccessful and refund the attached
-/// assets to the user, the dex must panic.
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
-pub struct SwapResponse {
-    pub amount_in: U128,
-    pub amount_out: U128,
-}
-
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
-pub struct DexCallRequest {
-    pub attached_assets: HashMap<AssetId, U128>,
-    pub args: Vec<u8>,
-}
-
+/// Fees a swap pays referrers out of its input, before the dex gets it. Each
+/// fee goes to the referrer's internal balance of the input asset, and a
+/// referrer who hasn't registered that asset isn't paid, so the trader keeps
+/// that fee. In a batch of operations, only the first swap pays them.
 #[derive(Clone, Default)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
-pub struct DexCallResponse {
-    pub asset_withdraw_requests: Vec<AssetWithdrawRequest>,
-    pub add_storage_deposit: NearToken,
-    pub response: Vec<u8>,
-}
+#[near(serializers=[json])]
+pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
 
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
-pub struct AssetWithdrawRequest {
-    pub asset_id: AssetId,
-    pub amount: U128,
-    pub withdrawal_type: AssetWithdrawalType,
-}
-
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh])]
-pub enum AssetWithdrawalType {
-    ToInternalUserBalance(AccountId),
-    ToInternalDexBalance(DexId),
-    WithdrawUnderlyingAsset(AccountId),
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug)]
-#[near(serializers=[borsh])]
-pub enum AssetId {
-    Near,
-    Nep141(AccountId),
-    Nep245(AccountId, String),
-    Nep171(AccountId, String),
-}
-
-impl Display for AssetId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Near => write!(f, "near"),
-            Self::Nep141(contract_id) => write!(f, "nep141:{contract_id}"),
-            Self::Nep245(contract_id, token_id) => write!(f, "nep245:{contract_id}:{token_id}"),
-            Self::Nep171(contract_id, token_id) => write!(f, "nep171:{contract_id}:{token_id}"),
-        }
+impl ReferralFees {
+    pub fn assert_valid(&self) {
+        expect!(
+            self.0.len() <= MAX_REFERRERS,
+            "At most {MAX_REFERRERS} referrers are allowed"
+        );
+        let total_fee_fraction = self
+            .0
+            .iter()
+            .try_fold(FeeFraction::ZERO, |total, (_, fee_fraction)| {
+                total.checked_add(*fee_fraction)
+            });
+        expect!(
+            total_fee_fraction.is_some_and(|total| total <= MAX_REFERRAL_FEE_FRACTION),
+            "Referral fees must add up to at most {MAX_REFERRAL_FEE_FRACTION}"
+        );
     }
-}
 
-impl FromStr for AssetId {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "near" => Ok(Self::Near),
-            _ => match s.split_once(':') {
-                Some(("nep141", contract_id)) => {
-                    Ok(Self::Nep141(contract_id.parse().map_err(|e| {
-                        format!("Invalid account id {contract_id}: {e}")
-                    })?))
-                }
-                Some(("nep245", rest)) => {
-                    if let Some((contract_id, token_id)) = rest.split_once(':') {
-                        Ok(Self::Nep245(
-                            contract_id
-                                .parse()
-                                .map_err(|e| format!("Invalid account id {contract_id}: {e}"))?,
-                            token_id.to_string(),
-                        ))
-                    } else {
-                        Err(format!("Invalid asset id: {s}"))
-                    }
-                }
-                Some(("nep171", rest)) => {
-                    if let Some((contract_id, token_id)) = rest.split_once(':') {
-                        Ok(Self::Nep171(
-                            contract_id
-                                .parse()
-                                .map_err(|e| format!("Invalid account id {contract_id}: {e}"))?,
-                            token_id.to_string(),
-                        ))
-                    } else {
-                        Err(format!("Invalid asset id: {s}"))
-                    }
-                }
-                _ => Err(format!("Invalid asset id: {s}")),
-            },
-        }
+    /// The fee of each referrer out of `amount_in` that includes the fees, rounded down
+    pub fn amounts_out_of(&self, amount_in: TokenAmount) -> Vec<(AccountId, TokenAmount)> {
+        self.0
+            .iter()
+            .map(|(referrer_id, fee_fraction)| {
+                let fee = fraction_of(amount_in.get(), *fee_fraction, FULL_FEE_FRACTION, false);
+                (referrer_id.clone(), TokenAmount::new(fee))
+            })
+            .collect()
     }
-}
 
-impl Serialize for AssetId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.to_string().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for AssetId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(near_sdk::serde::de::Error::custom)
-    }
-}
-
-#[cfg(feature = "abi")]
-impl near_sdk::schemars::JsonSchema for AssetId {
-    fn schema_name() -> String {
-        "AssetId".to_string()
-    }
-    fn json_schema(
-        generator: &mut near_sdk::schemars::r#gen::SchemaGenerator,
-    ) -> near_sdk::schemars::schema::Schema {
-        <String as near_sdk::schemars::JsonSchema>::json_schema(generator)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh, json])]
-pub enum SwapRequestAmount {
-    ExactIn(U128),
-    ExactOut(U128),
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord, Debug)]
-#[near(serializers=[borsh])]
-pub struct DexId {
-    pub deployer: AccountId,
-    pub id: String,
-}
-
-impl Display for DexId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.deployer, self.id)
-    }
-}
-
-impl FromStr for DexId {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (deployer, id) = s.split_once('/').ok_or(format!("Invalid dex id: {s}"))?;
-        Ok(Self {
-            deployer: deployer
-                .parse()
-                .map_err(|e| format!("Invalid deployer id {deployer}: {e}"))?,
-            id: id.to_string(),
-        })
-    }
-}
-
-impl Serialize for DexId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.to_string().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for DexId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(near_sdk::serde::de::Error::custom)
-    }
-}
-
-#[cfg(feature = "abi")]
-impl near_sdk::schemars::JsonSchema for DexId {
-    fn schema_name() -> String {
-        "DexId".to_string()
-    }
-    fn json_schema(
-        generator: &mut near_sdk::schemars::r#gen::SchemaGenerator,
-    ) -> near_sdk::schemars::schema::Schema {
-        <String as near_sdk::schemars::JsonSchema>::json_schema(generator)
+    /// The fee of each referrer on top of `dex_amount_in`, rounded up, so that each fee is its
+    /// fraction of the total input
+    pub fn amounts_on_top_of(&self, dex_amount_in: TokenAmount) -> Vec<(AccountId, TokenAmount)> {
+        let total_fee_fraction = self
+            .0
+            .iter()
+            .try_fold(FeeFraction::ZERO, |total, (_, fee_fraction)| {
+                total.checked_add(*fee_fraction)
+            })
+            .expect("Referral fees overflow");
+        let dex_fraction = FULL_FEE_FRACTION
+            .checked_sub(total_fee_fraction)
+            .expect("Referral fees exceed 100%");
+        self.0
+            .iter()
+            .map(|(referrer_id, fee_fraction)| {
+                let fee = fraction_of(dex_amount_in.get(), *fee_fraction, dex_fraction, true);
+                (referrer_id.clone(), TokenAmount::new(fee))
+            })
+            .collect()
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[near(serializers=[borsh, json])]
-pub enum Caller {
-    /// The account called the engine directly, so the call is fully authorized
-    Direct(AccountId),
-    /// Assets were sent to the engine with operations: a token contract called its
-    /// `*_on_transfer` and claims that `alleged_sender` sent `transfer_of`, or
-    /// `alleged_sender` called `deposit_near`. The alleged sender can be faked by
-    /// a malicious transfer_of contract.
-    OnTransfer {
-        alleged_sender: AccountId,
-        transfer_of: AssetId,
+#[near(serializers=[json])]
+pub enum AccountOrDexId {
+    Account(AccountId),
+    Dex(DexId),
+}
+
+impl Display for AccountOrDexId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Account(account) => write!(f, "Account({account})"),
+            Self::Dex(dex_id) => write!(f, "Dex({dex_id})"),
+        }
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub enum SwapOperationAmount {
+    Amount(SwapRequestAmount),
+    OutputOfLastIn,
+    EntireBalanceIn,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub enum SwapAdvancedMode {
+    /// Try every option and swap on the one with the best result
+    FindBest,
+    /// Swap on the first option, in order, that succeeds and meets the
+    /// constraint, without trying the options after it
+    FallbackQueue,
+}
+
+/// A dex that [`Operation::SwapAdvanced`] can swap on, with the message to pass to it
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct SwapOption {
+    pub dex_id: DexId,
+    pub message: Base64VecU8,
+}
+
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub enum Operation {
+    /// Register storage for assets. No-op if assets are
+    /// already registered for the given account or dex.
+    RegisterAssets {
+        asset_ids: Vec<AssetId>,
+        r#for: Option<AccountOrDexId>,
+    },
+    /// Deploy new code to your dex. Can't be used after OracleRequest.
+    DeployDexCode {
+        last_part_of_id: String,
+        code_base64: Base64VecU8,
+    },
+    /// Withdraw assets to `to`, or to the user if it's None.
+    /// They come from the user's inner balance, or when the
+    /// operations come with a deposit, from what the deposit
+    /// and the operations before it left, and
+    /// [`WithdrawAmount::Full`] takes all of that. If the
+    /// withdrawal fails, the assets go to the inner balance of
+    /// `to` if it has the asset registered, or else to the
+    /// user's, or to `rescue_address`'s if the user hasn't
+    /// registered the asset.
+    Withdraw {
+        asset_id: AssetId,
+        amount: WithdrawAmount,
+        to: Option<AccountId>,
+        /// Required when the operations come with a deposit
+        /// (`*_transfer_call` or `deposit_near`) whose sender
+        /// hasn't registered this asset, and not read otherwise.
+        /// It must have the asset registered.
+        rescue_address: Option<AccountId>,
+    },
+    /// Swap assets between two assets on the selected dex.
+    SwapSimple {
+        dex_id: DexId,
+        message: Base64VecU8,
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapOperationAmount,
+        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
+        constraint: Option<TokenAmount>,
+    },
+    /// Simulate the swap on `options` and swap on the one that `mode` picks:
+    /// the one that gives the most output (for ExactIn) or takes the least
+    /// input (for ExactOut), or the first one that meets the constraint.
+    /// Options whose simulation fails are skipped, and the simulation of the
+    /// chosen option is made real, without running the dex again.
+    SwapAdvanced {
+        asset_in: AssetId,
+        asset_out: AssetId,
+        amount: SwapOperationAmount,
+        /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
+        constraint: Option<TokenAmount>,
+        options: Vec<SwapOption>,
+        mode: SwapAdvancedMode,
+    },
+    /// Call a method on a dex.
+    DexCall {
+        dex_id: DexId,
+        method: String,
+        args: Base64VecU8,
+        attached_assets: HashMap<AssetId, TokenAmount>,
+    },
+    /// Transfer assets to a different account or dex.
+    TransferAsset {
+        to: AccountOrDexId,
+        asset_id: AssetId,
+        amount: TokenAmount,
+    },
+    /// Convert some of AssetId::Near to storage for an account
+    /// or a dex.
+    StorageDeposit {
+        amount: TokenAmount,
+        r#for: Option<AccountOrDexId>,
+    },
+    /// Ask the oracle that has `oracle_key` to respond to `request`, which
+    /// `dex_id` reads with the `oracle_request` host function. Only allowed as
+    /// the first operation. The operations after the request run once the
+    /// oracle responds, and deposited assets are held until then, or refunded
+    /// if the oracle doesn't respond in time. The request and the response are
+    /// at most 1024 bytes.
+    OracleRequest {
+        oracle_key: PublicKeyHandle,
+        dex_id: DexId,
+        request: Base64VecU8,
     },
 }
 
-impl Caller {
-    pub fn alleged_account_id(&self) -> &AccountId {
+#[near(serializers=[json])]
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum WithdrawAmount {
+    Full { at_least: Option<TokenAmount> },
+    Exact(TokenAmount),
+    PreviousSwapOutput,
+}
+
+#[near(serializers=[json])]
+#[derive(Clone, Copy)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum DirectWithdrawAmount {
+    Full { at_least: Option<TokenAmount> },
+    Exact(TokenAmount),
+}
+
+#[near(serializers=[json])]
+#[serde(untagged)]
+pub enum DepositMessage {
+    Operations(Vec<Operation>),
+    Advanced {
+        operations: Vec<Operation>,
+        referrer: Option<AccountId>,
+        #[serde(default)]
+        referral_fees: ReferralFees,
+    },
+}
+
+impl DepositMessage {
+    pub fn operations(&self) -> Vec<Operation> {
         match self {
-            Self::Direct(account_id) => account_id,
-            Self::OnTransfer { alleged_sender, .. } => alleged_sender,
+            Self::Operations(operations) => operations.clone(),
+            Self::Advanced { operations, .. } => operations.clone(),
+        }
+    }
+
+    pub fn referrer(&self) -> Option<AccountId> {
+        match self {
+            Self::Advanced { referrer, .. } => referrer.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn referral_fees(&self) -> ReferralFees {
+        match self {
+            Self::Advanced { referral_fees, .. } => referral_fees.clone(),
+            _ => ReferralFees::default(),
         }
     }
 }
 
-#[cfg(feature = "dex")]
-pub mod env {
-    use near_sdk::{AccountId, PublicKeyHandle, borsh::BorshSerialize};
-
-    use crate::{Caller, DexId};
-
-    mod sys {
-        #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
-        unsafe extern "C" {
-            pub fn caller(register_id: u64);
-            pub fn dex_event(len: u64, ptr: u64);
-            pub fn dex_id(register_id: u64);
-            pub fn engine_contract_id(register_id: u64);
-            pub fn oracle_request(
-                oracle_key_len: u64,
-                oracle_key_ptr: u64,
-                request_len: u64,
-                request_ptr: u64,
-                register_id: u64,
-            ) -> u64;
-        }
-    }
-
-    const REGISTER_ID: u64 = u64::MAX;
-
-    pub fn caller() -> Caller {
-        unsafe { sys::caller(REGISTER_ID) };
-        let caller = near_sdk::env::read_register(REGISTER_ID).expect("Caller not returned");
-        near_sdk::borsh::from_slice(&caller).expect("Invalid caller")
-    }
-
-    pub fn dex_event<T: BorshSerialize>(event: &T) {
-        let event = near_sdk::borsh::to_vec(event).expect("Failed to serialize event");
-        unsafe { sys::dex_event(event.len() as u64, event.as_ptr() as u64) };
-    }
-
-    pub fn dex_id() -> DexId {
-        unsafe { sys::dex_id(REGISTER_ID) };
-        let dex_id = near_sdk::env::read_register(REGISTER_ID).expect("Dex ID not returned");
-        near_sdk::borsh::from_slice(&dex_id).expect("Invalid dex ID")
-    }
-
-    pub fn engine_contract_id() -> AccountId {
-        unsafe { sys::engine_contract_id(REGISTER_ID) };
-        let engine_contract_id =
-            near_sdk::env::read_register(REGISTER_ID).expect("Engine contract ID not returned");
-        String::from_utf8(engine_contract_id)
-            .ok()
-            .and_then(|engine_contract_id| engine_contract_id.parse().ok())
-            .expect("Invalid engine contract ID")
-    }
-
-    /// The response of the oracle that has `oracle_key` to `request` for this
-    /// dex, if the operations started with an `OracleRequest` of it. Anyone
-    /// can be an oracle, so this must be the key of an oracle that the dex trusts.
-    pub fn oracle_request(oracle_key: &PublicKeyHandle, request: Vec<u8>) -> Option<Vec<u8>> {
-        let oracle_key = near_sdk::borsh::to_vec(oracle_key).expect("Failed to serialize key");
-        let responded = unsafe {
-            sys::oracle_request(
-                oracle_key.len() as u64,
-                oracle_key.as_ptr() as u64,
-                request.len() as u64,
-                request.as_ptr() as u64,
-                REGISTER_ID,
-            )
-        };
-        (responded == 1).then(|| {
-            near_sdk::env::read_register(REGISTER_ID).expect("Oracle response not returned")
-        })
-    }
+/// An event that a dex logged through the engine's `dex_event` host function,
+/// compressed with the other dex events of a call in
+/// [`IntearDexEvent::DexEventsBorsh`]. `event` is the borsh of the dex's own
+/// event type.
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct DexEventData {
+    pub dex_id: DexId,
+    pub event: Vec<u8>,
+    pub referrer: Option<AccountId>,
+    pub user: Option<AccountId>,
 }
 
-pub trait Dex {
-    fn swap(&mut self, request: SwapRequest) -> SwapResponse;
+/// Balance of an asset that an account or dex has at the end of a call
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct BalanceUpdate {
+    pub owner: AccountOrDexId,
+    pub asset_id: AssetId,
+    pub balance: TokenAmount,
 }
 
-#[macro_export]
-macro_rules! expect {
-    ($condition:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
-        if !$condition {
-            ::near_sdk::env::panic_str(&::std::format!($message $(, $fmt_args)*));
-        }
-    };
-    ($(let $pat:pat = $expr:expr),+, $message:literal $(, $fmt_args:expr)* $(,)?) => {
-        let _panic_msg = ::std::format!($message $(, $fmt_args)*);
-        $(
-            let $pat = $expr else {
-                ::near_sdk::env::panic_str(&_panic_msg);
-            };
-        )+;
-    };
+#[allow(deprecated)]
+mod deprecation_warning_workaround {
+    use super::*;
+
+    #[near(event_json(standard = "inteardex"))]
+    #[derive(Deserialize)]
+    #[cfg_attr(debug_assertions, derive(Debug))]
+    pub enum IntearDexEvent {
+        #[event_version("1.0.0")]
+        DexDeployed {
+            dex_id: DexId,
+            code_hash: Base58CryptoHash,
+        },
+        #[event_version("1.0.0")]
+        DexEvent {
+            dex_id: DexId,
+            event: near_sdk::serde_json::Value,
+            referrer: Option<AccountId>,
+            user: Option<AccountId>,
+        },
+        /// The events of dexes in a call: base64 of an lz4 block prefixed with its
+        /// uncompressed length as a little-endian u32, which is what
+        /// `lz4_flex::decompress_size_prepended` reads, of the borsh of a
+        /// `Vec<DexEventData>`
+        #[event_version("1.0.0")]
+        DexEventsBorsh(String),
+        #[event_version("1.0.0")]
+        UserDeposit {
+            account_id: AccountId,
+            asset_id: AssetId,
+            amount: TokenAmount,
+        },
+        #[event_version("1.0.0")]
+        Withdraw {
+            from: AccountOrDexId,
+            to: AccountId,
+            asset_id: AssetId,
+            amount: TokenAmount,
+        },
+        /// The final balance of each owner and asset whose balance changed in
+        /// a call, in the order they first changed
+        #[event_version("2.0.0")]
+        BalanceUpdates(Vec<BalanceUpdate>),
+        /// Not logged anymore.
+        #[deprecated]
+        #[event_version("1.0.0")]
+        UserBalanceUpdate {
+            account_id: AccountId,
+            asset_id: AssetId,
+            balance: TokenAmount,
+        },
+        /// A dex's balance after it changed, one log per change. Logged until
+        /// `balance_updates` replaced it, so only read, for backfilling.
+        #[deprecated]
+        #[event_version("1.0.0")]
+        DexBalanceUpdate {
+            dex_id: DexId,
+            asset_id: AssetId,
+            balance: TokenAmount,
+        },
+        #[event_version("1.0.0")]
+        Swap {
+            dex_id: DexId,
+            request: SwapRequest,
+            amount_in: TokenAmount,
+            amount_out: TokenAmount,
+            trader: AccountId,
+            referrer: Option<AccountId>,
+            #[serde(default)]
+            referral_fees_paid: Vec<(AccountId, TokenAmount)>,
+        },
+        /// Operations wait for the oracle that has `oracle_key` to respond to
+        /// `request` with `oracle_respond`, which names them by `nonce`
+        #[event_version("1.0.0")]
+        OracleRequest {
+            oracle_key: PublicKeyHandle,
+            dex_id: DexId,
+            request: Base64VecU8,
+            nonce: Base64VecU8,
+        },
+    }
 }
+pub use deprecation_warning_workaround::*;

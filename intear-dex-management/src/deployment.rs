@@ -5,3 +5,5 @@ pub const DEFAULT_XYK_DEX_DEPLOYER: &AccountIdRef = AccountIdRef::new_or_panic("
 pub const DEFAULT_XYK_DEX_NAME: &str = "xyk";
 pub const DEFAULT_OTC_DEX_DEPLOYER: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
 pub const DEFAULT_OTC_DEX_NAME: &str = "otc";
+pub const DEFAULT_AMP_DEX_DEPLOYER: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
+pub const DEFAULT_AMP_DEX_NAME: &str = "amp";

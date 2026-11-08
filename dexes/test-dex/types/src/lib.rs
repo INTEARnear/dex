@@ -1,5 +1,6 @@
-use intear_dex_types::AssetId;
-use near_sdk::{AccountId, PublicKeyHandle, json_types::U128, near};
+pub use intear_dex_common::AssetWithBalance;
+use intear_dex_common::{AssetId, TokenAmount};
+use near_sdk::{AccountId, PublicKeyHandle, near};
 
 pub type PoolId = u64;
 
@@ -37,19 +38,13 @@ pub struct AddLiquidityArgs {
 #[near(serializers=[borsh])]
 pub struct RemoveLiquidityArgs {
     pub pool_id: PoolId,
-    pub assets_to_remove: (U128, U128),
+    pub assets_to_remove: (TokenAmount, TokenAmount),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
 #[near(serializers=[borsh])]
 pub struct SimplePool {
     pub assets: (AssetWithBalance, AssetWithBalance),
     pub owner_id: AccountId,
-}
-
-#[derive(PartialEq, Debug)]
-#[near(serializers=[borsh])]
-pub struct AssetWithBalance {
-    pub asset_id: AssetId,
-    pub balance: U128,
 }

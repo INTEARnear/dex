@@ -1,25 +1,20 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-use std::{
-    fmt,
-    num::{NonZeroU32, NonZeroU128, ParseIntError},
-    ops::{Index, IndexMut},
-    str::FromStr,
-};
+use std::{fmt, num::ParseIntError, str::FromStr};
 
-use intear_dex_types::{AssetId, DexId, SwapRequestAmount};
+use intear_dex_common::AssetId;
+pub use intear_dex_common::{
+    AssetIndex, AssetWithBalance, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FULL_ROUTE_FRACTION,
+    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, PayoutGroupShares, PoolAssets,
+    ProviderShares, RouteFraction, SetFeeDiscountSignerArgs, TokenAmount, TotalShares,
+    WithdrawFeesArgs,
+};
 use near_sdk::{
-    AccountId, AccountIdRef, BlockHeight, PublicKey, Timestamp,
-    borsh::{
-        BorshDeserialize, BorshSerialize,
-        io::{Read, Write},
-    },
+    AccountId, AccountIdRef, Timestamp,
+    borsh::{BorshSerialize, io::Write},
     json_types::U128,
     near,
-    serde::{Deserializer, Serializer},
 };
-
-use crate::math::mul_div;
 
 mod legacy_deserialization;
 mod liquidity_fees;
@@ -62,126 +57,11 @@ impl FromStr for PoolId {
     }
 }
 
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct TokenAmount(U128);
-
-impl TokenAmount {
-    pub const ZERO: Self = Self(U128(0));
-
-    pub const fn new(amount: u128) -> Self {
-        Self(U128(amount))
-    }
-
-    pub const fn get(self) -> u128 {
-        self.0.0
-    }
-
-    pub fn is_zero(self) -> bool {
-        self.get() == 0
-    }
-
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.get().checked_add(other.get()).map(Self::new)
-    }
-
-    pub fn checked_sub(self, other: Self) -> Option<Self> {
-        self.get().checked_sub(other.get()).map(Self::new)
-    }
-}
-
-impl fmt::Display for TokenAmount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
-
 #[derive(Clone, Copy)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SwapReserves {
     pub input: TokenAmount,
     pub output: TokenAmount,
-}
-
-/// 100% = 1000000
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeFraction(u32);
-
-pub const FULL_FEE_FRACTION: FeeFraction = FeeFraction::new(1_000_000);
-
-impl FeeFraction {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn new(millionths: u32) -> Self {
-        Self(millionths)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(Self)
-    }
-
-    pub fn checked_sub(self, other: Self) -> Option<Self> {
-        self.0.checked_sub(other.0).map(Self)
-    }
-
-    pub fn of(self, amount: TokenAmount) -> TokenAmount {
-        TokenAmount::new(mul_div(
-            amount.get(),
-            u128::from(self.0),
-            NonZeroU128::from(FULL_FEE_FRACTION.non_zero()),
-        ))
-    }
-
-    pub(crate) fn non_zero(self) -> NonZeroU32 {
-        NonZeroU32::new(self.0).expect("Fee fraction is zero")
-    }
-}
-
-impl fmt::Display for FeeFraction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// 100% = 1000000
-#[near(serializers=[borsh])]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeDiscountFraction(u32);
-
-pub const FULL_FEE_DISCOUNT: FeeDiscountFraction = FeeDiscountFraction::new(1_000_000);
-
-impl FeeDiscountFraction {
-    pub const fn new(millionths: u32) -> Self {
-        Self(millionths)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-
-    pub fn apply(self, fee: FeeFraction) -> FeeFraction {
-        let remaining_millionths = FULL_FEE_DISCOUNT
-            .0
-            .checked_sub(self.0)
-            .expect("Fee discount can't exceed 100%");
-        let discounted = u64::from(fee.0)
-            .checked_mul(u64::from(remaining_millionths))
-            .expect("Fee fraction overflow")
-            .checked_div(u64::from(FULL_FEE_DISCOUNT.0))
-            .expect("Dividing by the full fee discount");
-        FeeFraction(
-            u32::try_from(discounted)
-                .expect("Discounted fee can't be higher than the original fee"),
-        )
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -194,8 +74,8 @@ pub const PROTOCOL_FEE_SHARE: ProtocolFeeShare = ProtocolFeeShare { percent: 20 
 
 impl ProtocolFeeShare {
     pub fn of(self, fee: FeeFraction) -> FeeFraction {
-        FeeFraction(
-            fee.0
+        FeeFraction::new(
+            fee.get()
                 .checked_mul(self.percent)
                 .expect("Fee fraction overflow")
                 .checked_div(100)
@@ -210,220 +90,9 @@ impl fmt::Display for ProtocolFeeShare {
     }
 }
 
-/// 100% of the requested amount = 1000000
-#[near(serializers=[borsh])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct RouteFraction(u32);
+pub const INITIAL_SHARES: ProviderShares = ProviderShares::new(10u128.pow(18));
 
-pub const FULL_ROUTE_FRACTION: RouteFraction = RouteFraction::new(1_000_000);
-
-impl RouteFraction {
-    pub const fn new(millionths: u32) -> Self {
-        Self(millionths)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-
-    pub fn add_up_to_full(fractions: impl IntoIterator<Item = Self>) -> bool {
-        fractions
-            .into_iter()
-            .try_fold(0u32, |total, fraction| total.checked_add(fraction.0))
-            == Some(FULL_ROUTE_FRACTION.0)
-    }
-
-    pub fn of(self, amount: TokenAmount) -> TokenAmount {
-        let full = NonZeroU128::new(u128::from(FULL_ROUTE_FRACTION.0)).expect("Is 1_000_000");
-        TokenAmount::new(mul_div(amount.get(), u128::from(self.0), full))
-    }
-}
-
-#[near(serializers=[borsh])]
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct ProviderShares(u128);
-
-pub const INITIAL_SHARES: ProviderShares = ProviderShares(10u128.pow(18));
-
-impl ProviderShares {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn new(shares: u128) -> Self {
-        Self(shares)
-    }
-
-    pub const fn get(self) -> u128 {
-        self.0
-    }
-
-    pub fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(Self)
-    }
-
-    pub fn checked_sub(self, other: Self) -> Option<Self> {
-        self.0.checked_sub(other.0).map(Self)
-    }
-
-    pub fn minted_for(
-        tokens: TokenAmount,
-        total_shares: TotalShares,
-        reserve: TokenAmount,
-    ) -> Self {
-        let reserve = NonZeroU128::new(reserve.get()).expect("Pool is empty");
-        Self(mul_div(tokens.get(), total_shares.0, reserve))
-    }
-
-    pub fn worth_in(self, total_shares: TotalShares, reserve: TokenAmount) -> TokenAmount {
-        TokenAmount::new(mul_div(reserve.get(), self.0, total_shares.non_zero()))
-    }
-
-    /// The shares for `fee` put back into one side of a pool with `reserve` of its asset, rounded
-    /// down. After it goes in, the pool is worth twice its new reserve of that asset at its
-    /// price, so shares worth the fee own `fee / (2 * (reserve + fee))` of the pool.
-    pub fn minted_for_reinvested(
-        fee: TokenAmount,
-        total_shares: TotalShares,
-        reserve: TokenAmount,
-    ) -> Self {
-        let pool_value_before_minting = reserve
-            .get()
-            .checked_mul(2)
-            .and_then(|double_reserve| double_reserve.checked_add(fee.get()))
-            .and_then(NonZeroU128::new)
-            .expect("Pool value overflow");
-        Self(mul_div(
-            fee.get(),
-            total_shares.0,
-            pool_value_before_minting,
-        ))
-    }
-}
-
-impl fmt::Display for ProviderShares {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct TotalShares(u128);
-
-pub const PRIVATE_POOL_TOTAL_SHARES: TotalShares = TotalShares(INITIAL_SHARES.get());
-
-impl TotalShares {
-    pub const NONE: Self = Self(0);
-
-    pub const fn get(self) -> u128 {
-        self.0
-    }
-
-    pub fn is_none(self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn minted(self, shares: ProviderShares) -> Option<Self> {
-        self.0.checked_add(shares.0).map(Self)
-    }
-
-    pub fn burned(self, shares: ProviderShares) -> Option<Self> {
-        self.0.checked_sub(shares.0).map(Self)
-    }
-
-    fn non_zero(self) -> NonZeroU128 {
-        NonZeroU128::new(self.0).expect("Pool has no shares")
-    }
-}
-
-impl BorshSerialize for TotalShares {
-    fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
-        BorshSerialize::serialize(&NonZeroU128::new(self.0), writer)
-    }
-}
-
-impl BorshDeserialize for TotalShares {
-    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
-        Ok(Self(
-            Option::<NonZeroU128>::deserialize_reader(reader)?.map_or(0, NonZeroU128::get),
-        ))
-    }
-}
-
-impl near_sdk::serde::Serialize for TotalShares {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let shares = NonZeroU128::new(self.0).map(|shares| U128(shares.get()));
-        near_sdk::serde::Serialize::serialize(&shares, serializer)
-    }
-}
-
-impl<'de> near_sdk::serde::Deserialize<'de> for TotalShares {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let shares: Option<U128> = near_sdk::serde::Deserialize::deserialize(deserializer)?;
-        Ok(Self(shares.map_or(0, |U128(shares)| shares)))
-    }
-}
-
-#[cfg(all(feature = "abi", not(target_arch = "wasm32")))]
-impl near_sdk::schemars::JsonSchema for TotalShares {
-    fn schema_name() -> String {
-        <Option<U128> as near_sdk::schemars::JsonSchema>::schema_name()
-    }
-
-    fn json_schema(
-        generator: &mut near_sdk::schemars::r#gen::SchemaGenerator,
-    ) -> near_sdk::schemars::schema::Schema {
-        <Option<U128> as near_sdk::schemars::JsonSchema>::json_schema(generator)
-    }
-}
-
-#[cfg(all(feature = "abi", not(target_arch = "wasm32")))]
-impl near_sdk::borsh::BorshSchema for TotalShares {
-    fn declaration() -> near_sdk::borsh::schema::Declaration {
-        <Option<NonZeroU128> as near_sdk::borsh::BorshSchema>::declaration()
-    }
-
-    fn add_definitions_recursively(
-        definitions: &mut std::collections::BTreeMap<
-            near_sdk::borsh::schema::Declaration,
-            near_sdk::borsh::schema::Definition,
-        >,
-    ) {
-        <Option<NonZeroU128> as near_sdk::borsh::BorshSchema>::add_definitions_recursively(
-            definitions,
-        )
-    }
-}
-
-#[near(serializers=[borsh])]
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct PayoutGroupShares(u128);
-
-impl PayoutGroupShares {
-    pub const NONE: Self = Self(0);
-
-    pub fn joined_by(self, shares: ProviderShares) -> Option<Self> {
-        self.0.checked_add(shares.0).map(Self)
-    }
-
-    pub fn left_by(self, shares: ProviderShares) -> Option<Self> {
-        self.0.checked_sub(shares.0).map(Self)
-    }
-
-    pub(crate) fn non_zero(self) -> Option<NonZeroU128> {
-        NonZeroU128::new(self.0)
-    }
-
-    pub fn part_of(self, pool_fee: TokenAmount, total_shares: TotalShares) -> TokenAmount {
-        TokenAmount::new(mul_div(pool_fee.get(), self.0, total_shares.non_zero()))
-    }
-}
+pub const PRIVATE_POOL_TOTAL_SHARES: TotalShares = TotalShares::new(INITIAL_SHARES.get());
 
 pub const MAX_TOTAL_FEE_FRACTION: FeeFraction = FeeFraction::new(900_000); // 90%
 pub const MAX_FEE_RECEIVERS: usize = 20;
@@ -485,48 +154,10 @@ pub struct SwapRoute {
     pub pool_ids: Vec<PoolId>,
 }
 
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct SignedFeeDiscount {
-    pub discount: FeeDiscount,
-    /// signature of sha256(borsh([`FeeDiscountSignaturePayload`])) by the
-    /// dex's fee discount signer
-    pub signature: Vec<u8>,
-}
-
-#[near(serializers=[borsh])]
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeDiscount {
-    /// Routes of the swap, as in [`SwapArgs::routes`]
-    pub routes: Vec<SwapRoute>,
-    pub asset_in: AssetId,
-    pub asset_out: AssetId,
-    /// The only alleged trader who can use the discount, anyone can if `None`
-    pub trader_id: Option<AccountId>,
-    pub amount: SwapRequestAmount,
-    /// Reduces pool and protocol fees, but not referral fees.
-    /// [`FULL_FEE_DISCOUNT`] waives pool and protocol fees entirely.
-    pub fee_discount: FeeDiscountFraction,
-    pub expiration_block_height: BlockHeight,
-}
-
-/// What the fee discount signer signs for [`SignedFeeDiscount`]
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeDiscountSignaturePayload {
-    pub chain_id: String,
-    pub engine_contract_id: AccountId,
-    pub dex_id: DexId,
-    pub discount: FeeDiscount,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct SetFeeDiscountSignerArgs {
-    /// The key that signs fee discounts from now on, or `None` to disable them
-    pub fee_discount_signer_public_key: Option<PublicKey>,
-}
+pub type SignedFeeDiscount = intear_dex_common::SignedFeeDiscount<Vec<SwapRoute>>;
+pub type FeeDiscount = intear_dex_common::FeeDiscount<Vec<SwapRoute>>;
+pub type FeeDiscountSignaturePayload =
+    intear_dex_common::FeeDiscountSignaturePayload<Vec<SwapRoute>>;
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
@@ -588,12 +219,6 @@ pub struct EditFeesArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct WithdrawFeesArgs {
-    pub assets: Vec<AssetId>,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct LockPoolArgs {
     pub pool_id: PoolId,
 }
@@ -642,13 +267,6 @@ pub struct GetPoolsArgs {
 pub struct GetPoolSharesArgs {
     pub pool_ids: Vec<PoolId>,
     pub account_id: AccountId,
-}
-
-#[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct GetPendingFeesArgs {
-    pub account_id: AccountId,
-    pub asset_ids: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
@@ -742,14 +360,6 @@ pub enum PoolView {
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct AssetWithBalance {
-    pub asset_id: AssetId,
-    pub balance: TokenAmount,
-}
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CurrentFees {
     pub receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
@@ -801,51 +411,6 @@ impl FeePayoutType {
             FeePayoutType::KeepBoth | FeePayoutType::Reinvest => fee_asset_index,
             FeePayoutType::ConvertToFirstAsset => AssetIndex::First,
             FeePayoutType::ConvertToSecondAsset => AssetIndex::Second,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub enum AssetIndex {
-    First,
-    Second,
-}
-
-impl AssetIndex {
-    pub const BOTH: [AssetIndex; 2] = [AssetIndex::First, AssetIndex::Second];
-}
-
-/// Something of each asset of a pool, in the order of its assets
-#[near(serializers=[borsh])]
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct PoolAssets<T>(pub [T; 2]);
-
-impl<T> PoolAssets<T> {
-    pub fn each_ref(&self) -> PoolAssets<&T> {
-        PoolAssets(self.0.each_ref())
-    }
-}
-
-impl<T> Index<AssetIndex> for PoolAssets<T> {
-    type Output = T;
-
-    fn index(&self, asset_index: AssetIndex) -> &T {
-        let [first, second] = &self.0;
-        match asset_index {
-            AssetIndex::First => first,
-            AssetIndex::Second => second,
-        }
-    }
-}
-
-impl<T> IndexMut<AssetIndex> for PoolAssets<T> {
-    fn index_mut(&mut self, asset_index: AssetIndex) -> &mut T {
-        let [first, second] = &mut self.0;
-        match asset_index {
-            AssetIndex::First => first,
-            AssetIndex::Second => second,
         }
     }
 }
@@ -967,7 +532,7 @@ pub enum XykDexEvent {
 impl XykDexEvent {
     #[cfg(feature = "dex")]
     pub fn emit(&self) {
-        intear_dex_types::env::dex_event(self);
+        intear_dex_common::env::dex_event(self);
     }
 }
 

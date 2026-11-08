@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use color_eyre::eyre::{bail, eyre};
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 
 use crate::chain::asset_metadata::AssetMetadata;
 

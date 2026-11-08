@@ -1,4 +1,4 @@
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_cli_rs::config::NetworkConfig;
 use near_primitives::types::{AccountId, BlockReference};
 use near_sdk::json_types::U128;

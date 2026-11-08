@@ -1,5 +1,5 @@
 use color_eyre::eyre::eyre;
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use serde_json::json;
 use xyk_dex_types::{
     ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction, FeePayoutType, FeeReceiver,
@@ -215,7 +215,7 @@ fn fee_amount_json(fee_amount: &FeeAmount) -> (&'static str, serde_json::Value) 
     }
 }
 
-fn fee_configuration_json(
+pub fn fee_configuration_json(
     fee_configuration: &FeeConfigurationV2,
     pool_asset_ids: [&AssetId; 2],
 ) -> serde_json::Value {

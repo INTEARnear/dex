@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 
 use super::amount::AmountArg;
 use super::asset_ids::AssetIdArg;

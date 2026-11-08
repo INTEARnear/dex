@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 
 const ASSET_ID_FORMAT: &str =
     "near, nep141:<contract>, nep171:<contract>:<token> or nep245:<contract>:<token>";

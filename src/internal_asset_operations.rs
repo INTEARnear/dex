@@ -1,5 +1,6 @@
-use intear_dex_types::{AccountOrDexId, AssetId, expect};
-use near_sdk::{json_types::U128, store::IterableMap};
+use intear_dex_common::{AssetId, TokenAmount, expect};
+use intear_dex_types::AccountOrDexId;
+use near_sdk::store::IterableMap;
 
 use crate::{AssetBalances, DexEngine, StorageKey, call_events::CallEvents};
 
@@ -56,9 +57,9 @@ impl DexEngine {
         from: AccountOrDexId,
         to: AccountOrDexId,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
     ) {
-        if amount.0 == 0 {
+        if amount.is_zero() {
             return;
         }
         self.internal_decrease_assets(events, from, asset_id.clone(), amount);
@@ -69,7 +70,7 @@ impl DexEngine {
         &self,
         account_or_dex_id: AccountOrDexId,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
     ) {
         let balance = match &account_or_dex_id {
             AccountOrDexId::Account(account) => self
@@ -88,12 +89,12 @@ impl DexEngine {
                 }),
         };
         expect!(
-            balance.0 >= amount.0,
+            *balance >= amount,
             "Insufficient balance of {} for {}: {} < {}",
             asset_id,
             account_or_dex_id,
-            balance.0,
-            amount.0
+            balance,
+            amount
         );
     }
 
@@ -102,7 +103,7 @@ impl DexEngine {
         events: &mut CallEvents,
         account_or_dex_id: AccountOrDexId,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
     ) {
         self.assert_asset_registered(account_or_dex_id.clone(), asset_id.clone());
         match account_or_dex_id {
@@ -111,11 +112,11 @@ impl DexEngine {
                     .get_mut(&account)
                     .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
                     .unwrap_or_else(|| panic!("Failed to deposit assets to user balance: user {account} balance for asset {asset_id} was not found"));
-                balance.0 = balance.0.checked_add(amount.0).unwrap_or_else(|| {
+                *balance = balance.checked_add(amount).unwrap_or_else(|| {
                     panic!(
                         "Balance overflow for account {account} and asset {asset_id}: {} + {} > {}",
-                        balance.0,
-                        amount.0,
+                        balance,
+                        amount,
                         u128::MAX
                     )
                 });
@@ -127,11 +128,11 @@ impl DexEngine {
                     .get_mut(&dex_id)
                     .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
                     .unwrap_or_else(|| panic!("Failed to deposit assets to dex balance: dex {dex_id} balance for asset {asset_id} was not found"));
-                balance.0 = balance.0.checked_add(amount.0).unwrap_or_else(|| {
+                *balance = balance.checked_add(amount).unwrap_or_else(|| {
                     panic!(
                         "Balance overflow for dex {dex_id} and asset {asset_id}: {} + {} > {}",
-                        balance.0,
-                        amount.0,
+                        balance,
+                        amount,
                         u128::MAX
                     )
                 });
@@ -146,7 +147,7 @@ impl DexEngine {
         events: &mut CallEvents,
         account_or_dex_id: AccountOrDexId,
         asset_id: AssetId,
-        amount: U128,
+        amount: TokenAmount,
     ) {
         match account_or_dex_id {
             AccountOrDexId::Account(account) => {
@@ -156,10 +157,10 @@ impl DexEngine {
                     .unwrap_or_else(|| {
                         panic!("Failed to withdraw assets from user balance: user {account} balance for asset {asset_id} was not found")
                     });
-                balance.0 = balance.0.checked_sub(amount.0).unwrap_or_else(|| {
+                *balance = balance.checked_sub(amount).unwrap_or_else(|| {
                     panic!(
                         "Insufficient balance for account {account} and asset {asset_id}: {} < {}",
-                        balance.0, amount.0
+                        balance, amount
                     )
                 });
                 let balance = *balance;
@@ -172,10 +173,10 @@ impl DexEngine {
                     .unwrap_or_else(|| {
                         panic!("Failed to withdraw assets from dex balance: dex {dex_id} balance for asset {asset_id} was not found")
                     });
-                balance.0 = balance.0.checked_sub(amount.0).unwrap_or_else(|| {
+                *balance = balance.checked_sub(amount).unwrap_or_else(|| {
                     panic!(
                         "Insufficient balance for dex {dex_id} and asset {asset_id}: {} < {}",
-                        balance.0, amount.0
+                        balance, amount
                     )
                 });
                 let balance = *balance;

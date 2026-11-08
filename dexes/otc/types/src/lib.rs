@@ -1,6 +1,6 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-use intear_dex_types::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId, TokenAmount};
 use near_sdk::{
     AccountId, BlockHeight, NearToken, PublicKey,
     json_types::{Base64VecU8, U64, U128},
@@ -44,8 +44,8 @@ pub struct TradeIntent {
     pub user_id: AccountId,
     pub asset_in: AssetId,
     pub asset_out: AssetId,
-    pub amount_in: U128,
-    pub amount_out: U128,
+    pub amount_in: TokenAmount,
+    pub amount_out: TokenAmount,
     pub validity: Validity,
 }
 
@@ -90,7 +90,7 @@ pub enum OtcDexEvent {
 impl OtcDexEvent {
     #[cfg(feature = "dex")]
     pub fn emit(&self) {
-        intear_dex_types::env::dex_event(self);
+        intear_dex_common::env::dex_event(self);
     }
 }
 
@@ -134,7 +134,7 @@ pub struct WithdrawAssetsArgs {
 pub struct WithdrawRequest {
     pub asset_id: AssetId,
     /// If None, the entire balance of the asset will be withdrawn.
-    pub amount: Option<U128>,
+    pub amount: Option<TokenAmount>,
     /// If None, the assets will be withdrawn to the user's own account.
     pub to: Option<AccountId>,
     pub to_inner_balance: bool,

@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, DexId};
+use intear_dex_common::DexId;
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
@@ -23,7 +24,7 @@ use crate::inputs::amount::AmountArg;
 use crate::inputs::percent::PercentArg;
 use crate::inputs::pool_id::{PoolIdArg, PoolIdListArg};
 use crate::inputs::share::ShareArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::xyk_math::{
     at_least_with_slippage, liquidity_for_shares, mul_div_floor, shares_for_liquidity,
 };
@@ -484,7 +485,10 @@ impl AddMaxSlippageContext {
                                 &dex_id,
                                 "register_liquidity",
                                 &RegisterLiquidityArgs { pool_id },
-                                &[(intear_dex_types::AssetId::Near, storage_near.as_yoctonear())],
+                                &[(
+                                    intear_dex_common::AssetId::Near,
+                                    storage_near.as_yoctonear(),
+                                )],
                             )?);
                         }
                         let min_shares_received = if total_shares.is_none() {
@@ -537,6 +541,7 @@ impl AddMaxSlippageContext {
                         success_message: format!("Added liquidity to {pool_label}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,
@@ -632,7 +637,7 @@ impl RemoveMaxSlippage {
 }
 
 /// The shares to remove out of `owned`, for `share` of them
-fn shares_to_remove(
+pub fn shares_to_remove(
     share: ShareArg,
     owned: u128,
     preflight: &Preflight,
@@ -807,7 +812,7 @@ impl RemoveMaxSlippageContext {
                     pool.format_amount(1, minimums.1),
                 ));
                 for (asset_id, metadata) in &pool.assets {
-                    if let intear_dex_types::AssetId::Nep141(token_id) = asset_id
+                    if let intear_dex_common::AssetId::Nep141(token_id) = asset_id
                         && !fungible_token::is_registered(
                             &preflight.network_config,
                             &preflight.block_reference,
@@ -857,6 +862,7 @@ impl RemoveMaxSlippageContext {
                         success_message: format!("Removed {removal_label}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,

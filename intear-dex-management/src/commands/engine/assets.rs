@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId};
+use intear_dex_common::AssetId;
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
@@ -14,7 +15,7 @@ use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
 use crate::inputs::account_or_dex_id::AccountOrDexIdArg;
 use crate::inputs::asset_ids::AssetIdListArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near};
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -287,6 +288,7 @@ impl RegisterContext {
                         ),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

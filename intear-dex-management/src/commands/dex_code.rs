@@ -6,7 +6,7 @@ use std::process::Command;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
-use intear_dex_types::DexId;
+use intear_dex_common::DexId;
 use near_primitives::gas::Gas;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use serde_json::json;
@@ -44,9 +44,13 @@ pub fn read_wasm_file(
     Ok(code)
 }
 
-/// Builds `package_name` in the workspace of the current directory the way
-/// the tests build dexes: a release build for wasm, optimized with wasm-opt
-pub fn build_dex_package(package_name: &str) -> color_eyre::eyre::Result<Vec<u8>> {
+/// Builds `package_name` with `features` in the workspace of the current
+/// directory the way the tests build dexes: a release build for wasm, optimized
+/// with wasm-opt
+pub fn build_dex_package(
+    package_name: &str,
+    features: &[&str],
+) -> color_eyre::eyre::Result<Vec<u8>> {
     let deploy_built_file_instead = "Or deploy a wasm file that's already built with use-file";
     // A missing wasm-opt fails before the build, which takes a while
     let is_wasm_opt_installed = Command::new("wasm-opt")
@@ -92,12 +96,13 @@ pub fn build_dex_package(package_name: &str) -> color_eyre::eyre::Result<Vec<u8>
                 .suggestion(deploy_built_file_instead),
         );
     }
-    tracing::info!("Building {package_name} in {workspace_root}");
+    tracing::info!("Building {package_name} with features {features:?} in {workspace_root}");
     let build_status = Command::new("cargo")
         .current_dir(workspace_root)
         .args([
             "build",
             &format!("--package={package_name}"),
+            &format!("--features={}", features.join(",")),
             "--release",
             "--target=wasm32-unknown-unknown",
         ])

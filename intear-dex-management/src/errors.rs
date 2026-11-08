@@ -1,10 +1,10 @@
 use color_eyre::Section;
 use color_eyre::eyre::Report;
-use intear_dex_types::{AssetId, CAN_PAUSE, DexId};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::CAN_PAUSE;
 use near_primitives::types::AccountId;
 use xyk_dex_types::{
-    CAN_MIGRATE, FeeAmountError, FeeConfigurationError, MAX_FEE_RECEIVERS,
-    PROTOCOL_FEE_RECEIVER_ID, PoolId,
+    FeeAmountError, FeeConfigurationError, MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId,
 };
 
 use crate::deployment::ENGINE_ACCOUNT_ID;
@@ -123,9 +123,12 @@ pub enum PreflightError {
     #[error("The swap method of dexes is only for swaps, which dex call doesn't make")]
     ReservedDexMethod,
     #[error("{dex_id} is already initialized")]
-    XykAlreadyInitialized { dex_id: DexId },
-    #[error("{signer_id} can't change who signs fee discounts; only {CAN_MIGRATE} can")]
-    NotAllowedToSetFeeDiscountSigner { signer_id: AccountId },
+    AlreadyInitialized { dex_id: DexId },
+    #[error("{signer_id} can't change who signs fee discounts; only {setter_id} can")]
+    NotAllowedToSetFeeDiscountSigner {
+        signer_id: AccountId,
+        setter_id: AccountId,
+    },
     #[error("{dex_id} already has {fee_discounts}")]
     FeeDiscountSignerUnchanged {
         dex_id: DexId,
@@ -135,8 +138,24 @@ pub enum PreflightError {
     FeesNotAllowed { problem: String },
     #[error("A pool needs two different assets, not {asset_id} twice")]
     SameAssets { asset_id: AssetId },
-    #[error("{asset_id} can't be in a pool: XYK pools take NEAR, NEP-141 and NEP-245 assets")]
+    #[error("{asset_id} can't be in a pool: pools take NEAR, NEP-141 and NEP-245 assets")]
     UnsupportedPoolAsset { asset_id: AssetId },
+    #[error(
+        "{asset_id} has no metadata with its decimals, which an amp pool rates its amounts by at the oracle's prices"
+    )]
+    NoAssetDecimals { asset_id: AssetId },
+    #[error("Only {}, which deployed {dex_id}, can {action}, and {signer_id} signed", dex_id.deployer)]
+    NotDexOwner {
+        dex_id: DexId,
+        signer_id: AccountId,
+        action: &'static str,
+    },
+    #[error("Pool #{pool_id} of {dex_id} already has {setting}")]
+    PoolSettingUnchanged {
+        dex_id: DexId,
+        pool_id: PoolId,
+        setting: String,
+    },
     #[error("Launch pools pair NEAR with a token, so the token can't be NEAR itself")]
     LaunchOfNear,
     #[error("Pool #{pool_id} of {dex_id} is owned by {owner_id}, and {signer_id} signed")]
@@ -247,16 +266,18 @@ impl PreflightError {
             } => Some(format!(
                 "Rescue to an account that has storage on {token_id}, or pay for {receiver_id}'s storage there with its storage_deposit first"
             )),
-            Self::NotAllowedToSetFeeDiscountSigner { .. } => {
-                Some(format!("Sign with {CAN_MIGRATE}"))
+            Self::NotAllowedToSetFeeDiscountSigner { setter_id, .. } => {
+                Some(format!("Sign with {setter_id}"))
             }
             Self::NotPoolOwner { owner_id, .. } => Some(format!("Sign with {owner_id}")),
+            Self::NotDexOwner { dex_id, .. } => Some(format!("Sign with {}", dex_id.deployer)),
             Self::NoOtcBalance { .. } => {
                 Some("`otc account --assets …` shows the balances of an account".to_string())
             }
-            Self::NoShares { .. } | Self::NotEnoughShares { .. } => {
-                Some("`xyk liquidity show` shows the shares of an account".to_string())
-            }
+            Self::NoShares { .. } | Self::NotEnoughShares { .. } => Some(
+                "`xyk liquidity show` or `amp liquidity show` shows the shares of an account"
+                    .to_string(),
+            ),
             Self::EnginePaused => Some(format!(
                 "`engine info` shows whether it's still paused; {} can unpause it",
                 CAN_PAUSE.join(" or ")
@@ -294,10 +315,12 @@ impl PreflightError {
             | Self::NothingToRescue { .. }
             | Self::RescueTooLarge { .. }
             | Self::ReservedDexMethod
-            | Self::XykAlreadyInitialized { .. }
+            | Self::AlreadyInitialized { .. }
             | Self::FeesNotAllowed { .. }
             | Self::SameAssets { .. }
             | Self::UnsupportedPoolAsset { .. }
+            | Self::NoAssetDecimals { .. }
+            | Self::PoolSettingUnchanged { .. }
             | Self::LaunchOfNear
             | Self::PoolLocked { .. }
             | Self::PoolKindNotSupported { .. }
@@ -524,12 +547,22 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
     ContractPanicHint {
         message_fragment: "Slippage error",
         hint: |_| {
-            "The pool's reserves moved beyond your max slippage; check the pool with `xyk pool show`, then rerun or allow more slippage".to_string()
+            "The pool's reserves moved beyond your max slippage; check the pool with `xyk pool show` or `amp pool show`, then rerun or allow more slippage".to_string()
         },
     },
     ContractPanicHint {
         message_fragment: "Only pool owner can",
         hint: |_| "Only the pool's owner can do this; `xyk pool show` shows it".to_string(),
+    },
+    ContractPanicHint {
+        message_fragment: "Only the owner of the dex can",
+        hint: |context| match context.dex_id {
+            Some(dex_id) => format!(
+                "Only {}, which deployed {dex_id}, can do this",
+                dex_id.deployer
+            ),
+            None => "Only the account that deployed the dex can do this".to_string(),
+        },
     },
     ContractPanicHint {
         message_fragment: "Pool is locked",
@@ -543,18 +576,23 @@ const CONTRACT_PANIC_HINTS: &[ContractPanicHint] = &[
     },
     ContractPanicHint {
         message_fragment: "Pool not found",
-        hint: |_| "`xyk pools count` shows how many pools there are".to_string(),
+        hint: |_| {
+            "`xyk pools count` or `amp pools count` shows how many pools there are".to_string()
+        },
     },
     ContractPanicHint {
         message_fragment: "User has not registered using register_liquidity",
         hint: |_| {
-            "Public pools need a registration before liquidity; `xyk liquidity add` adds it"
+            "Public xyk pools and amp pools need a registration before liquidity; `liquidity add` adds it"
                 .to_string()
         },
     },
     ContractPanicHint {
         message_fragment: "Not enough shares to remove",
-        hint: |_| "`xyk liquidity show` shows the shares of an account".to_string(),
+        hint: |_| {
+            "`xyk liquidity show` or `amp liquidity show` shows the shares of an account"
+                .to_string()
+        },
     },
     ContractPanicHint {
         message_fragment: "that anyone can claim",
@@ -602,7 +640,9 @@ const TOKEN_STANDARD_PANIC_HINTS: &[ContractPanicHint] = &[ContractPanicHint {
 const NEAR_SDK_PANIC_HINTS: &[ContractPanicHint] = &[
     ContractPanicHint {
         message_fragment: NOT_INITIALIZED,
-        hint: |_| "The dex has code but no state yet; `xyk init` creates it".to_string(),
+        hint: |_| {
+            "The dex has code but no state yet; `xyk init` or `amp init` creates it".to_string()
+        },
     },
     ContractPanicHint {
         message_fragment: UNREADABLE_STATE,
@@ -687,6 +727,7 @@ mod tests {
             include_str!("../../dexes/xyk/src/lib.rs"),
             include_str!("../../dexes/xyk/types/src/lib.rs"),
             include_str!("../../dexes/otc/src/lib.rs"),
+            include_str!("../../dexes/amp/src/lib.rs"),
         ]
         .concat();
         for hint in CONTRACT_PANIC_HINTS {

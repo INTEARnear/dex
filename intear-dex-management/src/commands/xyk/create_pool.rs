@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId, DexId};
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
@@ -20,7 +21,7 @@ use crate::errors::{self, PreflightError};
 use crate::inputs::amount::AmountArg;
 use crate::inputs::asset_ids::AssetIdArg;
 use crate::inputs::fees::{FeesArg, PayoutArg, PayoutsArg};
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::xyk_storage::{self, NewPoolKind};
 use crate::planning::{self, FunctionCall, TransactionPlan, format_near, storage};
 
@@ -407,7 +408,7 @@ impl PoolFees {
     }
 }
 
-fn ensure_poolable(asset_id: &AssetId) -> color_eyre::eyre::Result<()> {
+pub fn ensure_poolable(asset_id: &AssetId) -> color_eyre::eyre::Result<()> {
     match asset_id {
         AssetId::Near | AssetId::Nep141(_) | AssetId::Nep245(_, _) => Ok(()),
         AssetId::Nep171(_, _) => Err(PreflightError::UnsupportedPoolAsset {
@@ -714,6 +715,7 @@ impl PoolFeesContext {
                         success_message: format!("Created a {kind_label} {pair} pool on {dex_id}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Xyk,
                         deployment: None,
                     },
                     deploy_code: None,

@@ -15,7 +15,7 @@ use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
 use crate::inputs::dex_id::DexIdArg;
 use crate::inputs::near_amount::NearAmountOrAllArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{
     self, ENGINE_STORAGE_DEPOSIT_GAS, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near,
 };
@@ -240,6 +240,7 @@ impl DepositContext {
                         success_message: format!("Deposited {description}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,
@@ -372,6 +373,7 @@ impl WithdrawContext {
                         success_message: format!("Withdrew {description}"),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

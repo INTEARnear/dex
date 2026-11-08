@@ -1,4 +1,5 @@
-use intear_dex_types::{AccountOrDexId, AssetId};
+use intear_dex_common::AssetId;
+use intear_dex_types::AccountOrDexId;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };

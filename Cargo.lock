@@ -37,6 +37,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "amp-dex"
+version = "0.1.0"
+dependencies = [
+ "amp-dex-types",
+ "intear-dex-common",
+ "near-sdk",
+ "talc",
+]
+
+[[package]]
+name = "amp-dex-types"
+version = "0.1.0"
+dependencies = [
+ "ethnum",
+ "intear-dex-common",
+ "near-sdk",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,7 +597,7 @@ dependencies = [
 name = "chunked-upgrade"
 version = "0.1.0"
 dependencies = [
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
 ]
 
@@ -2420,6 +2439,8 @@ dependencies = [
 name = "intear-dex"
 version = "0.1.0"
 dependencies = [
+ "amp-dex-types",
+ "intear-dex-common",
  "intear-dex-types",
  "libc",
  "lz4_flex",
@@ -2439,14 +2460,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "intear-dex-common"
+version = "0.1.0"
+dependencies = [
+ "ethnum",
+ "near-sdk",
+]
+
+[[package]]
 name = "intear-dex-management"
 version = "0.1.0"
 dependencies = [
+ "amp-dex-types",
  "chrono",
  "clap",
  "color-eyre",
  "crypto-bigint 0.6.1",
  "inquire",
+ "intear-dex-common",
  "intear-dex-types",
  "interactive-clap",
  "interactive-clap-derive",
@@ -2473,6 +2504,7 @@ dependencies = [
 name = "intear-dex-types"
 version = "0.1.0"
 dependencies = [
+ "intear-dex-common",
  "near-sdk",
 ]
 
@@ -3891,7 +3923,7 @@ name = "otc-dex"
 version = "0.1.0"
 dependencies = [
  "crypto-bigint 0.6.1",
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
  "otc-dex-types",
  "talc",
@@ -3901,7 +3933,7 @@ dependencies = [
 name = "otc-dex-types"
 version = "0.1.0"
 dependencies = [
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
 ]
 
@@ -5483,7 +5515,7 @@ name = "test-dex"
 version = "0.1.0"
 dependencies = [
  "crypto-bigint 0.6.1",
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
  "talc",
  "test-dex-types",
@@ -5493,7 +5525,7 @@ dependencies = [
 name = "test-dex-types"
 version = "0.1.0"
 dependencies = [
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
 ]
 
@@ -6624,7 +6656,7 @@ dependencies = [
 name = "xyk-dex"
 version = "0.1.0"
 dependencies = [
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
  "talc",
  "xyk-dex-types",
@@ -6635,7 +6667,7 @@ name = "xyk-dex-types"
 version = "0.1.0"
 dependencies = [
  "ethnum",
- "intear-dex-types",
+ "intear-dex-common",
  "near-sdk",
 ]
 

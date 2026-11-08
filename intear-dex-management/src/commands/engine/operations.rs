@@ -2,14 +2,13 @@ use std::io::Read;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
+use intear_dex_common::{AssetId, DexId, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, AssetId, DexId, Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount,
-    SwapRequestAmount, WithdrawAmount,
+    AccountOrDexId, Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount, WithdrawAmount,
 };
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
-use near_sdk::json_types::U128;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 use crate::chain::asset_metadata::AssetMetadataCache;
@@ -18,7 +17,7 @@ use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::account_or_dex_id::AccountOrDexIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near};
 
 /// What operations need can't be known ahead, so batches get a generous
@@ -262,7 +261,7 @@ impl RunContext {
                 for (referrer_id, fee_fraction) in &referral_fees.0 {
                     steps.push(format!(
                         "{referrer_id} takes {} of the first swap's input as its referral fee, if it registered that asset on {ENGINE_ACCOUNT_ID}",
-                        display::format_millionths(*fee_fraction)
+                        display::format_fee(*fee_fraction)
                     ));
                 }
                 function_calls.push(FunctionCall {
@@ -286,6 +285,7 @@ impl RunContext {
                             [only_referenced_dex] => Some((*only_referenced_dex).clone()),
                             _ => None,
                         },
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,
@@ -308,10 +308,10 @@ fn operation_step(
     signer_id: &AccountId,
     metadata_cache: &AssetMetadataCache,
 ) -> color_eyre::eyre::Result<String> {
-    let amount_label = |asset_id: &AssetId, raw_amount: u128| {
+    let amount_label = |asset_id: &AssetId, amount: TokenAmount| {
         metadata_cache
             .get(asset_id)
-            .map(|metadata| display::format_amount(raw_amount, metadata.as_ref()))
+            .map(|metadata| display::format_amount(amount.get(), metadata.as_ref()))
     };
     let asset_label = |asset_id: &AssetId| {
         metadata_cache
@@ -322,8 +322,8 @@ fn operation_step(
         Some(owner) => AccountOrDexIdArg(owner.clone()).to_string(),
         None => signer_id.to_string(),
     };
-    let at_least_out = |asset_out: &AssetId, constraint: &Option<U128>| match constraint {
-        Some(U128(minimum_amount_out)) => amount_label(asset_out, *minimum_amount_out)
+    let at_least_out = |asset_out: &AssetId, constraint: &Option<TokenAmount>| match constraint {
+        Some(minimum_amount_out) => amount_label(asset_out, *minimum_amount_out)
             .map(|minimum_amount_out| format!(", getting at least {minimum_amount_out}")),
         None => Ok(String::new()),
     };
@@ -331,18 +331,18 @@ fn operation_step(
                       asset_in: &AssetId,
                       asset_out: &AssetId,
                       amount: &SwapOperationAmount,
-                      constraint: &Option<U128>|
+                      constraint: &Option<TokenAmount>|
      -> color_eyre::eyre::Result<String> {
         Ok(match amount {
-            SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(U128(amount_in))) => format!(
+            SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(amount_in)) => format!(
                 "Swap {} for {} {venue}{}",
                 amount_label(asset_in, *amount_in)?,
                 asset_label(asset_out)?,
                 at_least_out(asset_out, constraint)?
             ),
-            SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(U128(amount_out))) => {
+            SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(amount_out)) => {
                 let at_most_in = match constraint {
-                    Some(U128(maximum_amount_in)) => {
+                    Some(maximum_amount_in) => {
                         format!(
                             ", paying at most {}",
                             amount_label(asset_in, *maximum_amount_in)?
@@ -399,13 +399,13 @@ fn operation_step(
                     format!("all {}", asset_label(asset_id)?)
                 }
                 WithdrawAmount::Full {
-                    at_least: Some(U128(at_least)),
+                    at_least: Some(at_least),
                 } => format!(
                     "all {}, at least {}",
                     asset_label(asset_id)?,
                     amount_label(asset_id, *at_least)?
                 ),
-                WithdrawAmount::Exact(U128(exact_amount)) => amount_label(asset_id, *exact_amount)?,
+                WithdrawAmount::Exact(exact_amount) => amount_label(asset_id, *exact_amount)?,
                 WithdrawAmount::PreviousSwapOutput => {
                     format!("the {} that the previous swap made", asset_label(asset_id)?)
                 }
@@ -469,7 +469,7 @@ fn operation_step(
         } => {
             let mut attached_amounts = attached_assets
                 .iter()
-                .map(|(asset_id, U128(amount))| amount_label(asset_id, *amount))
+                .map(|(asset_id, amount)| amount_label(asset_id, *amount))
                 .collect::<color_eyre::eyre::Result<Vec<_>>>()?;
             // attached_assets is a HashMap, whose order changes from run to run
             attached_amounts.sort();
@@ -486,16 +486,13 @@ fn operation_step(
         Operation::TransferAsset {
             to,
             asset_id,
-            amount: U128(amount),
+            amount,
         } => format!(
             "Transfer {} from {signer_id} to {}",
             amount_label(asset_id, *amount)?,
             AccountOrDexIdArg(to.clone())
         ),
-        Operation::StorageDeposit {
-            amount: U128(amount),
-            r#for,
-        } => format!(
+        Operation::StorageDeposit { amount, r#for } => format!(
             "Move {} from {signer_id}'s NEAR balance to the storage balance of {}",
             amount_label(&AssetId::Near, *amount)?,
             owner_label(r#for)

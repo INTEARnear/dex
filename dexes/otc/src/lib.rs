@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 
 use crypto_bigint::{ConstChoice, I256, U256};
-use intear_dex_types::{
+use intear_dex_common::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, SwapRequest,
-    SwapRequestAmount, SwapResponse, env, expect,
+    SwapRequestAmount, SwapResponse, TokenAmount, env, expect,
 };
 use near_sdk::{
     AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey,
-    json_types::{U64, U128},
+    json_types::U64,
     near,
     store::{LookupMap, LookupSet, TreeMap},
 };
@@ -36,7 +36,7 @@ enum StorageKey {
 
 #[near(contract_state)]
 pub struct OtcDex {
-    balances: LookupMap<(AccountId, AssetId), U128>,
+    balances: LookupMap<(AccountId, AssetId), TokenAmount>,
     authorized_keys: LookupMap<AccountId, PublicKey>,
     storage_balances: LookupMap<AccountId, StorageBalance>,
     used_expirable_nonces_block_height: LookupMap<AccountId, TreeMap<(BlockHeight, Nonce), ()>>,
@@ -93,9 +93,9 @@ impl Dex for OtcDex {
         self.balances
             .entry((maker_trade.user_id.clone(), maker_trade.asset_in.clone()))
             .and_modify(|b| {
-                b.0 =
-                    b.0.checked_sub(maker_trade.amount_in.0)
-                        .expect("Balance underflow")
+                *b = b
+                    .checked_sub(maker_trade.amount_in)
+                    .expect("Balance underflow")
             })
             .or_insert_with(|| {
                 panic!(
@@ -106,9 +106,9 @@ impl Dex for OtcDex {
         self.balances
             .entry((maker_trade.user_id.clone(), maker_trade.asset_out.clone()))
             .and_modify(|b| {
-                b.0 =
-                    b.0.checked_add(maker_trade.amount_out.0)
-                        .expect("Balance overflow")
+                *b = b
+                    .checked_add(maker_trade.amount_out)
+                    .expect("Balance overflow")
             })
             .or_insert_with(|| {
                 panic!(
@@ -164,7 +164,7 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn r#match(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         let Ok(MatchArgs {
@@ -178,15 +178,15 @@ impl OtcDex {
 
         let mut all_required_assets_were_attached = false;
         if !attached_assets.is_empty() {
-            let mut required_assets = HashMap::<AssetId, U128>::new();
+            let mut required_assets = HashMap::<AssetId, TokenAmount>::new();
             for authorized_trade_intent in authorized_trade_intents.iter() {
                 if authorized_trade_intent.trade_intent.user_id == *trader.alleged_account_id() {
                     required_assets
                         .entry(authorized_trade_intent.trade_intent.asset_in.clone())
                         .and_modify(|b| {
-                            b.0 =
-                                b.0.checked_add(authorized_trade_intent.trade_intent.amount_in.0)
-                                    .expect("Required amount overflow")
+                            *b = b
+                                .checked_add(authorized_trade_intent.trade_intent.amount_in)
+                                .expect("Required amount overflow")
                         })
                         .or_insert(authorized_trade_intent.trade_intent.amount_in);
                 }
@@ -206,9 +206,11 @@ impl OtcDex {
         for AuthorizedTradeIntent { trade_intent, .. } in authorized_trade_intents.iter() {
             // in
             let asset_in = trade_intent.asset_in.clone();
-            let amount_in =
-                I256::new_from_abs_sign(U256::from(trade_intent.amount_in.0), ConstChoice::TRUE)
-                    .unwrap();
+            let amount_in = I256::new_from_abs_sign(
+                U256::from(trade_intent.amount_in.get()),
+                ConstChoice::TRUE,
+            )
+            .unwrap();
             assets_net_change
                 .entry(asset_in)
                 .and_modify(|b| *b = b.checked_add(&amount_in).expect("Amount overflow"))
@@ -216,9 +218,11 @@ impl OtcDex {
 
             // out
             let asset_out = trade_intent.asset_out.clone();
-            let amount_out =
-                I256::new_from_abs_sign(U256::from(trade_intent.amount_out.0), ConstChoice::FALSE)
-                    .unwrap();
+            let amount_out = I256::new_from_abs_sign(
+                U256::from(trade_intent.amount_out.get()),
+                ConstChoice::FALSE,
+            )
+            .unwrap();
             assets_net_change
                 .entry(asset_out)
                 .and_modify(|b| *b = b.checked_add(&amount_out).expect("Amount overflow"))
@@ -257,9 +261,9 @@ impl OtcDex {
                         authorized_trade_intent.trade_intent.asset_in.clone(),
                     ))
                     .and_modify(|b| {
-                        b.0 =
-                            b.0.checked_sub(authorized_trade_intent.trade_intent.amount_in.0)
-                                .expect("Balance underflow")
+                        *b = b
+                            .checked_sub(authorized_trade_intent.trade_intent.amount_in)
+                            .expect("Balance underflow")
                     })
                     .or_insert_with(|| {
                         panic!(
@@ -300,9 +304,9 @@ impl OtcDex {
                         authorized_trade_intent.trade_intent.asset_out.clone(),
                     ))
                     .and_modify(|b| {
-                        b.0 =
-                            b.0.checked_add(authorized_trade_intent.trade_intent.amount_out.0)
-                                .expect("Balance overflow")
+                        *b = b
+                            .checked_add(authorized_trade_intent.trade_intent.amount_out)
+                            .expect("Balance overflow")
                     })
                     .or_insert_with(|| {
                         panic!(
@@ -332,7 +336,7 @@ impl OtcDex {
         &mut self,
         #[allow(unused_mut)]
         #[serializer(borsh)]
-        mut attached_assets: HashMap<AssetId, U128>,
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         let Ok(StorageDepositArgs) = near_sdk::borsh::from_slice(&args) else {
@@ -342,7 +346,7 @@ impl OtcDex {
         let Some(attached_near) = attached_assets.remove(&AssetId::Near) else {
             panic!("Near not attached");
         };
-        let attached_near = NearToken::from_yoctonear(attached_near.0);
+        let attached_near = NearToken::from_yoctonear(attached_near.get());
         expect!(
             attached_assets.is_empty(),
             "No assets other than NEAR should be attached"
@@ -369,7 +373,7 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn set_authorized_key(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -397,7 +401,7 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn deposit_assets(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -411,7 +415,7 @@ impl OtcDex {
         for (asset_id, amount) in attached_assets.iter() {
             self.balances
                 .entry((caller_id.clone(), asset_id.clone()))
-                .and_modify(|b| b.0 = b.0.checked_add(amount.0).expect("Balance overflow"))
+                .and_modify(|b| *b = b.checked_add(*amount).expect("Balance overflow"))
                 .or_insert(*amount);
         }
         self.balances.flush();
@@ -424,7 +428,7 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn register_assets(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -451,7 +455,7 @@ impl OtcDex {
     #[result_serializer(borsh)]
     pub fn withdraw_assets(
         &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, U128>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -480,15 +484,15 @@ impl OtcDex {
             self.balances
                 .entry((caller_id.clone(), asset_id.clone()))
                 .and_modify(|b| {
-                    b.0 = b.0.checked_sub(amount.0).unwrap_or_else(|| {
+                    *b = b.checked_sub(amount).unwrap_or_else(|| {
                         panic!(
                             "Not enough balance for asset {asset_id}: {} < {}",
-                            b.0, amount.0,
+                            b, amount,
                         )
                     })
                 })
                 .or_insert_with(|| {
-                    panic!("Not enough balance for asset {asset_id}: 0 < {}", amount.0)
+                    panic!("Not enough balance for asset {asset_id}: 0 < {}", amount)
                 });
             let to = to.clone().unwrap_or_else(|| caller_id.clone());
             asset_withdraw_requests.push(AssetWithdrawRequest {
@@ -532,7 +536,7 @@ impl OtcDex {
     }
 
     #[result_serializer(borsh)]
-    pub fn get_balance(&self, #[serializer(borsh)] args: GetBalanceArgs) -> Option<&U128> {
+    pub fn get_balance(&self, #[serializer(borsh)] args: GetBalanceArgs) -> Option<&TokenAmount> {
         self.balances.get(&(args.account_id, args.asset_id))
     }
 }

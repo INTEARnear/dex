@@ -1,4 +1,4 @@
-use intear_dex_types::AssetId;
+use intear_dex_common::AssetId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_sdk::NearToken;
@@ -12,7 +12,7 @@ use crate::display;
 use crate::errors::PreflightError;
 use crate::inputs::amount::AmountOrAllArg;
 use crate::inputs::asset_ids::AssetIdArg;
-use crate::outcome::ExpectedOutcome;
+use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, TransactionPlan};
 
 /// Covers the balance query on the asset's contract, the engine's callback
@@ -208,6 +208,7 @@ impl RescueReceiverContext {
                         success_message: format!("Rescued {amount_label} to {receiver_id}"),
                         transfer_call: None,
                         dex_id: None,
+                        dex_events: DexEvents::NotRead,
                         deployment: None,
                     },
                     deploy_code: None,

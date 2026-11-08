@@ -1,14 +1,14 @@
 use std::str::FromStr;
 
-use xyk_dex_types::FULL_FEE_FRACTION;
+use intear_dex_common::FULL_FEE_FRACTION;
 
 use crate::display;
 
 const MILLIONTHS_PER_PERCENT: u32 = 10_000;
 const PERCENT_DECIMALS: usize = 4;
 
-/// A percentage with up to four decimals, in millionths like the xyk
-/// contract's fee fractions: 0.3% is 3000
+/// A percentage with up to four decimals, in millionths like fee fractions:
+/// 0.3% is 3000
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PercentArg(pub u32);
 
