@@ -36,7 +36,7 @@ pub struct TotalStorageBalances {
     pub dexes: StorageBalance,
 }
 
-const STORAGE_MIN_BOUND: NearToken = NearToken::from_millinear(5); // 0.005 NEAR = 500KB
+const STORAGE_MIN_BOUND: NearToken = NearToken::from_millinear(5); // 0.005 NEAR = 500B
 
 #[near(serializers=[borsh])]
 pub struct StorageBalances<K: Ord + BorshSerialize + BorshDeserialize> {

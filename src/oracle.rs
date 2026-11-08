@@ -109,6 +109,10 @@ impl DexEngine {
         nonces: Vec<Base64VecU8>,
     ) {
         expect!(
+            near_sdk::env::signer_account_id() == near_sdk::env::current_account_id(),
+            "Only the dex's account itself can call oracle_respond",
+        );
+        expect!(
             response.0.len() <= MAX_ORACLE_RESPONSE_BYTES,
             "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
         );
