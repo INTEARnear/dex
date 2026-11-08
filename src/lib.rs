@@ -14,12 +14,15 @@ pub mod storage_management;
 use std::collections::HashMap;
 
 use crate::{
-    call_events::CallEvents, internal_operations::TradeAccount, storage_management::StorageBalances,
+    call_events::CallEvents,
+    internal_operations::TradeAccount,
+    oracle::{MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES},
+    storage_management::StorageBalances,
 };
 use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
 use intear_dex_types::{
     AccountOrDexId, CAN_PAUSE, DexEventData, DirectWithdrawAmount, IntearDexEvent, Operation,
-    ReferralFees,
+    ReferralFees, UnsignedOracleResponse,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
@@ -628,6 +631,10 @@ impl DexEngine {
     /// Simulate a swap without executing it. Returns the expected
     /// (amount_in, amount_out) that would result from the swap.
     /// This is a view method and does not modify any state.
+    ///
+    /// A dex that needs an oracle reads `oracle_response` as if the swap's
+    /// operations started with an `OracleRequest` of it that the oracle
+    /// responded to.
     pub fn simulate_swap_simple(
         &self,
         dex_id: DexId,
@@ -638,8 +645,31 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
+        oracle_response: Option<UnsignedOracleResponse>,
     ) -> (TokenAmount, TokenAmount) {
         self.assert_not_paused();
+        let oracle_response = oracle_response.map(
+            |UnsignedOracleResponse {
+                 oracle_key,
+                 request,
+                 response,
+             }| {
+                expect!(
+                    request.0.len() <= MAX_ORACLE_REQUEST_BYTES,
+                    "Request is more than {MAX_ORACLE_REQUEST_BYTES} bytes"
+                );
+                expect!(
+                    response.0.len() <= MAX_ORACLE_RESPONSE_BYTES,
+                    "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
+                );
+                OracleResponse {
+                    oracle_key,
+                    dex_id: dex_id.clone(),
+                    request: request.0,
+                    response: response.0,
+                }
+            },
+        );
         self.internal_simulate_swap_simple(
             dex_id,
             message,
@@ -649,7 +679,7 @@ impl DexEngine {
             amount,
             referrer,
             referral_fees.unwrap_or_default(),
-            None,
+            oracle_response.as_ref(),
         )
         .map(|swap| (swap.total_amount_in(), swap.amount_out()))
         .unwrap_or_else(|err| panic!("{err}"))

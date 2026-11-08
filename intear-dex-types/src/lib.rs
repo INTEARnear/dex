@@ -216,6 +216,15 @@ pub enum Operation {
     },
 }
 
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[json])]
+pub struct UnsignedOracleResponse {
+    pub oracle_key: PublicKeyHandle,
+    pub request: Base64VecU8,
+    pub response: Base64VecU8,
+}
+
 #[near(serializers=[json])]
 #[derive(Clone, Copy)]
 #[cfg_attr(debug_assertions, derive(Debug))]

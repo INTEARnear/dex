@@ -10,7 +10,9 @@ use amp_dex_types::{
     SetOracleKeyArgs, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
 };
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
-use intear_dex_types::{AccountOrDexId, DexEventData, Operation, SwapOperationAmount};
+use intear_dex_types::{
+    AccountOrDexId, DexEventData, Operation, SwapOperationAmount, UnsignedOracleResponse,
+};
 use near_crypto::{KeyType, SecretKey, Signature};
 use near_sdk::serde_json::json;
 use near_sdk::{
@@ -573,6 +575,42 @@ async fn test_amp_swaps_at_oracle_price() {
             TokenAmount::new(after_fees(near_in, &fee_fractions)),
         )
         .get();
+    // Simulations take the response that the oracle would give, which nothing checks
+    let simulate = async |oracle_response: Option<UnsignedOracleResponse>| {
+        dex_engine_contract
+            .view("simulate_swap_simple")
+            .args_json(json!({
+                "dex_id": dex_id,
+                "message": Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
+                "trader": user1.id(),
+                "asset_in": near_asset_id,
+                "asset_out": usdc_asset_id,
+                "amount": SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
+                "oracle_response": oracle_response,
+            }))
+            .await
+    };
+    let unsigned_response = |oracle_key: &SecretKey| UnsignedOracleResponse {
+        oracle_key: oracle_key_handle(oracle_key),
+        request: Base64VecU8(near_sdk::borsh::to_vec(&pool.prices_request()).unwrap()),
+        response: Base64VecU8(near_sdk::borsh::to_vec(&agreeing_prices()).unwrap()),
+    };
+    let simulated = simulate(Some(unsigned_response(&test.oracle_key)))
+        .await
+        .unwrap()
+        .json::<(U128, U128)>()
+        .unwrap();
+    assert_eq!(simulated, (U128(near_in), U128(expected_usdc_out)));
+    for oracle_response in [
+        None,
+        Some(unsigned_response(&SecretKey::from_random(KeyType::ED25519))),
+    ] {
+        let error = simulate(oracle_response).await.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("must start with an oracle request of the prices of"),
+            "{error:?}"
+        );
+    }
     let result = test
         .swap_with_prices(
             user1,

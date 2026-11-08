@@ -15,6 +15,11 @@ use crate::{
 };
 
 pub const GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX: Gas = Gas::from_tgas(5);
+pub const GAS_FOR_ABSORBING_DEPOSIT_IF_REFUND_FAILED: Gas = Gas::from_tgas(10);
+
+/// More than the longest result of `after_oracle_operations_in_sandbox`, an
+/// array of the largest amount
+const MAX_REFUND_RESULT_BYTES: usize = 64;
 
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
 pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
@@ -203,6 +208,37 @@ impl DexEngine {
             AssetId::Nep245(..) => json!([refund_amount]),
         }
     }
+
+    /// Passes on what `after_oracle_operations_in_sandbox` returned, or if it
+    /// failed, says that the whole deposit was used, since the token contract
+    /// would refund a deposit that the operations may have already used. What
+    /// it didn't refund stays on the engine.
+    ///
+    /// NEVER EDIT THIS FUNCTION OR `DepositStandard`. It must never fail, so it
+    /// doesn't read the state, and its arguments are small and of a fixed size.
+    #[private]
+    pub fn absorb_deposit_if_refund_failed(standard: DepositStandard) {
+        let fully_used: &[u8] = match standard {
+            DepositStandard::Near | DepositStandard::Nep141 => br#""0""#,
+            DepositStandard::Nep171 => b"false",
+            DepositStandard::Nep245 => br#"["0"]"#,
+        };
+        match near_sdk::env::promise_result_checked(0, MAX_REFUND_RESULT_BYTES) {
+            Ok(refund) => near_sdk::env::value_return(&refund),
+            Err(_) => near_sdk::env::value_return(fully_used),
+        }
+    }
+}
+
+/// The standard of a deposit that waits for an oracle, which decides how its
+/// `*_on_transfer` says that the whole deposit was used
+#[near(serializers=[json])]
+#[derive(Clone, Copy)]
+pub enum DepositStandard {
+    Near,
+    Nep141,
+    Nep171,
+    Nep245,
 }
 
 impl DexEngine {
@@ -281,13 +317,26 @@ impl DexEngine {
         else {
             unreachable!("sandboxed_assets is Some but caller is not OnTransfer")
         };
-        // Runs whether the operations ran, failed, or timed out, with gas of its own
-        waiting.then(
-            Self::ext(near_sdk::env::current_account_id())
-                .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX)
-                .with_unused_gas_weight(0)
-                .after_oracle_operations_in_sandbox(alleged_sender, transfer_of, held_assets),
-        )
+        let standard = match &transfer_of {
+            AssetId::Near => DepositStandard::Near,
+            AssetId::Nep141(_) => DepositStandard::Nep141,
+            AssetId::Nep171(..) => DepositStandard::Nep171,
+            AssetId::Nep245(..) => DepositStandard::Nep245,
+        };
+        // Both run whether the operations ran, failed, or timed out, with gas of their own
+        waiting
+            .then(
+                Self::ext(near_sdk::env::current_account_id())
+                    .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS_IN_SANDBOX)
+                    .with_unused_gas_weight(0)
+                    .after_oracle_operations_in_sandbox(alleged_sender, transfer_of, held_assets),
+            )
+            .then(
+                Self::ext(near_sdk::env::current_account_id())
+                    .with_static_gas(GAS_FOR_ABSORBING_DEPOSIT_IF_REFUND_FAILED)
+                    .with_unused_gas_weight(0)
+                    .absorb_deposit_if_refund_failed(standard),
+            )
     }
 }
 

@@ -202,6 +202,8 @@ impl RatedPool {
 fn invariant(values: PoolAssets<U256>, amplification: Amplification) -> U256 {
     let [value_0, value_1] = values.0;
     let sum = value_0.checked_add(value_1).expect("Value overflow");
+    let smaller_value = value_0.min(value_1);
+    let larger_value = value_0.max(value_1);
     let ann = U256::from(amplification.get())
         .checked_mul(COINS)
         .expect("Amplification fits in u256");
@@ -209,9 +211,9 @@ fn invariant(values: PoolAssets<U256>, amplification: Amplification) -> U256 {
     for _ in 0..MAX_STEPS {
         let invariant_product = invariant
             .checked_mul(invariant)
-            .and_then(|product| product.checked_div(value_0.checked_mul(COINS)?))
+            .and_then(|product| product.checked_div(smaller_value.checked_mul(COINS)?))
             .and_then(|product| product.checked_mul(invariant))
-            .and_then(|product| product.checked_div(value_1.checked_mul(COINS)?))
+            .and_then(|product| product.checked_div(larger_value.checked_mul(COINS)?))
             .expect("Invariant overflow");
         let previous_invariant = invariant;
         let numerator = ann
