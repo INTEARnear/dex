@@ -16,8 +16,8 @@ use near_sdk::{
 use xyk_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
     ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
-    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeePayoutType, FeeReceiver,
-    GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
+    DEFAULT_FEE_PAYOUT_TYPE, EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeePayoutType,
+    FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
     GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
     LiquidityPosition, LiquidityPositionView, LockPoolArgs, PRIVATE_POOL_TOTAL_SHARES,
     PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolType,
@@ -728,6 +728,14 @@ impl XykDex {
                     PoolAssets([&assets.0, &assets.1]),
                     creator_fee_payout_type,
                 );
+
+                XykDexEvent::LiquidityFeePayoutSet {
+                    pool_id,
+                    account_id: caller_id.clone(),
+                    payout_type: creator_fee_payout_type,
+                }
+                .emit();
+
                 self.fees_collected_by_users.flush();
                 Pool::PublicV3 {
                     assets: (
@@ -930,13 +938,20 @@ impl XykDex {
                 ),
             );
             providers.flush();
+
             start_fee_balances(
                 &mut self.fees_collected_by_users,
                 &caller_id,
                 pool_asset_ids.each_ref(),
-                FeePayoutType::KeepBoth,
+                DEFAULT_FEE_PAYOUT_TYPE,
             );
             self.fees_collected_by_users.flush();
+            XykDexEvent::LiquidityFeePayoutSet {
+                pool_id,
+                account_id: caller_id.clone(),
+                payout_type: DEFAULT_FEE_PAYOUT_TYPE,
+            }
+            .emit();
         }
         let storage_usage_after = near_sdk::env::storage_usage();
         let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(

@@ -138,12 +138,14 @@ impl Pool {
             Pool::PublicV3 {
                 assets,
                 total_shares,
+                payout_groups,
                 ..
             } => PoolView::Public {
                 assets: assets.clone(),
                 fees,
                 fee_configuration,
                 total_shares: *total_shares,
+                reinvest_share_growth: Some(payout_groups.reinvest.share_growth),
             },
             Pool::LaunchV2 {
                 quote_asset,

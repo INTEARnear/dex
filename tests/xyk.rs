@@ -24,8 +24,8 @@ use xyk_dex_types::{
     GetPoolArgs, GetPoolSharesArgs, LAST_CREATED_POOL_ID_MARKER, LiquidityPositionView,
     LockPoolArgs, MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView,
     ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, ScheduledFeeCurve,
-    SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs, SignedFeeDiscount, SwapArgs, SwapRoute,
-    TokenAmount, WithdrawFeesArgs, XykDexEvent,
+    SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs, ShareGrowth, SignedFeeDiscount, SwapArgs,
+    SwapRoute, TokenAmount, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -5390,6 +5390,23 @@ async fn test_xyk_reinvest_pool_fees() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+    // The creator is the pool's first provider, with the payout it chose
+    let payouts_and_additions = xyk_events(&result)
+        .into_iter()
+        .filter_map(|event| match event {
+            XykDexEvent::LiquidityFeePayoutSet {
+                account_id,
+                payout_type,
+                ..
+            } => Some(Some((account_id, payout_type))),
+            XykDexEvent::LiquidityAdded { .. } => Some(None),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        payouts_and_additions,
+        vec![Some((deployer.id().clone(), FeePayoutType::Reinvest)), None]
+    );
 
     let result = user1
         .call(dex_engine_contract.id(), "execute_operations")
@@ -5432,6 +5449,20 @@ async fn test_xyk_reinvest_pool_fees() {
         .await
         .unwrap();
     assert_success(&result).unwrap();
+
+    // A provider that registers starts keeping its fees
+    let payouts = xyk_events(&result)
+        .into_iter()
+        .filter_map(|event| match event {
+            XykDexEvent::LiquidityFeePayoutSet {
+                account_id,
+                payout_type,
+                ..
+            } => Some((account_id, payout_type)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(payouts, vec![(user1.id().clone(), FeePayoutType::KeepBoth)]);
 
     let pool_ft1 = creator_liquidity_ft1 + provider_liquidity_ft1;
     let pool_ft2 = creator_liquidity_ft2 + provider_liquidity_ft2;
@@ -5509,11 +5540,24 @@ async fn test_xyk_reinvest_pool_fees() {
         PoolView::Public {
             assets,
             total_shares,
+            reinvest_share_growth,
             ..
         } => {
             assert_eq!(assets.0.balance.get(), pool_ft1_after_swap);
             assert_eq!(assets.1.balance.get(), pool_ft2_after_swap);
             assert_eq!(total_shares.get(), total_shares_after_swap);
+            // What the creator's shares grew into since it started reinvesting, by the growth
+            // that the view tells, are its shares now
+            assert_eq!(
+                reinvest_share_growth
+                    .unwrap()
+                    .shares_grown_since(ShareGrowth::default(), ProviderShares::new(initial_shares))
+                    .get(),
+                get_pool_shares(&dex_engine_contract, &dex_id, first_pool_id, deployer.id())
+                    .await
+                    .unwrap()
+                    .0
+            );
         }
         _ => panic!("Expected public pool"),
     }

@@ -1,12 +1,17 @@
-use std::num::NonZeroU128;
+use std::{fmt, num::NonZeroU128, str::FromStr};
 
 use ethnum::U256;
-use near_sdk::near;
+use near_sdk::{
+    near,
+    serde::{Deserializer, Serializer},
+};
 
 use crate::{
     AssetIndex, FeePayoutType, PayoutGroupShares, PoolAssets, ProviderShares, TokenAmount,
     TotalShares,
 };
+
+pub const DEFAULT_FEE_PAYOUT_TYPE: FeePayoutType = FeePayoutType::KeepBoth;
 
 /// What one liquidity share earned of an asset, times [`FeeGrowthPerShare::SCALE`], as a 256-bit
 /// number stored as its high and low halves
@@ -153,12 +158,58 @@ impl ShareGrowth {
     }
 
     /// What `shares` grew into since the growth was `collected`, rounded down
-    fn shares_grown_since(self, collected: ShareGrowth, shares: ProviderShares) -> ProviderShares {
+    pub fn shares_grown_since(
+        self,
+        collected: ShareGrowth,
+        shares: ProviderShares,
+    ) -> ProviderShares {
         let grown_shares = U256::from(shares.get())
             .checked_mul(self.scaled())
             .and_then(|scaled_shares| scaled_shares.checked_div(collected.scaled()))
             .expect("Share growth overflow");
         ProviderShares::new(u128::try_from(grown_shares).expect("Shares overflow"))
+    }
+}
+
+/// The scaled growth, in decimal digits
+impl fmt::Display for ShareGrowth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.scaled())
+    }
+}
+
+impl FromStr for ShareGrowth {
+    type Err = <U256 as FromStr>::Err;
+
+    fn from_str(scaled: &str) -> Result<Self, Self::Err> {
+        U256::from_str(scaled).map(Self::from_scaled)
+    }
+}
+
+/// As a string of [`ShareGrowth`]'s display, since it's too large for a JSON number
+impl near_sdk::serde::Serialize for ShareGrowth {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> near_sdk::serde::Deserialize<'de> for ShareGrowth {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let scaled: String = near_sdk::serde::Deserialize::deserialize(deserializer)?;
+        scaled.parse().map_err(near_sdk::serde::de::Error::custom)
+    }
+}
+
+#[cfg(all(feature = "abi", not(target_arch = "wasm32")))]
+impl near_sdk::schemars::JsonSchema for ShareGrowth {
+    fn schema_name() -> String {
+        <String as near_sdk::schemars::JsonSchema>::schema_name()
+    }
+
+    fn json_schema(
+        generator: &mut near_sdk::schemars::r#gen::SchemaGenerator,
+    ) -> near_sdk::schemars::schema::Schema {
+        <String as near_sdk::schemars::JsonSchema>::json_schema(generator)
     }
 }
 

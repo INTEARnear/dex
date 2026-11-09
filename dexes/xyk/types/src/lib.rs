@@ -23,7 +23,8 @@ mod pool;
 
 pub use legacy_deserialization::XykDexEventV1;
 pub use liquidity_fees::{
-    FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup, PayoutGroups, ShareGrowth,
+    DEFAULT_FEE_PAYOUT_TYPE, FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup,
+    PayoutGroups, ShareGrowth,
 };
 pub use pool::Pool;
 
@@ -347,7 +348,8 @@ pub enum PoolView {
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
         total_shares: TotalShares,
-    } = 5,
+        reinvest_share_growth: Option<ShareGrowth>,
+    } = 7,
     Launch {
         quote_asset: AssetWithBalance,
         launched_asset: AssetWithBalance,

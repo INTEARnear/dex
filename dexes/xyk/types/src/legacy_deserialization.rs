@@ -10,7 +10,7 @@ use near_sdk::{
 use crate::{
     AssetWithBalance, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction,
     FeePayoutType, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolView, ProviderShares,
-    SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
+    ShareGrowth, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
 };
 
 /// The message of a swap through a single pool without a fee discount is just its pool ID, which
@@ -226,7 +226,7 @@ enum BorshPoolView {
         owner_id: AccountId,
         locked: bool,
     } = 4,
-    Public {
+    PublicV2 {
         assets: (AssetWithBalance, AssetWithBalance),
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
@@ -239,6 +239,13 @@ enum BorshPoolView {
         fee_configuration: FeeConfigurationV2,
         phantom_liquidity: TokenAmount,
     } = 6,
+    Public {
+        assets: (AssetWithBalance, AssetWithBalance),
+        fees: CurrentFees,
+        fee_configuration: FeeConfigurationV2,
+        total_shares: TotalShares,
+        reinvest_share_growth: Option<ShareGrowth>,
+    } = 7,
 }
 
 #[derive(BorshDeserialize)]
@@ -289,6 +296,7 @@ impl From<BorshPoolView> for PoolView {
                 fees,
                 fee_configuration: fee_configuration.into(),
                 total_shares,
+                reinvest_share_growth: None,
             },
             BorshPoolView::LaunchV1 {
                 near_amount,
@@ -332,7 +340,7 @@ impl From<BorshPoolView> for PoolView {
                 owner_id,
                 locked,
             },
-            BorshPoolView::Public {
+            BorshPoolView::PublicV2 {
                 assets,
                 fees,
                 fee_configuration,
@@ -342,6 +350,7 @@ impl From<BorshPoolView> for PoolView {
                 fees,
                 fee_configuration,
                 total_shares,
+                reinvest_share_growth: None,
             },
             BorshPoolView::Launch {
                 quote_asset,
@@ -355,6 +364,19 @@ impl From<BorshPoolView> for PoolView {
                 fees,
                 fee_configuration,
                 phantom_liquidity,
+            },
+            BorshPoolView::Public {
+                assets,
+                fees,
+                fee_configuration,
+                total_shares,
+                reinvest_share_growth,
+            } => PoolView::Public {
+                assets,
+                fees,
+                fee_configuration,
+                total_shares,
+                reinvest_share_growth,
             },
         }
     }
@@ -381,6 +403,8 @@ pub(crate) enum JsonPoolView {
         fees: CurrentFees,
         fee_configuration: FeeConfigurationV2,
         total_shares: TotalShares,
+        #[serde(default)]
+        reinvest_share_growth: Option<ShareGrowth>,
     },
     Launch(JsonLaunchPoolView),
     LaunchV2 {
@@ -432,11 +456,13 @@ impl From<JsonPoolView> for PoolView {
                 fees,
                 fee_configuration,
                 total_shares,
+                reinvest_share_growth,
             } => PoolView::Public {
                 assets,
                 fees,
                 fee_configuration,
                 total_shares,
+                reinvest_share_growth,
             },
             JsonPoolView::Launch(JsonLaunchPoolView::LaunchV2 {
                 quote_asset,
