@@ -58,7 +58,6 @@ impl Dex for AmpDex {
     #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        assert_private_beta_access();
         let Ok(SwapArgs {
             routes,
             fee_discount,
@@ -403,7 +402,7 @@ fn assert_private_beta_access() {
     #[cfg(feature = "private_beta")]
     expect!(
         env::caller().alleged_account_id() == "slimedragon.near",
-        "Only slimedragon.near can use this dex in its private beta"
+        "Only slimedragon.near can manage this dex and provide liquidity in its private beta"
     );
 }
 

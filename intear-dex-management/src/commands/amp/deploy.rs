@@ -81,9 +81,9 @@ impl DeployContext {
 /// Where does the code come from?
 pub enum DeployCode {
     #[strum_discriminants(strum(
-        message = "build     - Build amp-dex for its private beta, which only slimedragon.near can use, in the checkout you're in, with cargo and wasm-opt"
+        message = "build     - Build amp-dex for its private beta, where only slimedragon.near provides liquidity, in the checkout you're in, with cargo and wasm-opt"
     ))]
-    /// Build amp-dex for its private beta, which only slimedragon.near can use, in the checkout you're in, with cargo and wasm-opt
+    /// Build amp-dex for its private beta, where only slimedragon.near provides liquidity, in the checkout you're in, with cargo and wasm-opt
     Build(Build),
     #[strum_discriminants(strum(message = "use-file  - Deploy a wasm file that's already built"))]
     /// Deploy a wasm file that's already built
