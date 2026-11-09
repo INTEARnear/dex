@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use amp_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AmpDexEvent, AssetIndex, AssetWithBalance,
-    CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse, FULL_FEE_FRACTION,
-    FeeDiscountFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LiquidityPosition,
-    LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS, MIN_AMPLIFICATION,
+    CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse, DEFAULT_FEE_PAYOUT_TYPE,
+    FULL_FEE_FRACTION, FeeDiscountFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs,
+    GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES,
+    LiquidityPosition, LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS, MIN_AMPLIFICATION,
     PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolView,
     Price, PricesRequest, PricesResponse, ProviderShares, RegisterLiquidityArgs,
     RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs,
@@ -604,6 +604,12 @@ impl AmpDex {
             PoolAssets([&assets.0, &assets.1]),
             creator_fee_payout_type,
         );
+        AmpDexEvent::LiquidityFeePayoutSet {
+            pool_id,
+            account_id: caller_id.clone(),
+            payout_type: creator_fee_payout_type,
+        }
+        .emit();
         self.fees_collected_by_users.flush();
         self.pools.push(Pool {
             assets: (
@@ -827,9 +833,9 @@ impl AmpDex {
             pool.providers.insert(
                 caller_id.clone(),
                 LiquidityPosition::new(
-                    FeePayoutType::KeepBoth,
+                    DEFAULT_FEE_PAYOUT_TYPE,
                     ProviderShares::ZERO,
-                    &pool.payout_groups.keep_both,
+                    pool.payout_groups.group(DEFAULT_FEE_PAYOUT_TYPE),
                 ),
             );
             pool.providers.flush();
@@ -838,9 +844,15 @@ impl AmpDex {
                 &mut self.fees_collected_by_users,
                 &caller_id,
                 PoolAssets([asset_0, asset_1]),
-                FeePayoutType::KeepBoth,
+                DEFAULT_FEE_PAYOUT_TYPE,
             );
             self.fees_collected_by_users.flush();
+            AmpDexEvent::LiquidityFeePayoutSet {
+                pool_id,
+                account_id: caller_id.clone(),
+                payout_type: DEFAULT_FEE_PAYOUT_TYPE,
+            }
+            .emit();
         }
         let storage_usage_after = near_sdk::env::storage_usage();
         let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(

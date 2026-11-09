@@ -17,7 +17,8 @@ mod pool;
 mod prices;
 
 pub use liquidity_fees::{
-    FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup, PayoutGroups,
+    DEFAULT_FEE_PAYOUT_TYPE, FeeGrowth, FeeGrowthPerShare, LiquidityPosition, PayoutGroup,
+    PayoutGroups,
 };
 pub use pool::Pool;
 pub use prices::{

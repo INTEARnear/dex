@@ -6,6 +6,8 @@ use crate::{
     TotalShares,
 };
 
+pub const DEFAULT_FEE_PAYOUT_TYPE: FeePayoutType = FeePayoutType::KeepBoth;
+
 /// What one liquidity share earned of an asset, times [`FeeGrowthPerShare::SCALE`], as a 256-bit
 /// number stored as its high and low halves
 #[near(serializers=[borsh])]

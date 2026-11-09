@@ -932,9 +932,9 @@ impl XykDex {
             providers.insert(
                 caller_id.clone(),
                 LiquidityPosition::new(
-                    FeePayoutType::KeepBoth,
+                    DEFAULT_FEE_PAYOUT_TYPE,
                     ProviderShares::ZERO,
-                    &payout_groups.keep_both,
+                    payout_groups.group(DEFAULT_FEE_PAYOUT_TYPE),
                 ),
             );
             providers.flush();
