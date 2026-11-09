@@ -6,6 +6,7 @@ pub mod balance;
 pub mod deposit;
 pub mod info;
 pub mod operations;
+pub mod oracle;
 pub mod pause;
 pub mod storage;
 pub mod transfer;
@@ -60,6 +61,11 @@ pub enum EngineAction {
     ))]
     /// Run a batch of operations from a JSON file in one transaction
     Operations(self::operations::OperationsCommands),
+    #[strum_discriminants(strum(
+        message = "oracle    - Keys that oracles respond to the requests of swaps with"
+    ))]
+    /// Keys that oracles respond to the requests of swaps with
+    Oracle(self::oracle::OracleCommands),
     #[strum_discriminants(strum(
         message = "pause     - Stop deposits, withdrawals, swaps and dex calls"
     ))]

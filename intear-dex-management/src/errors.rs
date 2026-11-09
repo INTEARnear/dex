@@ -22,6 +22,15 @@ pub enum PreflightError {
     DexMissing { dex_id: DexId, network_name: String },
     #[error("{ENGINE_ACCOUNT_ID} is paused, so nothing can change until it's unpaused")]
     EnginePaused,
+    #[error("near-cli has no key of {account_id} on network {network_name}")]
+    NoKeyInNearCli {
+        account_id: AccountId,
+        network_name: String,
+    },
+    #[error("{oracle_key} is already an oracle key of {ENGINE_ACCOUNT_ID}")]
+    OracleKeyExists { oracle_key: String },
+    #[error("{oracle_key} isn't an oracle key of {ENGINE_ACCOUNT_ID}")]
+    NotAnOracleKey { oracle_key: String },
     #[error("{signer_id} can't pause or unpause {ENGINE_ACCOUNT_ID}")]
     NotAllowedToPause { signer_id: AccountId },
     #[error("{ENGINE_ACCOUNT_ID} is already paused")]
@@ -283,6 +292,17 @@ impl PreflightError {
                 CAN_PAUSE.join(" or ")
             )),
             Self::NotAllowedToPause { .. } => Some(format!("Sign with {}", CAN_PAUSE.join(" or "))),
+            Self::NoKeyInNearCli { .. } => Some(
+                "Import the account into near-cli with `near account import-account`, or give the public key instead"
+                    .to_string(),
+            ),
+            Self::OracleKeyExists { .. } => {
+                Some("`engine oracle top-up` adds to its gas balance".to_string())
+            }
+            Self::NotAnOracleKey { .. } => Some(
+                "`engine oracle list` shows the oracle keys, and `engine oracle create-key` adds one"
+                    .to_string(),
+            ),
             Self::UntrackedNearShort { .. } => Some(format!(
                 "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
             )),

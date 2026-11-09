@@ -128,7 +128,7 @@ impl RegisterAssetsContext {
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
-                        dex_events: DexEvents::NotRead,
+                        dex_events: DexEvents::Otc,
                         deployment: None,
                     },
                     deploy_code: None,

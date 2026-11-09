@@ -14,6 +14,7 @@ use near_primitives::views::{
 };
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use near_sdk::json_types::{Base58CryptoHash, U128};
+use otc_dex_types::{AuthorizedTradeIntent, OtcDexEvent, TradeIntent};
 use serde_json::json;
 use xyk_dex_types::{FeePayoutType, XykDexEvent, XykDexEventV1};
 
@@ -41,6 +42,7 @@ pub struct ExpectedOutcome {
 pub enum DexEvents {
     Xyk,
     Amp,
+    Otc,
     /// The transaction calls no dex, or one whose events this tool doesn't read
     NotRead,
 }
@@ -288,6 +290,15 @@ pub fn report_outcome(
                             activity_lines.push(amp_event_line(
                                 &dex_id,
                                 amp_event,
+                                &metadata_cache,
+                            )?);
+                        }
+                        DexEvents::Otc => {
+                            let otc_event: OtcDexEvent = near_sdk::borsh::from_slice(&event)
+                                .wrap_err_with(unreadable_event)?;
+                            activity_lines.push(otc_event_line(
+                                &dex_id,
+                                otc_event,
                                 &metadata_cache,
                             )?);
                         }
@@ -659,5 +670,50 @@ fn amp_event_line(
             format_amount(amount_0.get(), &asset_0)?,
             format_amount(amount_1.get(), &asset_1)?
         ),
+    })
+}
+
+/// What an OTC event says happened, in one line
+fn otc_event_line(
+    dex_id: &DexId,
+    event: OtcDexEvent,
+    metadata_cache: &AssetMetadataCache,
+) -> color_eyre::eyre::Result<String> {
+    let format_amount = |raw: u128, asset_id: &AssetId| -> color_eyre::eyre::Result<String> {
+        Ok(display::format_amount(
+            raw,
+            metadata_cache.get(asset_id)?.as_ref(),
+        ))
+    };
+    Ok(match event {
+        OtcDexEvent::AuthorizedKeyChanged { account_id, key } => {
+            format!("{account_id} now signs its trade intents on {dex_id} with {key}")
+        }
+        OtcDexEvent::Trade {
+            authorized_trade_intents,
+        } => {
+            // Each user gives the amount in of its intent, and gets the amount out
+            let mut trades = Vec::new();
+            for AuthorizedTradeIntent {
+                trade_intent:
+                    TradeIntent {
+                        user_id,
+                        asset_in,
+                        asset_out,
+                        amount_in,
+                        amount_out,
+                        ..
+                    },
+                ..
+            } in authorized_trade_intents
+            {
+                trades.push(format!(
+                    "{user_id} gave {} for {}",
+                    format_amount(amount_in.get(), &asset_in)?,
+                    format_amount(amount_out.get(), &asset_out)?
+                ));
+            }
+            format!("{dex_id} traded: {}", trades.join(", "))
+        }
     })
 }

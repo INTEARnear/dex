@@ -182,7 +182,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                 success_message: format!("Deployed {code_label} to {dex_id}"),
                 transfer_call: None,
                 dex_id: Some(dex_id.clone()),
-                dex_events: DexEvents::NotRead,
+                dex_events: DexEvents::Otc,
                 deployment: Some(ExpectedDeployment {
                     dex_id: dex_id.clone(),
                     code_hash,

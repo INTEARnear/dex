@@ -4,8 +4,10 @@ use intear_dex_types::AccountOrDexId;
 use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
 use near_jsonrpc_client::methods::block::RpcBlockRequest;
+use near_jsonrpc_client::methods::query::RpcQueryRequest;
+use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::types::{AccountId, BlockId, BlockReference};
-use near_primitives::views::BlockView;
+use near_primitives::views::{AccessKeyPermissionView, BlockView, QueryRequest};
 use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
 use serde_json::json;
@@ -343,4 +345,65 @@ pub fn dex_view<ViewResult: near_sdk::borsh::BorshDeserialize>(
     )?;
     near_sdk::borsh::from_slice(&result)
         .wrap_err_with(|| format!("Unexpected result of {method_name} on dex {dex_id}"))
+}
+
+pub struct OracleKey {
+    pub public_key: near_crypto::PublicKeyHandle,
+    pub gas_balance: NearToken,
+    pub nonces: near_primitives::types::NonceIndex,
+}
+
+/// The gas keys of the engine that oracles respond with, which `create_oracle_key` added
+pub fn oracle_keys(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<Vec<OracleKey>> {
+    let mut oracle_keys = Vec::new();
+    let mut after_key = None;
+    loop {
+        let response = network_config
+            .json_rpc_client()
+            .blocking_call(RpcQueryRequest {
+                block_reference: block_reference.clone(),
+                request: QueryRequest::ViewAccessKeyList {
+                    account_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    after_key,
+                    limit: None,
+                },
+            })
+            .map_err(color_eyre::eyre::Report::new)
+            .wrap_err_with(|| {
+                format!(
+                    "Couldn't list the keys of {ENGINE_ACCOUNT_ID} (RPC {})",
+                    network_config.rpc_url
+                )
+            })?;
+        let QueryResponseKind::AccessKeyList(access_keys) = response.kind else {
+            bail!(
+                "RPC {} answered the key list of {ENGINE_ACCOUNT_ID} with something other than keys",
+                network_config.rpc_url
+            );
+        };
+        oracle_keys.extend(access_keys.keys.into_iter().filter_map(|key| {
+            match key.access_key.permission {
+                AccessKeyPermissionView::GasKeyFunctionCall {
+                    balance,
+                    num_nonces,
+                    method_names,
+                    ..
+                } if method_names.iter().any(|method| method == "oracle_respond") => {
+                    Some(OracleKey {
+                        public_key: key.public_key,
+                        gas_balance: balance,
+                        nonces: num_nonces,
+                    })
+                }
+                _ => None,
+            }
+        }));
+        match access_keys.last_key {
+            Some(last_key) => after_key = Some(last_key),
+            None => return Ok(oracle_keys),
+        }
+    }
 }
