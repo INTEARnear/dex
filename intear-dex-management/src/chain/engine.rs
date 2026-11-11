@@ -303,6 +303,34 @@ pub fn dex_exists(
     }
 }
 
+/// The code deployed to a dex, `None` for a dex id without any
+pub fn dex_code(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<Vec<u8>>> {
+    let code = super::view_json::<Base64VecU8>(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "dex_code",
+        json!({ "dex_id": dex_id }),
+    );
+    match code {
+        Ok(code) => Ok(Some(code.0)),
+        Err(error)
+            if error
+                .downcast_ref::<super::ViewPanicked>()
+                .is_some_and(|view_panicked| {
+                    view_panicked.panic_message == errors::DEX_CODE_NOT_FOUND
+                }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// A view method of a dex, with arguments and result as the dex encodes them
 pub fn dex_view_bytes(
     network_config: &NetworkConfig,

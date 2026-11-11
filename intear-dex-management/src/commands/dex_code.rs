@@ -161,11 +161,12 @@ pub fn plan_code_deployment(
         }
         .into_report());
     }
-    let is_upgrade = engine::dex_exists(
+    let deployed_code = engine::dex_code(
         &preflight.network_config,
         &preflight.block_reference,
         dex_id,
     )?;
+    let is_upgrade = deployed_code.is_some();
     let code_hash = Base58CryptoHash::from(near_primitives::hash::hash(code).0);
     let code_label = format!(
         "{} bytes of code (sha256 {})",
@@ -174,25 +175,28 @@ pub fn plan_code_deployment(
     );
     let mut steps = Vec::new();
     let mut function_calls = Vec::new();
-    // The code of an existing dex isn't readable, so an upgrade is
-    // estimated as if the dex had none; the old code's storage is freed
-    let code_bytes = storage::dex_code_record_bytes(
-        dex_id,
-        code.len(),
-        preflight.protocol_limits.extra_bytes_per_record,
-    )?;
-    let bytes = if is_upgrade {
-        code_bytes
-    } else {
-        code_bytes
+    let code_bytes = |code: &[u8]| {
+        storage::dex_code_record_bytes(
+            dex_id,
+            code.len(),
+            preflight.protocol_limits.extra_bytes_per_record,
+        )
+    };
+    // The engine charges an upgrade only for what the new code takes more
+    // than the old, and frees what it takes less
+    let bytes = match &deployed_code {
+        Some(deployed_code) => code_bytes(code)?.saturating_sub(code_bytes(deployed_code)?),
+        None => code_bytes(code)?
             .checked_add(extra_state_bytes)
-            .ok_or_else(|| eyre!("Storage size overflow"))?
+            .ok_or_else(|| eyre!("Storage size overflow"))?,
     };
     if let Some(storage_top_up) = preflight.dex_storage_top_up(dex_id, bytes)? {
-        steps.push(storage_top_up.step(if is_upgrade {
-            "all of the new code, since the old code's size can't be read; what the old code used becomes available again"
-        } else {
-            "the code"
+        steps.push(storage_top_up.step(&match &deployed_code {
+            Some(deployed_code) => format!(
+                "what the new code takes more than the {} bytes of the old",
+                deployed_code.len()
+            ),
+            None => "the code".to_string(),
         }));
         function_calls.push(storage_top_up.function_call());
     }
