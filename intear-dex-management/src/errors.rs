@@ -46,6 +46,10 @@ pub enum PreflightError {
     )]
     UntrackedNearShort { available: String, needed: String },
     #[error(
+        "{translator_id} has no code, and {ENGINE_ACCOUNT_ID} translates the code of dexes with it"
+    )]
+    TranslatorWithoutCode { translator_id: AccountId },
+    #[error(
         "{account_id} can spend {available} from its wallet, but this transaction needs up to {needed}"
     )]
     InsufficientWalletBalance {
@@ -313,6 +317,9 @@ impl PreflightError {
             ),
             Self::UntrackedNearShort { .. } => Some(format!(
                 "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
+            )),
+            Self::TranslatorWithoutCode { translator_id } => Some(format!(
+                "Deploy the translator, the translator package of the dex repository, to {translator_id} first"
             )),
             Self::AssetNotRegisteredForSigner {
                 register_command, ..

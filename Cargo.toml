@@ -54,7 +54,7 @@ near-sdk = { version = "5.30", default-features = false, features = [
     "unstable",
     "deterministic-account-ids",
 ] }
-wasmi = { version = "1", default-features = false }
+wasmi = { version = "=1.1.0", default-features = false }
 intear-dex-common = { path = "./intear-dex-common" }
 intear-dex-types = { path = "./intear-dex-types" }
 near-contract-standards = "5.30"

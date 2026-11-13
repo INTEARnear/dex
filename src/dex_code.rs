@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use intear_dex_common::DexId;
+use intear_dex_common::{DexId, expect};
 use intear_dex_types::IntearDexEvent;
 use near_sdk::{
     AccountId, Gas, GasWeight, IntoStorageKey, NearToken, Promise, json_types::Base58CryptoHash,
@@ -28,15 +28,21 @@ impl DexEngine {
     pub fn after_dex_code_translation(
         &mut self,
         #[serializer(borsh)] dex_id: DexId,
-        #[serializer(borsh)] deployed_code: Option<Vec<u8>>,
+        #[serializer(borsh)] code: Vec<u8>,
+        #[serializer(borsh)] deployed: bool,
     ) {
         let translated_code =
             near_sdk::env::promise_result_checked(0, usize::MAX).unwrap_or_else(|err| {
                 panic!("The translator didn't translate the code of {dex_id}: {err:?}")
             });
+        // A deployment that stored other code while this code was translated is what runs
+        expect!(
+            deployed || self.dex_codes.get(&dex_id) == Some(&code),
+            "The code of {dex_id} changed while it was translated"
+        );
         let storage_usage_before = near_sdk::env::storage_usage();
         self.translated_dex_codes.insert(&dex_id, translated_code);
-        if let Some(code) = deployed_code {
+        if deployed {
             let code_hash = near_sdk::env::sha256_array(&code);
             self.dex_codes.insert(dex_id.clone(), code);
             self.dex_codes.flush();
@@ -56,18 +62,17 @@ impl DexEngine {
 
 impl DexEngine {
     pub fn translate_dex_code(dex_id: DexId, code: Vec<u8>, deployed: bool) -> Promise {
-        let deployed_code = deployed.then(|| code.clone());
         Promise::new(translator_account_id())
             .function_call_weight(
                 "translate".to_string(),
-                code,
+                code.clone(),
                 NearToken::from_yoctonear(0),
                 Gas::from_gas(0),
                 GasWeight(1),
             )
             .then(
                 Self::ext(near_sdk::env::current_account_id())
-                    .after_dex_code_translation(dex_id, deployed_code),
+                    .after_dex_code_translation(dex_id, code, deployed),
             )
     }
 }

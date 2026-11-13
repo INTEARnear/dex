@@ -614,6 +614,25 @@ pub async fn deploy_code_in_chunks(
         .unwrap()
 }
 
+/// Create translator.<engine>, which the engine translates the code of dexes with
+pub async fn create_translator(dex_engine_contract: &Contract) {
+    let translator = dex_engine_contract
+        .as_account()
+        .create_subaccount("translator")
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    translator
+        .deploy(&get_compiled_wasms().await.translator_wasm)
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+}
+
 /// Set up the test environment around dex.intear.near with its mainnet state.
 pub async fn setup_test_environment_with_mainnet_engine(config: TestSetupConfig) -> TestContext {
     let sandbox = near_workspaces::sandbox().await.unwrap();
@@ -653,21 +672,7 @@ async fn setup_test_environment_around_engine(
 ) -> TestContext {
     let wasms = get_compiled_wasms().await;
 
-    let translator = dex_engine_contract
-        .as_account()
-        .create_subaccount("translator")
-        .initial_balance(NearToken::from_near(20))
-        .transact()
-        .await
-        .unwrap()
-        .into_result()
-        .unwrap();
-    translator
-        .deploy(&wasms.translator_wasm)
-        .await
-        .unwrap()
-        .into_result()
-        .unwrap();
+    create_translator(&dex_engine_contract).await;
 
     let (user1, user1_key) = create_user(&sandbox, "user1").await;
     let (user2, user2_key) = create_user(&sandbox, "user2").await;

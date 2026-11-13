@@ -22,11 +22,11 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
     near,
 };
-use near_workspaces::network::Sandbox;
-use near_workspaces::operations::TransactionStatus;
+use near_workspaces::network::{Sandbox, ValidatorKey};
+use near_workspaces::operations::{Function, TransactionStatus};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Contract, Worker};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use test_dex_types::{
     AddLiquidityArgs, AssetWithBalance, CreatePoolArgs, CreatePoolResponse, PoolId,
@@ -3962,6 +3962,117 @@ async fn test_dex_code_view() {
 }
 
 #[tokio::test]
+async fn test_translation_of_replaced_dex_code() {
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user1,
+        ..
+    } = setup_test_environment().await;
+    let wasms = get_compiled_wasms().await;
+
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_storage_deposit")
+        .max_gas()
+        .deposit(engine_dex_storage_deposit())
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let deploy = |code: &[u8]| {
+        Function::new("deploy_dex_code")
+            .args_json(json!({
+                "last_part_of_id": dex_id.id,
+                "code_base64": BASE64_STANDARD.encode(code),
+            }))
+            .deposit(NearToken::from_yoctonear(1))
+            .gas(Gas::from_tgas(450))
+    };
+    let translate = || {
+        Function::new("translate_dex_codes")
+            .args_json(json!({
+                "dex_ids": [dex_id],
+            }))
+            .gas(Gas::from_tgas(450))
+    };
+    let otc_only_view = || async {
+        dex_engine_contract
+            .view("dex_view")
+            .args_json(json!({
+                "dex_id": dex_id,
+                "method": "get_balance",
+                "args": Base64VecU8(Vec::new()),
+            }))
+            .await
+            .unwrap_err()
+    };
+
+    let result = deployer
+        .batch(dex_engine_contract.id())
+        .call(deploy(&wasms.otc_dex_wasm))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    // The translation reads the otc code before the deployment stores the test dex's code, and
+    // returns after it, so it's of code that the dex doesn't have anymore
+    let result = deployer
+        .batch(dex_engine_contract.id())
+        .call(deploy(&wasms.test_dex_wasm))
+        .call(translate())
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert!(
+        format!("{result:?}").contains(&format!(
+            "The code of {dex_id} changed while it was translated"
+        )),
+        "{result:?}"
+    );
+    let code: Base64VecU8 = dex_engine_contract
+        .view("dex_code")
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(&code.0, &wasms.test_dex_wasm);
+    let error = otc_only_view().await;
+    assert!(
+        format!("{error:?}").contains("Failed to get function 'get_balance'"),
+        "{error:?}"
+    );
+
+    // Anyone can translate the code that the dex has again
+    let result = user1
+        .batch(dex_engine_contract.id())
+        .call(translate())
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert!(result.failures().is_empty(), "{result:?}");
+    let error = otc_only_view().await;
+    assert!(
+        format!("{error:?}").contains("Failed to get function 'get_balance'"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_referral_fees() {
     let pool_creation_fee = NearToken::from_millinear(10);
     let add_liquidity_ft1 = 1_000_000_000u128;
@@ -4966,6 +5077,186 @@ async fn test_deploy_code_chunks() {
             .storage_usage,
         old_storage_usage + (new_code.len() - old_code.len()) as u64
     );
+}
+
+#[tokio::test]
+async fn test_migration_of_mainnet_state() {
+    // The node lets view_state read accounts of up to 50 KB of state by default, and the engine
+    // has more, so it runs with a configuration of its own
+    let sandbox_node =
+        near_sandbox::Sandbox::start_sandbox_with_config(near_sandbox::SandboxConfig {
+            additional_config: Some(json!({ "trie_viewer_state_size_limit": u64::MAX })),
+            // near-workspaces adds it to the sandboxes it runs, and creates top-level accounts with it
+            additional_accounts: vec![near_sandbox::GenesisAccount::default_with_name(
+                "registrar".parse().unwrap(),
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sandbox = near_workspaces::sandbox()
+        .rpc_addr(&sandbox_node.rpc_addr)
+        .validator_key(ValidatorKey::HomeDir(
+            sandbox_node.home_dir.path().to_path_buf(),
+        ))
+        .await
+        .unwrap();
+    let (dex_engine_contract, mainnet_state) = import_mainnet_engine(&sandbox).await;
+    create_translator(&dex_engine_contract).await;
+
+    // StorageKey::DexCodes, under which the mainnet engine also has keys that aren't dex ids,
+    // from an earlier layout of its state that it doesn't read anymore
+    let dex_ids = mainnet_state
+        .keys()
+        .filter_map(|key| key.strip_prefix([2].as_slice()))
+        .filter_map(|key| near_sdk::borsh::from_slice::<DexId>(key).ok())
+        .collect::<Vec<_>>();
+    assert!(!dex_ids.is_empty());
+    // Views of the dexes on mainnet, which return the same once the dexes run their translations
+    let views = [
+        ("get_pool_count", Vec::new()),
+        ("get_fee_discount_signer", Vec::new()),
+        (
+            "get_balance",
+            near_sdk::borsh::to_vec(&otc_dex_types::GetBalanceArgs {
+                account_id: "slimedragon.near".parse().unwrap(),
+                asset_id: AssetId::Near,
+            })
+            .unwrap(),
+        ),
+    ];
+    let view_results = || {
+        let dex_engine_contract = &dex_engine_contract;
+        let dex_ids = &dex_ids;
+        let views = &views;
+        async move {
+            let mut view_results = Vec::new();
+            for dex_id in dex_ids {
+                for (method, args) in views {
+                    let result = dex_engine_contract
+                        .view("dex_view")
+                        .args_json(json!({
+                            "dex_id": dex_id,
+                            "method": method,
+                            "args": Base64VecU8(args.clone()),
+                        }))
+                        .await
+                        .ok()
+                        .map(|result| result.json::<Base64VecU8>().unwrap().0);
+                    view_results.push((dex_id.clone(), *method, result));
+                }
+            }
+            view_results
+        }
+    };
+    let view_results_before_migration = view_results().await;
+    for dex_id in &dex_ids {
+        assert!(
+            view_results_before_migration
+                .iter()
+                .any(|(view_dex_id, _, result)| view_dex_id == dex_id && result.is_some()),
+            "{dex_id} has none of the views"
+        );
+    }
+    let mut dex_storage_balances_before_migration = Vec::new();
+    for dex_id in &dex_ids {
+        dex_storage_balances_before_migration.push(
+            get_dex_storage_balance(&dex_engine_contract, dex_id)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let get_trusted_code_deployer = || async {
+        dex_engine_contract
+            .view("get_trusted_code_deployer")
+            .args_json(json!({}))
+            .await
+            .unwrap()
+            .json::<AccountId>()
+            .unwrap()
+    };
+    let paused = is_paused(&dex_engine_contract).await.unwrap();
+    let trusted_code_deployer = get_trusted_code_deployer().await;
+
+    // What `engine upgrade deploy-and-translate` sends once store-chunk sent the other chunks
+    let new_code = &get_compiled_wasms().await.contract_wasm;
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        new_code,
+        700_000,
+        "translate_dex_codes",
+        json!({ "dex_ids": dex_ids }).to_string().as_bytes(),
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert!(result.failures().is_empty(), "{result:?}");
+    println!(
+        "GAS {:<40} {:>8.3} TGas",
+        "deploy and translate the mainnet dexes",
+        result.total_gas_burnt.as_gas() as f64 / 1e12
+    );
+    assert_eq!(
+        code_hash(&dex_engine_contract).await,
+        near_sdk::env::sha256_array(new_code)
+    );
+    assert_eq!(is_paused(&dex_engine_contract).await.unwrap(), paused);
+    assert_eq!(get_trusted_code_deployer().await, trusted_code_deployer);
+
+    // Every dex runs its translation, which answers its views the way its code did
+    assert_eq!(view_results().await, view_results_before_migration);
+
+    // Only the translations are added, StorageKey::TranslatedDexCodes, and each dex paid for the
+    // storage of its own, which also changes its storage balance and the sum of them in the
+    // contract's state
+    let state = sandbox.view_state(dex_engine_contract.id()).await.unwrap();
+    let translation_keys = dex_ids
+        .iter()
+        .map(|dex_id| [vec![12], near_sdk::borsh::to_vec(dex_id).unwrap()].concat())
+        .collect::<Vec<_>>();
+    let dex_storage_balance_keys = dex_ids
+        .iter()
+        .map(|dex_id| [vec![3], near_sdk::borsh::to_vec(dex_id).unwrap()].concat())
+        .collect::<Vec<_>>();
+    let differing_keys = state
+        .keys()
+        .chain(mainnet_state.keys())
+        .filter(|key| state.get(*key) != mainnet_state.get(*key))
+        .filter(|key| {
+            key.as_slice() != b"STATE"
+                && !translation_keys.contains(key)
+                && !dex_storage_balance_keys.contains(key)
+        })
+        .map(|key| key.escape_ascii().to_string())
+        .collect::<BTreeSet<_>>();
+    assert!(differing_keys.is_empty(), "{differing_keys:?}");
+    for ((dex_id, translation_key), storage_balance_before_migration) in dex_ids
+        .iter()
+        .zip(&translation_keys)
+        .zip(dex_storage_balances_before_migration)
+    {
+        let translation = state.get(translation_key).unwrap();
+        // Each record takes 40 bytes besides its key and value
+        let translation_storage_cost = near_sdk::env::storage_byte_cost()
+            .checked_mul((translation_key.len() + translation.len() + 40) as u128)
+            .unwrap();
+        let storage_balance = get_dex_storage_balance(&dex_engine_contract, dex_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            storage_balance.total,
+            storage_balance_before_migration.total
+        );
+        assert_eq!(
+            storage_balance.available,
+            storage_balance_before_migration
+                .available
+                .checked_sub(translation_storage_cost)
+                .unwrap(),
+            "{dex_id}"
+        );
+    }
 }
 
 /// The gas balance of a gas key of the dex engine, or None if it doesn't exist

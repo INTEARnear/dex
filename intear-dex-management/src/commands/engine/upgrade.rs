@@ -8,6 +8,8 @@ use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
+use near_primitives::hash::CryptoHash;
+use near_primitives::types::AccountId;
 use near_sdk::NearToken;
 use near_sdk::json_types::Base58CryptoHash;
 use serde_json::json;
@@ -38,20 +40,25 @@ pub struct UpgradeCommands {
 /// What do you want to do?
 pub enum UpgradeAction {
     #[strum_discriminants(strum(
-        message = "build        - Build the engine in the checkout you're in, reproducibly in Docker"
+        message = "build                - Build the engine in the checkout you're in, reproducibly in Docker"
     ))]
     /// Build the engine in the checkout you're in, reproducibly in Docker
     Build(Build),
     #[strum_discriminants(strum(
-        message = "store-chunk  - Send a chunk of the built code, when it's too large for one transaction"
+        message = "store-chunk          - Send a chunk of the built code, when it's too large for one transaction"
     ))]
     /// Send a chunk of the built code, when it's too large for one transaction
     StoreChunk(StoreChunk),
     #[strum_discriminants(strum(
-        message = "deploy       - Deploy the built code, with its last chunk if it has chunks"
+        message = "deploy               - Deploy the built code, with its last chunk if it has chunks"
     ))]
     /// Deploy the built code, with its last chunk if it has chunks
     Deploy(Deploy),
+    #[strum_discriminants(strum(
+        message = "deploy-and-translate - Deploy the built code like deploy, and translate the code of every dex for it"
+    ))]
+    /// Deploy the built code like deploy, and translate the code of every dex for it
+    DeployAndTranslate(DeployAndTranslate),
 }
 
 struct EngineCheckout {
@@ -226,6 +233,10 @@ impl BuildContext {
         lines.push(
             "The method runs on the new code right after it's deployed: migrate if the state changed, else a view such as is_paused".to_string(),
         );
+        lines.push(format!(
+            "If the engine's wasmi changed how it translates dex code, deploy it with {} instead, once the translator with the same wasmi is deployed",
+            upgrade_command(&["deploy-and-translate"])
+        ));
         tracing::info!("{}", lines.join("\n│  "));
         Ok(Self)
     }
@@ -344,96 +355,200 @@ impl DeployContext {
         previous_context: crate::GlobalContext,
         scope: &<Deploy as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let built = EngineCheckout::in_current_directory()?.built_code()?;
         let then_call: &'static str = scope.then_call.clone().leak();
-        let code_label = built.label();
-        let success_message =
-            format!("Deployed {code_label} to {ENGINE_ACCOUNT_ID}, and {then_call} ran on it");
-        let stays_if_it_fails = format!(
-            "If the new code doesn't compile, which NEAR doesn't check, or {then_call} fails, the old code stays"
-        );
-        Ok(Self(planning::write_action_context(
+        Ok(Self(deploy_action_context(
             &previous_context,
-            ENGINE_ACCOUNT_ID.to_owned(),
-            move |preflight| {
-                let current_code_size = account::view_code_size(
-                    &preflight.network_config,
-                    &preflight.block_reference,
-                    &ENGINE_ACCOUNT_ID.to_owned(),
-                )?;
-                let expected_outcome = ExpectedOutcome {
-                    action_name: "upgrade",
-                    success_message: success_message.clone(),
-                    transfer_call: None,
-                    dex_id: None,
-                    dex_events: DexEvents::NotRead,
-                    deployment: None,
-                };
-                let chunks = built.chunks();
-                let [.., last_chunk] = chunks.as_slice() else {
-                    return Err(eyre!("The built code is empty"));
-                };
-                if let [_] = chunks.as_slice() {
-                    let added_bytes = built.code.len().saturating_sub(current_code_size);
-                    ensure_untracked_near_covers(preflight, u64::try_from(added_bytes)?)?;
-                    return Ok(TransactionPlan {
-                        receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
-                        steps: vec![
-                            format!(
-                                "Deploy {code_label} to {ENGINE_ACCOUNT_ID}, and call {then_call} on it in the same receipt"
-                            ),
-                            stays_if_it_fails.clone(),
-                        ],
-                        deploy_code: Some(built.code.clone()),
-                        function_calls: vec![FunctionCall {
-                            method_name: then_call,
-                            args: json!({}).into(),
-                            deposit: NearToken::from_yoctonear(0),
-                            gas: THEN_CALL_GAS,
-                        }],
-                        expected_outcome,
-                    });
-                }
-                // The chunks stored before are freed when it's deployed
-                let added_bytes = last_chunk.len().saturating_sub(current_code_size);
-                ensure_untracked_near_covers(preflight, u64::try_from(added_bytes)?)?;
-                let last_index = chunks.len().saturating_sub(1);
-                let last_offset = last_index.saturating_mul(CHUNK_SIZE);
-                Ok(TransactionPlan {
-                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
-                    steps: vec![
-                        format!(
-                            "Store chunk {last_index}, the last of the {} chunks of {code_label}, at byte {last_offset}, after store-chunk sent the others",
-                            chunks.len()
-                        ),
-                        format!(
-                            "Deploy the code to {ENGINE_ACCOUNT_ID} if all of it has the built code's sha256, and call {then_call} on it in the same receipt"
-                        ),
-                        format!("{stays_if_it_fails}, and the code has to be stored again"),
-                    ],
-                    deploy_code: None,
-                    function_calls: vec![FunctionCall {
-                        method_name: "deploy_code_chunks",
-                        args: CallArgs::Borsh(near_sdk::borsh::to_vec(&(
-                            u32::try_from(last_offset)?,
-                            last_chunk,
-                            built.hash_up_to(built.code.len()),
-                            then_call,
-                            serde_json::to_vec(&json!({}))?,
-                        ))?),
-                        deposit: NearToken::from_yoctonear(0),
-                        // 570 Tgas for 4 MiB, and then_call gets what's left
-                        gas: preflight.protocol_limits.max_prepaid_gas,
-                    }],
-                    expected_outcome,
+            then_call,
+            |_| {
+                Ok(ThenCallPlan {
+                    args: json!({}),
+                    steps: Vec::new(),
+                    gas: THEN_CALL_GAS,
                 })
             },
-        )))
+        )?))
     }
+}
+
+/// How the method that runs on the new code right after it's deployed is called
+struct ThenCallPlan {
+    args: serde_json::Value,
+    /// What it does besides running, for the plan
+    steps: Vec<String>,
+    /// Its gas when the code is deployed in one transaction. With the last chunk, it gets
+    /// what's left of the most gas a transaction can have.
+    gas: Gas,
+}
+
+/// Deploys the built code, in one transaction or with its last chunk, and calls `then_call`
+/// on it in the same receipt
+fn deploy_action_context(
+    previous_context: &crate::GlobalContext,
+    then_call: &'static str,
+    plan_then_call: impl Fn(&Preflight) -> color_eyre::eyre::Result<ThenCallPlan> + 'static,
+) -> color_eyre::eyre::Result<ActionContext> {
+    let built = EngineCheckout::in_current_directory()?.built_code()?;
+    let code_label = built.label();
+    let success_message =
+        format!("Deployed {code_label} to {ENGINE_ACCOUNT_ID}, and {then_call} ran on it");
+    let stays_if_it_fails = format!(
+        "If the new code doesn't compile, which NEAR doesn't check, or {then_call} fails, the old code stays"
+    );
+    Ok(planning::write_action_context(
+        previous_context,
+        ENGINE_ACCOUNT_ID.to_owned(),
+        move |preflight| {
+            let ThenCallPlan {
+                args: then_call_args,
+                steps: then_call_steps,
+                gas: then_call_gas,
+            } = plan_then_call(preflight)?;
+            let current_code_size = account::view_code_size(
+                &preflight.network_config,
+                &preflight.block_reference,
+                &ENGINE_ACCOUNT_ID.to_owned(),
+            )?;
+            let expected_outcome = ExpectedOutcome {
+                action_name: "upgrade",
+                success_message: success_message.clone(),
+                transfer_call: None,
+                dex_id: None,
+                dex_events: DexEvents::NotRead,
+                deployment: None,
+            };
+            let chunks = built.chunks();
+            let [.., last_chunk] = chunks.as_slice() else {
+                return Err(eyre!("The built code is empty"));
+            };
+            if let [_] = chunks.as_slice() {
+                let added_bytes = built.code.len().saturating_sub(current_code_size);
+                ensure_untracked_near_covers(preflight, u64::try_from(added_bytes)?)?;
+                return Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps: [
+                        format!(
+                            "Deploy {code_label} to {ENGINE_ACCOUNT_ID}, and call {then_call} on it in the same receipt"
+                        ),
+                        stays_if_it_fails.clone(),
+                    ]
+                    .into_iter()
+                    .chain(then_call_steps)
+                    .collect(),
+                    deploy_code: Some(built.code.clone()),
+                    function_calls: vec![FunctionCall {
+                        method_name: then_call,
+                        args: then_call_args.into(),
+                        deposit: NearToken::from_yoctonear(0),
+                        gas: then_call_gas,
+                    }],
+                    expected_outcome,
+                });
+            }
+            // The chunks stored before are freed when it's deployed
+            let added_bytes = last_chunk.len().saturating_sub(current_code_size);
+            ensure_untracked_near_covers(preflight, u64::try_from(added_bytes)?)?;
+            let last_index = chunks.len().saturating_sub(1);
+            let last_offset = last_index.saturating_mul(CHUNK_SIZE);
+            Ok(TransactionPlan {
+                receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                steps: [
+                    format!(
+                        "Store chunk {last_index}, the last of the {} chunks of {code_label}, at byte {last_offset}, after store-chunk sent the others",
+                        chunks.len()
+                    ),
+                    format!(
+                        "Deploy the code to {ENGINE_ACCOUNT_ID} if all of it has the built code's sha256, and call {then_call} on it in the same receipt"
+                    ),
+                    format!("{stays_if_it_fails}, and the code has to be stored again"),
+                ]
+                .into_iter()
+                .chain(then_call_steps)
+                .collect(),
+                deploy_code: None,
+                function_calls: vec![FunctionCall {
+                    method_name: "deploy_code_chunks",
+                    args: CallArgs::Borsh(near_sdk::borsh::to_vec(&(
+                        u32::try_from(last_offset)?,
+                        last_chunk,
+                        built.hash_up_to(built.code.len()),
+                        then_call,
+                        serde_json::to_vec(&then_call_args)?,
+                    ))?),
+                    deposit: NearToken::from_yoctonear(0),
+                    // 570 Tgas for 4 MiB, and then_call gets what's left
+                    gas: preflight.protocol_limits.max_prepaid_gas,
+                }],
+                expected_outcome,
+            })
+        },
+    ))
 }
 
 impl From<DeployContext> for ActionContext {
     fn from(item: DeployContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = crate::GlobalContext)]
+#[interactive_clap(output_context = DeployAndTranslateContext)]
+pub struct DeployAndTranslate {
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
+}
+
+#[derive(Clone)]
+pub struct DeployAndTranslateContext(ActionContext);
+
+impl DeployAndTranslateContext {
+    pub fn from_previous_context(
+        previous_context: crate::GlobalContext,
+        _scope: &<DeployAndTranslate as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        Ok(Self(deploy_action_context(
+            &previous_context,
+            "translate_dex_codes",
+            |preflight| {
+                let translator_id: AccountId = format!("translator.{ENGINE_ACCOUNT_ID}").parse()?;
+                let translator = account::view_account(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &translator_id,
+                )?;
+                if translator.is_none_or(|translator| translator.code_hash == CryptoHash::default())
+                {
+                    return Err(
+                        PreflightError::TranslatorWithoutCode { translator_id }.into_report()
+                    );
+                }
+                let dex_ids =
+                    engine::dex_ids(&preflight.network_config, &preflight.block_reference)?;
+                Ok(ThenCallPlan {
+                    steps: vec![
+                        format!(
+                            "translate_dex_codes sends the code of {} dexes to {translator_id}, and stores each translation, which its dex pays the storage of: {}",
+                            dex_ids.len(),
+                            dex_ids
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        "A dex runs again once its translation is stored, a few blocks after the deployment. One whose translation fails, such as for lack of storage, stays unusable until translate_dex_codes translates it again".to_string(),
+                    ],
+                    args: json!({ "dex_ids": dex_ids }),
+                    // The translations get what translate_dex_codes leaves
+                    gas: preflight.protocol_limits.max_prepaid_gas,
+                })
+            },
+        )?))
+    }
+}
+
+impl From<DeployAndTranslateContext> for ActionContext {
+    fn from(item: DeployAndTranslateContext) -> Self {
         item.0
     }
 }

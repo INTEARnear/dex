@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
       - name: Apply patches to crates
-        run: cargo install patch-crate --locked && cargo patch-crate --force
+        run: cargo install patch-crate --version 0.1.13 --locked && cargo patch-crate --force
       - run: cargo fmt --check
 
   code-linter:
@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - name: Apply patches to crates
-        run: cargo install patch-crate --locked && cargo patch-crate --force
+        run: cargo install patch-crate --version 0.1.13 --locked && cargo patch-crate --force
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: Run cargo clippy
@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - name: Apply patches to crates
-        run: cargo install patch-crate --locked && cargo patch-crate --force
+        run: cargo install patch-crate --version 0.1.13 --locked && cargo patch-crate --force
       - name: Install cargo-near CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
       - name: Install tooling
@@ -55,7 +55,7 @@ jobs:
         uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - name: Apply patches to crates
-        run: cargo install patch-crate --locked && cargo patch-crate --force
+        run: cargo install patch-crate --version 0.1.13 --locked && cargo patch-crate --force
       - name: Install cargo-near CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
       - name: Install tooling and native dependencies

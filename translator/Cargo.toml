@@ -10,4 +10,4 @@ crate-type = ["cdylib"]
 [dependencies]
 near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
 # With its default features, which validate and translate Wasm, unlike those of the engine
-wasmi = "1"
+wasmi = "=1.1.0"

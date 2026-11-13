@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use color_eyre::eyre::{Context, bail};
 use intear_dex_common::{AssetId, DexId};
 use intear_dex_types::AccountOrDexId;
@@ -6,7 +8,7 @@ use near_cli_rs::config::NetworkConfig;
 use near_jsonrpc_client::methods::block::RpcBlockRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
-use near_primitives::types::{AccountId, BlockId, BlockReference};
+use near_primitives::types::{AccountId, BlockId, BlockReference, StoreKey};
 use near_primitives::views::{AccessKeyPermissionView, BlockView, QueryRequest};
 use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
@@ -328,6 +330,58 @@ pub fn dex_code(
             Ok(None)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Every dex that has code. The engine can't list a map's entries, so this reads
+/// them from the engine's state, a page at a time.
+pub fn dex_ids(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<Vec<DexId>> {
+    // The engine keeps the code of every dex under this prefix, keyed by the dex id
+    const ENGINE_DEX_CODES_PREFIX: u8 = 2;
+    // Nodes return fewer when the page would be too big
+    const PAGE_LIMIT: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+    let mut dex_ids = Vec::new();
+    let mut after_key = None;
+    loop {
+        let response = network_config
+            .json_rpc_client()
+            .blocking_call(RpcQueryRequest {
+                block_reference: block_reference.clone(),
+                request: QueryRequest::ViewState {
+                    account_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    prefix: StoreKey::from(vec![ENGINE_DEX_CODES_PREFIX]),
+                    after_key,
+                    limit: Some(PAGE_LIMIT),
+                    include_proof: false,
+                },
+            })
+            .map_err(color_eyre::eyre::Report::new)
+            .wrap_err_with(|| {
+                format!(
+                    "Couldn't read the dex codes of {ENGINE_ACCOUNT_ID} on network {} (RPC {})",
+                    network_config.network_name, network_config.rpc_url
+                )
+            })?;
+        let QueryResponseKind::ViewState(state) = response.kind else {
+            bail!(
+                "RPC {} answered a state query with something other than state",
+                network_config.rpc_url
+            );
+        };
+        for item in state.values {
+            // The mainnet engine also has keys under the prefix that aren't dex ids, from an
+            // earlier layout of its state that it doesn't read anymore
+            if let Ok(dex_id) = near_sdk::borsh::from_slice::<DexId>(&item.key[1..]) {
+                dex_ids.push(dex_id);
+            }
+        }
+        match state.last_key {
+            Some(last_key) => after_key = Some(last_key),
+            None => return Ok(dex_ids),
+        }
     }
 }
 
