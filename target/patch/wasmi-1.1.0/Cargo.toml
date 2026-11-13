@@ -55,6 +55,7 @@ features = [
 default = [
     "std",
     "wat",
+    "translate",
 ]
 extra-checks = []
 hash-collections = [
@@ -70,6 +71,7 @@ simd = [
     "wasmi_ir/simd",
     "wasmparser/simd",
 ]
+translate = []
 std = [
     "wasmi_core/std",
     "wasmi_collections/std",
@@ -79,6 +81,7 @@ std = [
 wat = [
     "dep:wat",
     "std",
+    "translate",
 ]
 
 [lib]

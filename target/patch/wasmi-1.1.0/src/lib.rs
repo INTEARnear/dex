@@ -80,6 +80,11 @@
     clippy::items_after_statements
 )]
 #![recursion_limit = "1000"]
+// Note: without translation, the items that only translation uses are unused.
+#![cfg_attr(
+    not(feature = "translate"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 
 extern crate alloc;
 #[cfg(feature = "std")]

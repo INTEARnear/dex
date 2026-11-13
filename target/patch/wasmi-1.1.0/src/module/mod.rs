@@ -209,6 +209,7 @@ impl ModuleImports {
 }
 
 impl Module {
+    #[cfg(feature = "translate")]
     /// Creates a new Wasm [`Module`] from the given Wasm bytecode buffer.
     ///
     /// # Note
@@ -232,6 +233,7 @@ impl Module {
         ModuleParser::new(engine).parse_buffered(wasm)
     }
 
+    #[cfg(feature = "translate")]
     /// Creates a new Wasm [`Module`] from the given Wasm bytecode buffer.
     ///
     /// # Note
@@ -267,6 +269,7 @@ impl Module {
         &self.inner.header.inner
     }
 
+    #[cfg(feature = "translate")]
     /// Validates `wasm` as a WebAssembly binary given the configuration (via [`Config`]) in `engine`.
     ///
     /// This function performs Wasm validation of the binary input WebAssembly module and

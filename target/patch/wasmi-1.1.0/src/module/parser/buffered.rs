@@ -1,8 +1,11 @@
 use super::{ModuleBuilder, ModuleParser};
 use crate::{Error, Module};
-use wasmparser::{Chunk, Payload, Validator};
+use wasmparser::{Chunk, Payload};
+#[cfg(feature = "translate")]
+use wasmparser::Validator;
 
 impl ModuleParser {
+    #[cfg(feature = "translate")]
     /// Starts parsing and validating the Wasm bytecode stream.
     ///
     /// Returns the compiled and validated Wasm [`Module`] upon success.
@@ -116,9 +119,11 @@ impl ModuleParser {
                 Payload::StartSection { func, range } => self.process_start(func, range, module),
                 Payload::ElementSection(section) => self.process_element(section, module),
                 Payload::DataCountSection { count, range } => self.process_data_count(count, range),
+                #[cfg(feature = "translate")]
                 Payload::CodeSectionStart { count, range, size } => {
                     self.process_code_start(count, range, size)
                 }
+                #[cfg(feature = "translate")]
                 Payload::CodeSectionEntry(func_body) => {
                     let bytes = func_body.as_bytes();
                     self.process_code_entry(func_body, bytes, module)

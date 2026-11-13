@@ -8,7 +8,14 @@ mod func_types;
 mod limits;
 mod resumable;
 mod traits;
+#[cfg(feature = "translate")]
 mod translator;
+#[cfg(not(feature = "translate"))]
+mod translator {
+    mod error;
+
+    pub use self::error::TranslationError;
+}
 mod utils;
 
 pub(crate) use self::{
@@ -16,6 +23,9 @@ pub(crate) use self::{
     code_map::read_u32,
     executor::Stack,
     func_types::DedupFuncType,
+};
+#[cfg(feature = "translate")]
+pub(crate) use self::{
     translator::{
         FuncTranslationDriver,
         FuncTranslator,
@@ -190,6 +200,7 @@ impl Engine {
         self.inner.alloc_funcs(amount)
     }
 
+    #[cfg(feature = "translate")]
     /// Translates the Wasm function using the [`Engine`].
     ///
     /// - Uses the internal [`Config`] to drive the function translation as mandated.
@@ -227,21 +238,25 @@ impl Engine {
         )
     }
 
+    #[cfg(feature = "translate")]
     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
     pub(crate) fn get_translation_allocs(&self) -> FuncTranslatorAllocations {
         self.inner.get_translation_allocs()
     }
 
+    #[cfg(feature = "translate")]
     /// Returns reusable [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] from the [`Engine`].
     pub(crate) fn get_allocs(&self) -> (FuncTranslatorAllocations, FuncValidatorAllocations) {
         self.inner.get_allocs()
     }
 
+    #[cfg(feature = "translate")]
     /// Recycles the given [`FuncTranslatorAllocations`] in the [`Engine`].
     pub(crate) fn recycle_translation_allocs(&self, allocs: FuncTranslatorAllocations) {
         self.inner.recycle_translation_allocs(allocs)
     }
 
+    #[cfg(feature = "translate")]
     /// Recycles the given [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] in the [`Engine`].
     pub(crate) fn recycle_allocs(
         &self,
@@ -251,6 +266,7 @@ impl Engine {
         self.inner.recycle_allocs(translation, validation)
     }
 
+    #[cfg(feature = "translate")]
     /// Initializes the uninitialized [`EngineFunc`] for the [`Engine`].
     ///
     /// # Note
@@ -288,6 +304,7 @@ impl Engine {
         self.inner.code_map.init_func_as_serialized(func, bytes)
     }
 
+    #[cfg(feature = "translate")]
     /// Appends the serialized translation of `func` to `buffer`.
     ///
     /// # Note
@@ -306,6 +323,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "translate")]
     /// Validates and translates the `wasm` module and returns its serialized translation.
     ///
     /// # Note
@@ -490,6 +508,7 @@ pub struct EngineInner {
     /// The engine deduplicates function types to make the equality
     /// comparison very fast. This helps to speed up indirect calls.
     func_types: RwLock<FuncTypeRegistry>,
+    #[cfg(feature = "translate")]
     /// Reusable allocation stacks.
     allocs: Mutex<ReusableAllocationStack>,
     /// Reusable engine stacks for Wasm execution.
@@ -500,6 +519,7 @@ pub struct EngineInner {
     stacks: Mutex<EngineStacks>,
 }
 
+#[cfg(feature = "translate")]
 /// Stacks to hold and distribute reusable allocations.
 pub struct ReusableAllocationStack {
     /// The maximum height of each of the allocations stacks.
@@ -510,6 +530,7 @@ pub struct ReusableAllocationStack {
     validation: Vec<FuncValidatorAllocations>,
 }
 
+#[cfg(feature = "translate")]
 impl Default for ReusableAllocationStack {
     fn default() -> Self {
         Self {
@@ -520,6 +541,7 @@ impl Default for ReusableAllocationStack {
     }
 }
 
+#[cfg(feature = "translate")]
 impl core::fmt::Debug for ReusableAllocationStack {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.debug_struct("ReusableAllocationStack")
@@ -532,6 +554,7 @@ impl core::fmt::Debug for ReusableAllocationStack {
     }
 }
 
+#[cfg(feature = "translate")]
 impl ReusableAllocationStack {
     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
     pub fn get_translation_allocs(&mut self) -> FuncTranslatorAllocations {
@@ -606,6 +629,7 @@ impl EngineInner {
             config: config.clone(),
             code_map: CodeMap::new(config),
             func_types: RwLock::new(FuncTypeRegistry::new(engine_idx)),
+            #[cfg(feature = "translate")]
             allocs: Mutex::new(ReusableAllocationStack::default()),
             stacks: Mutex::new(EngineStacks::new(&config.stack)),
         }
@@ -641,6 +665,7 @@ impl EngineInner {
         self.code_map.alloc_funcs(amount)
     }
 
+    #[cfg(feature = "translate")]
     /// Translates the Wasm function using the [`Engine`].
     ///
     /// For more information read [`Engine::translate_func`].
@@ -697,16 +722,19 @@ impl EngineInner {
         Ok(())
     }
 
+    #[cfg(feature = "translate")]
     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
     fn get_translation_allocs(&self) -> FuncTranslatorAllocations {
         self.allocs.lock().get_translation_allocs()
     }
 
+    #[cfg(feature = "translate")]
     /// Returns reusable [`FuncValidatorAllocations`] from the [`Engine`].
     fn get_validation_allocs(&self) -> FuncValidatorAllocations {
         self.allocs.lock().get_validation_allocs()
     }
 
+    #[cfg(feature = "translate")]
     /// Returns reusable [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] from the [`Engine`].
     ///
     /// # Note
@@ -721,16 +749,19 @@ impl EngineInner {
         (translation, validation)
     }
 
+    #[cfg(feature = "translate")]
     /// Recycles the given [`FuncTranslatorAllocations`] in the [`Engine`].
     fn recycle_translation_allocs(&self, allocs: FuncTranslatorAllocations) {
         self.allocs.lock().recycle_translation_allocs(allocs)
     }
 
+    #[cfg(feature = "translate")]
     /// Recycles the given [`FuncValidatorAllocations`] in the [`Engine`].
     fn recycle_validation_allocs(&self, allocs: FuncValidatorAllocations) {
         self.allocs.lock().recycle_validation_allocs(allocs)
     }
 
+    #[cfg(feature = "translate")]
     /// Recycles the given [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] in the [`Engine`].
     ///
     /// # Note
@@ -763,6 +794,7 @@ impl EngineInner {
             .init_func_as_compiled(engine_func, func_entity)
     }
 
+    #[cfg(feature = "translate")]
     /// Initializes the uninitialized [`EngineFunc`] for the [`Engine`].
     ///
     /// # Note

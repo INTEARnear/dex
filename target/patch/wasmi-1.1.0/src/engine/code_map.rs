@@ -5,7 +5,9 @@
 //! This is the data structure specialized to handle compiled
 //! register machine based bytecode functions.
 
-use super::{FuncTranslationDriver, FuncTranslator, TranslationError, ValidatingFuncTranslator};
+use super::TranslationError;
+#[cfg(feature = "translate")]
+use super::{FuncTranslationDriver, FuncTranslator, ValidatingFuncTranslator};
 use crate::{
     collections::arena::{Arena, ArenaIndex},
     core::{Fuel, FuelCostsProvider, UntypedVal},
@@ -252,6 +254,7 @@ impl CodeMap {
         func.init_compiled(entity);
     }
 
+    #[cfg(feature = "translate")]
     /// Initializes the [`EngineFunc`] for lazy translation.
     ///
     /// # Panics
@@ -327,10 +330,11 @@ impl CodeMap {
         if let Some(bytes) = self.get_serialized(func) {
             return self.deserialize(func, bytes);
         }
-        match self.get_uncompiled(func) {
-            Some(entity) => self.compile(fuel, func, entity),
-            None => self.wait_for_compilation(func),
+        #[cfg(feature = "translate")]
+        if let Some(entity) = self.get_uncompiled(func) {
+            return self.compile(fuel, func, entity);
         }
+        self.wait_for_compilation(func)
     }
 
     /// Returns the serialized translation of `func` if possible, otherwise returns `None`.
@@ -388,6 +392,7 @@ impl CodeMap {
         Some(self.adjust_cref_lifetime(cref))
     }
 
+    #[cfg(feature = "translate")]
     /// Returns the [`UncompiledFuncEntity`] of `func` if possible, otherwise returns `None`.
     ///
     /// After this operation `func` will be in [`FuncEntity::Compiling`] state.
@@ -418,6 +423,7 @@ impl CodeMap {
         unsafe { mem::transmute::<CompiledFuncRef<'_>, CompiledFuncRef<'a>>(cref) }
     }
 
+    #[cfg(feature = "translate")]
     /// Compile and validate the [`UncompiledFuncEntity`] identified by `func`.
     ///
     /// # Errors
@@ -479,7 +485,9 @@ impl CodeMap {
                 FuncEntity::FailedToCompile => {
                     return Err(Error::from(TranslationError::LazyCompilationFailed))
                 }
-                FuncEntity::Uncompiled(_) | FuncEntity::Serialized(_) | FuncEntity::Uninit => {
+                #[cfg(feature = "translate")]
+                FuncEntity::Uncompiled(_) => panic!("unexpected function state: {entity:?}"),
+                FuncEntity::Serialized(_) | FuncEntity::Uninit => {
                     panic!("unexpected function state: {entity:?}")
                 }
             }
@@ -494,6 +502,7 @@ impl CodeMap {
 enum FuncEntity {
     /// The function entity has not yet been initialized.
     Uninit,
+    #[cfg(feature = "translate")]
     /// An internal function that has not yet been compiled.
     Uncompiled(UncompiledFuncEntity),
     /// An internal function that has been compiled and serialized and has not yet been deserialized.
@@ -525,6 +534,7 @@ impl FuncEntity {
         *self = Self::Compiled(entity);
     }
 
+    #[cfg(feature = "translate")]
     /// Initializes the [`FuncEntity`] to an uncompiled state.
     ///
     /// # Panics
@@ -572,6 +582,7 @@ impl FuncEntity {
         }
     }
 
+    #[cfg(feature = "translate")]
     /// Returns the [`UncompiledFuncEntity`] if possible.
     ///
     /// # Errors
@@ -596,6 +607,7 @@ impl FuncEntity {
         }
     }
 
+    #[cfg(feature = "translate")]
     /// Sets the state back to [`UncompiledFuncEntity`] if possible.
     ///
     /// # Panics
@@ -647,11 +659,13 @@ impl FuncEntity {
     }
 }
 
+#[cfg(feature = "translate")]
 /// A function type index into the Wasm module.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct TypeIndex(u32);
 
+#[cfg(feature = "translate")]
 /// An internal uncompiled function entity.
 pub struct UncompiledFuncEntity {
     /// The index of the function within the Wasm module.
@@ -669,6 +683,7 @@ pub struct UncompiledFuncEntity {
     validation: Option<(TypeIndex, ValidatorResources)>,
 }
 
+#[cfg(feature = "translate")]
 impl UncompiledFuncEntity {
     /// Creates a new [`UncompiledFuncEntity`].
     pub fn new(
@@ -793,6 +808,7 @@ impl UncompiledFuncEntity {
     }
 }
 
+#[cfg(feature = "translate")]
 impl fmt::Debug for UncompiledFuncEntity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("UncompiledFuncEntity")
@@ -804,6 +820,7 @@ impl fmt::Debug for UncompiledFuncEntity {
     }
 }
 
+#[cfg(feature = "translate")]
 /// A boxed byte slice that can store some bytes inline.
 #[derive(Debug)]
 pub enum SmallByteSlice {
@@ -820,6 +837,7 @@ pub enum SmallByteSlice {
     Big(Box<[u8]>),
 }
 
+#[cfg(feature = "translate")]
 impl Default for SmallByteSlice {
     fn default() -> Self {
         Self::Small {
@@ -829,6 +847,7 @@ impl Default for SmallByteSlice {
     }
 }
 
+#[cfg(feature = "translate")]
 impl SmallByteSlice {
     /// The maximum amount of bytes that can be stored inline.
     ///
@@ -846,6 +865,7 @@ impl SmallByteSlice {
     }
 }
 
+#[cfg(feature = "translate")]
 impl<I> ops::Index<I> for SmallByteSlice
 where
     I: slice::SliceIndex<[u8]>,
@@ -858,6 +878,7 @@ where
     }
 }
 
+#[cfg(feature = "translate")]
 impl<'a> From<&'a [u8]> for SmallByteSlice {
     fn from(bytes: &'a [u8]) -> Self {
         if bytes.len() <= Self::MAX_INLINE_SIZE {

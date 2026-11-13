@@ -66,6 +66,7 @@ const CODE_SECTION_ID: u8 = 10;
 const _: () = assert!(size_of::<u32>() % align_of::<Op>() == 0);
 
 impl Module {
+    #[cfg(feature = "translate")]
     /// Returns the serialized `self` that was created from `wasm`.
     ///
     /// # Note
