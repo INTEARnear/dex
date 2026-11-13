@@ -1,0 +1,1334 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index f57acec..89bb07f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -55,6 +55,7 @@ features = [
+ default = [
+     "std",
+     "wat",
++    "translate",
+ ]
+ extra-checks = []
+ hash-collections = [
+@@ -70,6 +71,7 @@ simd = [
+     "wasmi_ir/simd",
+     "wasmparser/simd",
+ ]
++translate = []
+ std = [
+     "wasmi_core/std",
+     "wasmi_collections/std",
+@@ -79,6 +81,7 @@ std = [
+ wat = [
+     "dep:wat",
+     "std",
++    "translate",
+ ]
+ 
+ [lib]
+diff --git a/src/engine/code_map.rs b/src/engine/code_map.rs
+index f1fccb0..3bdbff1 100644
+--- a/src/engine/code_map.rs
++++ b/src/engine/code_map.rs
+@@ -5,19 +5,21 @@
+ //! This is the data structure specialized to handle compiled
+ //! register machine based bytecode functions.
+ 
+-use super::{FuncTranslationDriver, FuncTranslator, TranslationError, ValidatingFuncTranslator};
++use super::TranslationError;
++#[cfg(feature = "translate")]
++use super::{FuncTranslationDriver, FuncTranslator, ValidatingFuncTranslator};
+ use crate::{
+     collections::arena::{Arena, ArenaIndex},
+     core::{Fuel, FuelCostsProvider, UntypedVal},
+     engine::{utils::unreachable_unchecked, ResumableOutOfFuelError},
+     errors::FuelError,
+     ir::{index::InternalFunc, Op},
+-    module::{FuncIdx, ModuleHeader},
++    module::{FuncIdx, ModuleHeader, SerializationError},
+     Config,
+     Error,
+     TrapCode,
+ };
+-use alloc::boxed::Box;
++use alloc::{boxed::Box, vec::Vec};
+ use core::{
+     fmt,
+     mem::{self, MaybeUninit},
+@@ -110,6 +112,12 @@ impl EngineFuncSpan {
+         }
+     }
+ 
++    /// Returns `true` if `self` starts with the first [`EngineFunc`] of its [`CodeMap`].
++    #[inline]
++    pub fn is_first(&self) -> bool {
++        self.start.0 == 0
++    }
++
+     /// Returns `true` if `self` is empty.
+     #[inline]
+     pub fn is_empty(&self) -> bool {
+@@ -246,6 +254,7 @@ impl CodeMap {
+         func.init_compiled(entity);
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Initializes the [`EngineFunc`] for lazy translation.
+     ///
+     /// # Panics
+@@ -272,6 +281,20 @@ impl CodeMap {
+         ));
+     }
+ 
++    /// Initializes the [`EngineFunc`] from its serialized translation.
++    ///
++    /// # Panics
++    ///
++    /// - If `func` is an invalid [`EngineFunc`] reference for this [`CodeMap`].
++    /// - If `func` refers to an already initialized [`EngineFunc`].
++    pub fn init_func_as_serialized(&self, func: EngineFunc, bytes: &'static [u8]) {
++        let mut funcs = self.funcs.lock();
++        let Some(func) = funcs.get_mut(func) else {
++            panic!("encountered invalid internal function: {func:?}")
++        };
++        func.init_serialized(bytes);
++    }
++
+     /// Returns the [`FuncEntity`] of the [`EngineFunc`].
+     ///
+     /// # Errors
+@@ -304,9 +327,52 @@ impl CodeMap {
+         fuel: Option<&mut Fuel>,
+         func: EngineFunc,
+     ) -> Result<CompiledFuncRef<'a>, Error> {
+-        match self.get_uncompiled(func) {
+-            Some(entity) => self.compile(fuel, func, entity),
+-            None => self.wait_for_compilation(func),
++        if let Some(bytes) = self.get_serialized(func) {
++            return self.deserialize(func, bytes);
++        }
++        #[cfg(feature = "translate")]
++        if let Some(entity) = self.get_uncompiled(func) {
++            return self.compile(fuel, func, entity);
++        }
++        self.wait_for_compilation(func)
++    }
++
++    /// Returns the serialized translation of `func` if possible, otherwise returns `None`.
++    ///
++    /// After this operation `func` will be in [`FuncEntity::Compiling`] state.
++    #[inline]
++    fn get_serialized(&self, func: EngineFunc) -> Option<&'static [u8]> {
++        let mut funcs = self.funcs.lock();
++        let Some(entity) = funcs.get_mut(func) else {
++            panic!("encountered invalid internal function: {func:?}")
++        };
++        entity.get_serialized()
++    }
++
++    /// Deserializes the serialized translation `bytes` of `func`.
++    ///
++    /// # Errors
++    ///
++    /// If `bytes` are not a serialized [`CompiledFuncEntity`].
++    fn deserialize<'a>(
++        &'a self,
++        func: EngineFunc,
++        bytes: &'static [u8],
++    ) -> Result<CompiledFuncRef<'a>, Error> {
++        let compiled_func = CompiledFuncEntity::deserialize(bytes);
++        let mut funcs = self.funcs.lock();
++        let Some(entity) = funcs.get_mut(func) else {
++            panic!("encountered invalid internal function: {func:?}")
++        };
++        match compiled_func {
++            Ok(compiled_func) => {
++                let cref = entity.set_compiled(compiled_func);
++                Ok(self.adjust_cref_lifetime(cref))
++            }
++            Err(error) => {
++                entity.set_failed_to_compile();
++                Err(error)
++            }
+         }
+     }
+ 
+@@ -326,6 +392,7 @@ impl CodeMap {
+         Some(self.adjust_cref_lifetime(cref))
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns the [`UncompiledFuncEntity`] of `func` if possible, otherwise returns `None`.
+     ///
+     /// After this operation `func` will be in [`FuncEntity::Compiling`] state.
+@@ -356,6 +423,7 @@ impl CodeMap {
+         unsafe { mem::transmute::<CompiledFuncRef<'_>, CompiledFuncRef<'a>>(cref) }
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Compile and validate the [`UncompiledFuncEntity`] identified by `func`.
+     ///
+     /// # Errors
+@@ -417,7 +485,9 @@ impl CodeMap {
+                 FuncEntity::FailedToCompile => {
+                     return Err(Error::from(TranslationError::LazyCompilationFailed))
+                 }
+-                FuncEntity::Uncompiled(_) | FuncEntity::Uninit => {
++                #[cfg(feature = "translate")]
++                FuncEntity::Uncompiled(_) => panic!("unexpected function state: {entity:?}"),
++                FuncEntity::Serialized(_) | FuncEntity::Uninit => {
+                     panic!("unexpected function state: {entity:?}")
+                 }
+             }
+@@ -432,8 +502,11 @@ impl CodeMap {
+ enum FuncEntity {
+     /// The function entity has not yet been initialized.
+     Uninit,
++    #[cfg(feature = "translate")]
+     /// An internal function that has not yet been compiled.
+     Uncompiled(UncompiledFuncEntity),
++    /// An internal function that has been compiled and serialized and has not yet been deserialized.
++    Serialized(&'static [u8]),
+     /// The function entity is currently compiling.
+     Compiling,
+     /// The function entity failed to compile lazily.
+@@ -461,6 +534,7 @@ impl FuncEntity {
+         *self = Self::Compiled(entity);
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Initializes the [`FuncEntity`] to an uncompiled state.
+     ///
+     /// # Panics
+@@ -472,6 +546,31 @@ impl FuncEntity {
+         *self = Self::Uncompiled(entity);
+     }
+ 
++    /// Initializes the [`FuncEntity`] with its serialized translation.
++    ///
++    /// # Panics
++    ///
++    /// If `func` has already been initialized.
++    #[inline]
++    pub fn init_serialized(&mut self, bytes: &'static [u8]) {
++        assert!(matches!(self, Self::Uninit));
++        *self = Self::Serialized(bytes);
++    }
++
++    /// Returns the serialized translation of the [`FuncEntity`] if possible.
++    ///
++    /// Returns `None` if the [`FuncEntity`] is not serialized.
++    ///
++    /// After this operation `self` will be in [`FuncEntity::Compiling`] state.
++    #[inline]
++    pub fn get_serialized(&mut self) -> Option<&'static [u8]> {
++        let Self::Serialized(bytes) = *self else {
++            return None;
++        };
++        *self = Self::Compiling;
++        Some(bytes)
++    }
++
+     /// Returns the [`CompiledFuncEntity`] if possible.
+     ///
+     /// Returns `None` if the [`FuncEntity`] has not yet been compiled.
+@@ -483,6 +582,7 @@ impl FuncEntity {
+         }
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns the [`UncompiledFuncEntity`] if possible.
+     ///
+     /// # Errors
+@@ -507,6 +607,7 @@ impl FuncEntity {
+         }
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Sets the state back to [`UncompiledFuncEntity`] if possible.
+     ///
+     /// # Panics
+@@ -558,11 +659,13 @@ impl FuncEntity {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ /// A function type index into the Wasm module.
+ #[derive(Debug, Copy, Clone)]
+ #[repr(transparent)]
+ pub struct TypeIndex(u32);
+ 
++#[cfg(feature = "translate")]
+ /// An internal uncompiled function entity.
+ pub struct UncompiledFuncEntity {
+     /// The index of the function within the Wasm module.
+@@ -580,6 +683,7 @@ pub struct UncompiledFuncEntity {
+     validation: Option<(TypeIndex, ValidatorResources)>,
+ }
+ 
++#[cfg(feature = "translate")]
+ impl UncompiledFuncEntity {
+     /// Creates a new [`UncompiledFuncEntity`].
+     pub fn new(
+@@ -704,6 +808,7 @@ impl UncompiledFuncEntity {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl fmt::Debug for UncompiledFuncEntity {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+         f.debug_struct("UncompiledFuncEntity")
+@@ -715,6 +820,7 @@ impl fmt::Debug for UncompiledFuncEntity {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ /// A boxed byte slice that can store some bytes inline.
+ #[derive(Debug)]
+ pub enum SmallByteSlice {
+@@ -731,6 +837,7 @@ pub enum SmallByteSlice {
+     Big(Box<[u8]>),
+ }
+ 
++#[cfg(feature = "translate")]
+ impl Default for SmallByteSlice {
+     fn default() -> Self {
+         Self::Small {
+@@ -740,6 +847,7 @@ impl Default for SmallByteSlice {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl SmallByteSlice {
+     /// The maximum amount of bytes that can be stored inline.
+     ///
+@@ -757,6 +865,7 @@ impl SmallByteSlice {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl<I> ops::Index<I> for SmallByteSlice
+ where
+     I: slice::SliceIndex<[u8]>,
+@@ -769,6 +878,7 @@ where
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl<'a> From<&'a [u8]> for SmallByteSlice {
+     fn from(bytes: &'a [u8]) -> Self {
+         if bytes.len() <= Self::MAX_INLINE_SIZE {
+@@ -781,11 +891,20 @@ impl<'a> From<&'a [u8]> for SmallByteSlice {
+     }
+ }
+ 
++/// The sequence of [`Op`] of a [`CompiledFuncEntity`].
++#[derive(Debug)]
++enum CompiledFuncInstrs {
++    /// The [`Op`]s of a function that has been compiled by this [`Engine`](crate::Engine).
++    Owned(Pin<Box<[Op]>>),
++    /// The [`Op`]s of a deserialized function that refer to its serialized bytes.
++    Serialized(&'static [Op]),
++}
++
+ /// Meta information about a [`EngineFunc`].
+ #[derive(Debug)]
+ pub struct CompiledFuncEntity {
+     /// The sequence of [`Op`] of the [`CompiledFuncEntity`].
+-    instrs: Pin<Box<[Op]>>,
++    instrs: CompiledFuncInstrs,
+     /// The constant values local to the [`EngineFunc`].
+     consts: Pin<Box<[UntypedVal]>>,
+     /// The number of stack slots used by the [`EngineFunc`] in total.
+@@ -825,11 +944,91 @@ impl CompiledFuncEntity {
+             instrs.len(),
+         );
+         Self {
+-            instrs,
++            instrs: CompiledFuncInstrs::Owned(instrs),
+             consts,
+             len_stack_slots,
+         }
+     }
++
++    /// Deserializes a [`CompiledFuncEntity`] that [`CompiledFuncRef::serialize`] serialized.
++    ///
++    /// # Note
++    ///
++    /// The [`Op`]s of the [`CompiledFuncEntity`] are not copied but refer to `bytes`.
++    ///
++    /// # Errors
++    ///
++    /// - If `bytes` are not a serialized [`CompiledFuncEntity`].
++    /// - If the [`Op`]s in `bytes` are invalid or not aligned to [`Op`].
++    fn deserialize(bytes: &'static [u8]) -> Result<Self, Error> {
++        let (len_stack_slots, bytes) = read_u32(bytes)?;
++        let (len_instrs, bytes) = read_u32(bytes)?;
++        let (len_consts, bytes) = read_u32(bytes)?;
++        let len_stack_slots =
++            u16::try_from(len_stack_slots).map_err(|_| SerializationError::MalformedBytes)?;
++        let len_instrs = (len_instrs as usize)
++            .checked_mul(size_of::<Op>())
++            .ok_or(SerializationError::MalformedBytes)?;
++        let Some((instrs, consts)) = bytes.split_at_checked(len_instrs) else {
++            return Err(Error::from(SerializationError::MalformedBytes));
++        };
++        if instrs.is_empty() || consts.len() != len_consts as usize * SERIALIZED_CONST_SIZE {
++            return Err(Error::from(SerializationError::MalformedBytes));
++        }
++        let instrs = Op::slice_from_bytes(instrs)?;
++        let consts = consts
++            .chunks_exact(SERIALIZED_CONST_SIZE)
++            .map(deserialize_const)
++            .collect();
++        Ok(Self {
++            instrs: CompiledFuncInstrs::Serialized(instrs),
++            consts: Pin::new(consts),
++            len_stack_slots,
++        })
++    }
++}
++
++/// The size of a serialized function local constant value.
++const SERIALIZED_CONST_SIZE: usize = if cfg!(feature = "simd") { 16 } else { 8 };
++
++/// Returns the bytes of the serialized function local constant `value`.
++#[cfg(not(feature = "simd"))]
++fn serialize_const(value: UntypedVal) -> [u8; SERIALIZED_CONST_SIZE] {
++    value.to_bits64().to_le_bytes()
++}
++
++/// Returns the bytes of the serialized function local constant `value`.
++#[cfg(feature = "simd")]
++fn serialize_const(value: UntypedVal) -> [u8; SERIALIZED_CONST_SIZE] {
++    crate::V128::from(value).as_u128().to_le_bytes()
++}
++
++/// Returns the function local constant value that `serialize_const` serialized as `bytes`.
++#[cfg(not(feature = "simd"))]
++fn deserialize_const(bytes: &[u8]) -> UntypedVal {
++    let mut value = [0x00_u8; SERIALIZED_CONST_SIZE];
++    value.copy_from_slice(bytes);
++    UntypedVal::from_bits64(u64::from_le_bytes(value))
++}
++
++/// Returns the function local constant value that `serialize_const` serialized as `bytes`.
++#[cfg(feature = "simd")]
++fn deserialize_const(bytes: &[u8]) -> UntypedVal {
++    let mut value = [0x00_u8; SERIALIZED_CONST_SIZE];
++    value.copy_from_slice(bytes);
++    UntypedVal::from(crate::V128::from(u128::from_le_bytes(value)))
++}
++
++/// Returns the `u32` that `bytes` start with and the rest of `bytes`.
++///
++/// # Errors
++///
++/// If `bytes` are shorter than a `u32`.
++pub(crate) fn read_u32(bytes: &[u8]) -> Result<(u32, &[u8]), SerializationError> {
++    let Some((value, rest)) = bytes.split_first_chunk() else {
++        return Err(SerializationError::MalformedBytes);
++    };
++    Ok((u32::from_le_bytes(*value), rest))
+ }
+ 
+ /// A shared reference to the data of a [`EngineFunc`].
+@@ -846,8 +1045,12 @@ pub struct CompiledFuncRef<'a> {
+ impl<'a> From<&'a CompiledFuncEntity> for CompiledFuncRef<'a> {
+     #[inline]
+     fn from(func: &'a CompiledFuncEntity) -> Self {
++        let instrs = match &func.instrs {
++            CompiledFuncInstrs::Owned(instrs) => instrs.as_ref(),
++            CompiledFuncInstrs::Serialized(instrs) => Pin::new(*instrs),
++        };
+         Self {
+-            instrs: func.instrs.as_ref(),
++            instrs,
+             consts: func.consts.as_ref(),
+             len_stack_slots: func.len_stack_slots,
+         }
+@@ -872,4 +1075,28 @@ impl<'a> CompiledFuncRef<'a> {
+     pub fn consts(&self) -> &'a [UntypedVal] {
+         self.consts.get_ref()
+     }
++
++    /// Appends the serialized [`EngineFunc`] to `buffer`.
++    ///
++    /// # Note
++    ///
++    /// - The serialized [`EngineFunc`] consists of the number of its stack slots,
++    ///   [`Op`]s and constant values, its [`Op`]s as they are in memory and its constant values.
++    /// - The serialized [`EngineFunc`] is a multiple of the alignment of [`Op`] long
++    ///   so that the [`Op`]s of serialized functions following each other stay aligned.
++    pub fn serialize(&self, buffer: &mut Vec<u8>) {
++        let len_instrs = u32::try_from(self.instrs().len())
++            .unwrap_or_else(|_| panic!("compiled function has too many instructions"));
++        let len_consts = u32::try_from(self.consts().len())
++            .unwrap_or_else(|_| panic!("compiled function has too many constant values"));
++        buffer.extend_from_slice(&u32::from(self.len_stack_slots()).to_le_bytes());
++        buffer.extend_from_slice(&len_instrs.to_le_bytes());
++        buffer.extend_from_slice(&len_consts.to_le_bytes());
++        for instr in self.instrs() {
++            buffer.extend_from_slice(&instr.to_bytes());
++        }
++        for value in self.consts() {
++            buffer.extend_from_slice(&serialize_const(*value));
++        }
++    }
+ }
+diff --git a/src/engine/mod.rs b/src/engine/mod.rs
+index 4149a47..9c4b889 100644
+--- a/src/engine/mod.rs
++++ b/src/engine/mod.rs
+@@ -8,13 +8,24 @@ mod func_types;
+ mod limits;
+ mod resumable;
+ mod traits;
++#[cfg(feature = "translate")]
+ mod translator;
++#[cfg(not(feature = "translate"))]
++mod translator {
++    mod error;
++
++    pub use self::error::TranslationError;
++}
+ mod utils;
+ 
+ pub(crate) use self::{
+     block_type::BlockType,
++    code_map::read_u32,
+     executor::Stack,
+     func_types::DedupFuncType,
++};
++#[cfg(feature = "translate")]
++pub(crate) use self::{
+     translator::{
+         FuncTranslationDriver,
+         FuncTranslator,
+@@ -189,6 +200,7 @@ impl Engine {
+         self.inner.alloc_funcs(amount)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Translates the Wasm function using the [`Engine`].
+     ///
+     /// - Uses the internal [`Config`] to drive the function translation as mandated.
+@@ -226,21 +238,25 @@ impl Engine {
+         )
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
+     pub(crate) fn get_translation_allocs(&self) -> FuncTranslatorAllocations {
+         self.inner.get_translation_allocs()
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns reusable [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] from the [`Engine`].
+     pub(crate) fn get_allocs(&self) -> (FuncTranslatorAllocations, FuncValidatorAllocations) {
+         self.inner.get_allocs()
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Recycles the given [`FuncTranslatorAllocations`] in the [`Engine`].
+     pub(crate) fn recycle_translation_allocs(&self, allocs: FuncTranslatorAllocations) {
+         self.inner.recycle_translation_allocs(allocs)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Recycles the given [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] in the [`Engine`].
+     pub(crate) fn recycle_allocs(
+         &self,
+@@ -250,6 +266,7 @@ impl Engine {
+         self.inner.recycle_allocs(translation, validation)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Initializes the uninitialized [`EngineFunc`] for the [`Engine`].
+     ///
+     /// # Note
+@@ -273,6 +290,62 @@ impl Engine {
+             .init_lazy_func(func_idx, func, bytes, module, func_to_validate)
+     }
+ 
++    /// Initializes the uninitialized [`EngineFunc`] for the [`Engine`] from its serialized translation.
++    ///
++    /// # Note
++    ///
++    /// The serialized translation is deserialized when the function is called the first time.
++    ///
++    /// # Panics
++    ///
++    /// - If `func` is an invalid [`EngineFunc`] reference for this [`CodeMap`].
++    /// - If `func` refers to an already initialized [`EngineFunc`].
++    pub(crate) fn init_serialized_func(&self, func: EngineFunc, bytes: &'static [u8]) {
++        self.inner.code_map.init_func_as_serialized(func, bytes)
++    }
++
++    #[cfg(feature = "translate")]
++    /// Appends the serialized translation of `func` to `buffer`.
++    ///
++    /// # Note
++    ///
++    /// Translates `func` first if it has not yet been translated.
++    ///
++    /// # Errors
++    ///
++    /// If translation or Wasm validation of `func` failed.
++    pub(crate) fn serialize_func(
++        &self,
++        func: EngineFunc,
++        buffer: &mut Vec<u8>,
++    ) -> Result<(), Error> {
++        self.inner.code_map.get(None, func)?.serialize(buffer);
++        Ok(())
++    }
++
++    #[cfg(feature = "translate")]
++    /// Validates and translates the `wasm` module and returns its serialized translation.
++    ///
++    /// # Note
++    ///
++    /// - The returned bytes can be used to create a [`Module`] via [`Module::deserialize`]
++    ///   without validating or translating the Wasm module again.
++    /// - The `wasm` module is translated in a new [`Engine`] with the same [`Config`].
++    ///
++    /// # Errors
++    ///
++    /// - If the Wasm bytecode is malformed or fails to validate.
++    /// - If the Wasm bytecode violates restrictions set in the [`Config`].
++    /// - If Wasmi cannot translate the Wasm bytecode.
++    /// - If the translated Wasm module is too large to be serialized.
++    ///
++    /// [`Module`]: crate::Module
++    /// [`Module::deserialize`]: crate::Module::deserialize
++    pub fn precompile_module(&self, wasm: &[u8]) -> Result<Vec<u8>, Error> {
++        let engine = Engine::new(self.config());
++        crate::Module::new(&engine, wasm)?.serialize(wasm)
++    }
++
+     /// Executes the given [`Func`] with parameters `params`.
+     ///
+     /// Stores the execution result into `results` upon a successful execution.
+@@ -435,6 +508,7 @@ pub struct EngineInner {
+     /// The engine deduplicates function types to make the equality
+     /// comparison very fast. This helps to speed up indirect calls.
+     func_types: RwLock<FuncTypeRegistry>,
++    #[cfg(feature = "translate")]
+     /// Reusable allocation stacks.
+     allocs: Mutex<ReusableAllocationStack>,
+     /// Reusable engine stacks for Wasm execution.
+@@ -445,6 +519,7 @@ pub struct EngineInner {
+     stacks: Mutex<EngineStacks>,
+ }
+ 
++#[cfg(feature = "translate")]
+ /// Stacks to hold and distribute reusable allocations.
+ pub struct ReusableAllocationStack {
+     /// The maximum height of each of the allocations stacks.
+@@ -455,6 +530,7 @@ pub struct ReusableAllocationStack {
+     validation: Vec<FuncValidatorAllocations>,
+ }
+ 
++#[cfg(feature = "translate")]
+ impl Default for ReusableAllocationStack {
+     fn default() -> Self {
+         Self {
+@@ -465,6 +541,7 @@ impl Default for ReusableAllocationStack {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl core::fmt::Debug for ReusableAllocationStack {
+     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+         f.debug_struct("ReusableAllocationStack")
+@@ -477,6 +554,7 @@ impl core::fmt::Debug for ReusableAllocationStack {
+     }
+ }
+ 
++#[cfg(feature = "translate")]
+ impl ReusableAllocationStack {
+     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
+     pub fn get_translation_allocs(&mut self) -> FuncTranslatorAllocations {
+@@ -551,6 +629,7 @@ impl EngineInner {
+             config: config.clone(),
+             code_map: CodeMap::new(config),
+             func_types: RwLock::new(FuncTypeRegistry::new(engine_idx)),
++            #[cfg(feature = "translate")]
+             allocs: Mutex::new(ReusableAllocationStack::default()),
+             stacks: Mutex::new(EngineStacks::new(&config.stack)),
+         }
+@@ -586,6 +665,7 @@ impl EngineInner {
+         self.code_map.alloc_funcs(amount)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Translates the Wasm function using the [`Engine`].
+     ///
+     /// For more information read [`Engine::translate_func`].
+@@ -642,16 +722,19 @@ impl EngineInner {
+         Ok(())
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns reusable [`FuncTranslatorAllocations`] from the [`Engine`].
+     fn get_translation_allocs(&self) -> FuncTranslatorAllocations {
+         self.allocs.lock().get_translation_allocs()
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns reusable [`FuncValidatorAllocations`] from the [`Engine`].
+     fn get_validation_allocs(&self) -> FuncValidatorAllocations {
+         self.allocs.lock().get_validation_allocs()
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns reusable [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] from the [`Engine`].
+     ///
+     /// # Note
+@@ -666,16 +749,19 @@ impl EngineInner {
+         (translation, validation)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Recycles the given [`FuncTranslatorAllocations`] in the [`Engine`].
+     fn recycle_translation_allocs(&self, allocs: FuncTranslatorAllocations) {
+         self.allocs.lock().recycle_translation_allocs(allocs)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Recycles the given [`FuncValidatorAllocations`] in the [`Engine`].
+     fn recycle_validation_allocs(&self, allocs: FuncValidatorAllocations) {
+         self.allocs.lock().recycle_validation_allocs(allocs)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Recycles the given [`FuncTranslatorAllocations`] and [`FuncValidatorAllocations`] in the [`Engine`].
+     ///
+     /// # Note
+@@ -708,6 +794,7 @@ impl EngineInner {
+             .init_func_as_compiled(engine_func, func_entity)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Initializes the uninitialized [`EngineFunc`] for the [`Engine`].
+     ///
+     /// # Note
+diff --git a/src/error.rs b/src/error.rs
+index 915830a..7eefa7b 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -8,7 +8,7 @@ use super::errors::{
+ };
+ use crate::{
+     engine::{ResumableError, ResumableHostTrapError, ResumableOutOfFuelError, TranslationError},
+-    module::ReadError,
++    module::{ReadError, SerializationError},
+     TrapCode,
+ };
+ use alloc::{boxed::Box, string::String};
+@@ -219,6 +219,8 @@ pub enum ErrorKind {
+     Func(FuncError),
+     /// Encountered when there is a problem with the Wasm input stream.
+     Read(ReadError),
++    /// Encountered when serializing or deserializing a [`Module`](crate::Module).
++    Serialization(SerializationError),
+     /// Encountered when there is a Wasm parsing or validation error.
+     Wasm(WasmError),
+     /// Encountered when there is a Wasm to Wasmi translation error.
+@@ -303,6 +305,7 @@ impl Display for ErrorKind {
+             Self::Instantiation(error) => Display::fmt(error, f),
+             Self::Fuel(error) => Display::fmt(error, f),
+             Self::Read(error) => Display::fmt(error, f),
++            Self::Serialization(error) => Display::fmt(error, f),
+             Self::Wasm(error) => Display::fmt(error, f),
+             Self::Translation(error) => Display::fmt(error, f),
+             Self::Limits(error) => Display::fmt(error, f),
+@@ -338,6 +341,7 @@ impl_from! {
+     impl From<TranslationError> for Error::Translation;
+     impl From<WasmError> for Error::Wasm;
+     impl From<ReadError> for Error::Read;
++    impl From<SerializationError> for Error::Serialization;
+     impl From<FuelError> for Error::Fuel;
+     impl From<FuncError> for Error::Func;
+     impl From<EnforcedLimitsError> for Error::Limits;
+diff --git a/src/lib.rs b/src/lib.rs
+index 235aa45..aac89f8 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -80,6 +80,11 @@
+     clippy::items_after_statements
+ )]
+ #![recursion_limit = "1000"]
++// Note: without translation, the items that only translation uses are unused.
++#![cfg_attr(
++    not(feature = "translate"),
++    allow(dead_code, unused_imports, unused_variables)
++)]
+ 
+ extern crate alloc;
+ #[cfg(feature = "std")]
+@@ -152,7 +157,7 @@ pub mod errors {
+         func::FuncError,
+         ir::Error as IrError,
+         linker::LinkerError,
+-        module::{InstantiationError, ReadError},
++        module::{InstantiationError, ReadError, SerializationError},
+     };
+     pub use wasmi_core::{FuelError, GlobalError, HostError, MemoryError, TableError};
+ }
+diff --git a/src/module/mod.rs b/src/module/mod.rs
+index 6c3071b..5f0fbda 100644
+--- a/src/module/mod.rs
++++ b/src/module/mod.rs
+@@ -9,6 +9,7 @@ mod init_expr;
+ mod instantiate;
+ mod parser;
+ mod read;
++mod serialization;
+ pub(crate) mod utils;
+ 
+ use self::{
+@@ -26,6 +27,7 @@ pub use self::{
+     import::{FuncTypeIdx, ImportName},
+     instantiate::InstantiationError,
+     read::{Read, ReadError},
++    serialization::SerializationError,
+ };
+ pub(crate) use self::{
+     data::{DataSegment, DataSegments, InitDataSegment, PassiveDataSegmentBytes},
+@@ -207,6 +209,7 @@ impl ModuleImports {
+ }
+ 
+ impl Module {
++    #[cfg(feature = "translate")]
+     /// Creates a new Wasm [`Module`] from the given Wasm bytecode buffer.
+     ///
+     /// # Note
+@@ -230,6 +233,7 @@ impl Module {
+         ModuleParser::new(engine).parse_buffered(wasm)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Creates a new Wasm [`Module`] from the given Wasm bytecode buffer.
+     ///
+     /// # Note
+@@ -265,6 +269,7 @@ impl Module {
+         &self.inner.header.inner
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Validates `wasm` as a WebAssembly binary given the configuration (via [`Config`]) in `engine`.
+     ///
+     /// This function performs Wasm validation of the binary input WebAssembly module and
+diff --git a/src/module/parser/buffered.rs b/src/module/parser/buffered.rs
+index c9b1ab2..4041289 100644
+--- a/src/module/parser/buffered.rs
++++ b/src/module/parser/buffered.rs
+@@ -1,8 +1,11 @@
+ use super::{ModuleBuilder, ModuleParser};
+ use crate::{Error, Module};
+-use wasmparser::{Chunk, Payload, Validator};
++use wasmparser::{Chunk, Payload};
++#[cfg(feature = "translate")]
++use wasmparser::Validator;
+ 
+ impl ModuleParser {
++    #[cfg(feature = "translate")]
+     /// Starts parsing and validating the Wasm bytecode stream.
+     ///
+     /// Returns the compiled and validated Wasm [`Module`] upon success.
+@@ -94,6 +97,11 @@ impl ModuleParser {
+         module: &mut ModuleBuilder,
+     ) -> Result<(), Error> {
+         loop {
++            if self.without_code && buffer.is_empty() {
++                // Note: the Wasm parser expects a code section after all other sections
++                //       if the Wasm module has functions.
++                break;
++            }
+             let (consumed, payload) = self.next_payload(buffer)?;
+             match payload {
+                 Payload::Version {
+@@ -111,9 +119,11 @@ impl ModuleParser {
+                 Payload::StartSection { func, range } => self.process_start(func, range, module),
+                 Payload::ElementSection(section) => self.process_element(section, module),
+                 Payload::DataCountSection { count, range } => self.process_data_count(count, range),
++                #[cfg(feature = "translate")]
+                 Payload::CodeSectionStart { count, range, size } => {
+                     self.process_code_start(count, range, size)
+                 }
++                #[cfg(feature = "translate")]
+                 Payload::CodeSectionEntry(func_body) => {
+                     let bytes = func_body.as_bytes();
+                     self.process_code_entry(func_body, bytes, module)
+diff --git a/src/module/parser/mod.rs b/src/module/parser/mod.rs
+index b76746b..758e79a 100644
+--- a/src/module/parser/mod.rs
++++ b/src/module/parser/mod.rs
+@@ -23,7 +23,6 @@ use wasmparser::{
+     ElementSectionReader,
+     Encoding,
+     ExportSectionReader,
+-    FunctionBody,
+     FunctionSectionReader,
+     GlobalSectionReader,
+     ImportSectionReader,
+@@ -32,8 +31,9 @@ use wasmparser::{
+     Payload,
+     TableSectionReader,
+     TypeSectionReader,
+-    Validator,
+ };
++#[cfg(feature = "translate")]
++use wasmparser::{FunctionBody, Validator};
+ 
+ #[cfg(doc)]
+ use crate::Module;
+@@ -45,11 +45,19 @@ pub struct ModuleParser {
+     /// The engine used for translation.
+     engine: Engine,
+     /// The Wasm validator used throughout stream parsing.
++    #[cfg(feature = "translate")]
+     validator: Option<Validator>,
+     /// The underlying Wasm parser.
+     parser: WasmParser,
+     /// The number of compiled or processed functions.
+     engine_funcs: u32,
++    /// Whether the parsed Wasm module has no code section.
++    ///
++    /// # Note
++    ///
++    /// This is the case for deserialized modules whose functions are initialized
++    /// from their serialized translations instead of their Wasm function bodies.
++    without_code: bool,
+ }
+ 
+ impl ModuleParser {
+@@ -59,14 +67,25 @@ impl ModuleParser {
+         parser.set_features(engine.config().wasm_features());
+         Self {
+             engine: engine.clone(),
++            #[cfg(feature = "translate")]
+             validator: None,
+             parser,
+             engine_funcs: 0,
++            without_code: false,
++        }
++    }
++
++    /// Creates a new [`ModuleParser`] for a Wasm module without a code section.
++    pub fn new_without_code(engine: &Engine) -> Self {
++        Self {
++            without_code: true,
++            ..Self::new(engine)
+         }
+     }
+ 
+     /// Processes the end of the Wasm binary.
+     fn process_end(&mut self, offset: usize) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             // This only checks if the number of code section entries and data segments match
+             // their expected numbers thus we must avoid this check in header-only mode because
+@@ -83,6 +102,7 @@ impl ModuleParser {
+         encoding: Encoding,
+         range: Range<usize>,
+     ) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.version(num, encoding, &range)?;
+         }
+@@ -103,6 +123,7 @@ impl ModuleParser {
+         section: TypeSectionReader,
+         module: &mut ModuleBuilder,
+     ) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.type_section(&section)?;
+         }
+@@ -143,6 +164,7 @@ impl ModuleParser {
+         section: ImportSectionReader,
+         module: &mut ModuleBuilder,
+     ) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.import_section(&section)?;
+         }
+@@ -172,6 +194,7 @@ impl ModuleParser {
+                 return Err(Error::from(EnforcedLimitsError::TooManyFunctions { limit }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.function_section(&section)?;
+         }
+@@ -201,6 +224,7 @@ impl ModuleParser {
+                 return Err(Error::from(EnforcedLimitsError::TooManyTables { limit }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.table_section(&section)?;
+         }
+@@ -234,6 +258,7 @@ impl ModuleParser {
+                 return Err(Error::from(EnforcedLimitsError::TooManyMemories { limit }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.memory_section(&section)?;
+         }
+@@ -263,6 +288,7 @@ impl ModuleParser {
+                 return Err(Error::from(EnforcedLimitsError::TooManyGlobals { limit }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.global_section(&section)?;
+         }
+@@ -287,6 +313,7 @@ impl ModuleParser {
+         section: ExportSectionReader,
+         module: &mut ModuleBuilder,
+     ) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.export_section(&section)?;
+         }
+@@ -315,6 +342,7 @@ impl ModuleParser {
+         range: Range<usize>,
+         module: &mut ModuleBuilder,
+     ) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.start_section(func, &range)?;
+         }
+@@ -348,6 +376,7 @@ impl ModuleParser {
+                 }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.element_section(&section)?;
+         }
+@@ -372,6 +401,7 @@ impl ModuleParser {
+                 }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.data_count_section(count, &range)?;
+         }
+@@ -399,6 +429,7 @@ impl ModuleParser {
+                 }));
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             // Note: data section does not belong to the Wasm module header.
+             //
+@@ -412,6 +443,7 @@ impl ModuleParser {
+         Ok(())
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Process module code section start.
+     ///
+     /// # Note
+@@ -447,12 +479,14 @@ impl ModuleParser {
+                 }
+             }
+         }
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             validator.code_section_start(&range)?;
+         }
+         Ok(())
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Returns the next `FuncIdx` for processing of its function body.
+     fn next_func(&mut self, module: &ModuleBuilder) -> (FuncIdx, EngineFunc) {
+         let index = self.engine_funcs;
+@@ -466,6 +500,7 @@ impl ModuleParser {
+         (func_idx, engine_func)
+     }
+ 
++    #[cfg(feature = "translate")]
+     /// Process a single module code section entry.
+     ///
+     /// # Note
+@@ -510,6 +545,7 @@ impl ModuleParser {
+ 
+     /// Process an unexpected, unsupported or malformed Wasm module section payload.
+     fn process_invalid_payload(&mut self, payload: Payload<'_>) -> Result<(), Error> {
++        #[cfg(feature = "translate")]
+         if let Some(validator) = &mut self.validator {
+             if let Err(error) = validator.payload(&payload) {
+                 return Err(Error::from(error));
+diff --git a/src/module/serialization.rs b/src/module/serialization.rs
+new file mode 100644
+index 0000000..faac27d
+--- /dev/null
++++ b/src/module/serialization.rs
+@@ -0,0 +1,260 @@
++use super::{parser::ModuleParser, Module};
++use crate::{engine::read_u32, ir, ir::Op, Config, Engine, Error};
++use alloc::{format, vec::Vec};
++use core::{
++    error::Error as CoreError,
++    fmt::{self, Display},
++    iter,
++    mem::{align_of, size_of},
++};
++use wasmparser::BinaryReader;
++
++/// Errors that may occur upon serializing or deserializing a [`Module`].
++#[derive(Debug, PartialEq, Eq)]
++pub enum SerializationError {
++    /// The translated Wasm module is too large to be serialized.
++    ModuleTooLarge,
++    /// The bytes are not a serialized [`Module`].
++    MalformedBytes,
++    /// The bytes are not aligned to the instructions of the serialized [`Module`].
++    UnalignedBytes,
++    /// The [`Module`] was serialized by another Wasmi version or for an [`Engine`] that
++    /// translates Wasm differently.
++    IncompatibleEngine,
++    /// The [`Engine`] already has the functions of other modules.
++    EngineNotEmpty,
++}
++
++impl CoreError for SerializationError {}
++
++impl Display for SerializationError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::ModuleTooLarge => write!(f, "module is too large to be serialized"),
++            Self::MalformedBytes => write!(f, "encountered malformed serialized module"),
++            Self::UnalignedBytes => write!(f, "serialized module is not aligned"),
++            Self::IncompatibleEngine => {
++                write!(
++                    f,
++                    "serialized module is incompatible with the Wasmi version or engine config"
++                )
++            }
++            Self::EngineNotEmpty => {
++                write!(
++                    f,
++                    "serialized modules can only be deserialized in an empty engine"
++                )
++            }
++        }
++    }
++}
++
++/// The version of the format of serialized [`Module`]s.
++///
++/// # Note
++///
++/// Must be incremented whenever the format changes without the Wasmi version changing.
++const FORMAT_VERSION: u32 = 1;
++/// The length of the magic number and version that every Wasm module starts with.
++const WASM_PREAMBLE_LEN: usize = 8;
++/// The identifier of a Wasm custom section.
++const CUSTOM_SECTION_ID: u8 = 0;
++/// The identifier of the Wasm code section.
++const CODE_SECTION_ID: u8 = 10;
++
++// Note: the `u32` fields of serialized modules keep the [`Op`]s that follow them aligned.
++const _: () = assert!(size_of::<u32>() % align_of::<Op>() == 0);
++
++impl Module {
++    #[cfg(feature = "translate")]
++    /// Returns the serialized `self` that was created from `wasm`.
++    ///
++    /// # Note
++    ///
++    /// A serialized [`Module`] consists of:
++    ///
++    /// - The length of the [`header`] of the [`Engine`] of `self` as `u32`.
++    /// - The [`header`], padded to the alignment of [`Op`].
++    /// - The length of `wasm` without its code and custom sections as `u32`.
++    /// - The `wasm` without its code and custom sections, padded to the alignment of [`Op`].
++    /// - The number of functions of `self` as `u32`.
++    /// - The end offset of each serialized function as `u32`.
++    /// - The serialized functions.
++    ///
++    /// # Errors
++    ///
++    /// - If translation of a function of `self` failed.
++    /// - If `self` is too large to be serialized.
++    ///
++    /// # Panics
++    ///
++    /// If `self` is not the first [`Module`] of its [`Engine`].
++    pub(crate) fn serialize(&self, wasm: &[u8]) -> Result<Vec<u8>, Error> {
++        let engine_funcs = self.module_header().engine_funcs;
++        assert!(
++            engine_funcs.is_first(),
++            "serialized modules must be the first module of their engine"
++        );
++        let wasm = without_code_and_custom_sections(wasm)?;
++        let mut bytes = Vec::new();
++        push_padded(&mut bytes, &header(self.engine().config()))?;
++        push_padded(&mut bytes, &wasm)?;
++        push_u32(&mut bytes, engine_funcs.len() as usize)?;
++        let ends = bytes.len();
++        bytes.resize(ends + engine_funcs.len() as usize * size_of::<u32>(), 0x00);
++        let funcs = bytes.len();
++        for (n, func) in engine_funcs.iter().enumerate() {
++            self.engine().serialize_func(func, &mut bytes)?;
++            let end = u32::try_from(bytes.len() - funcs)
++                .map_err(|_| SerializationError::ModuleTooLarge)?;
++            let end_offset = ends + n * size_of::<u32>();
++            bytes[end_offset..][..size_of::<u32>()].copy_from_slice(&end.to_le_bytes());
++        }
++        Ok(bytes)
++    }
++
++    /// Creates a new Wasm [`Module`] from its serialized `bytes`.
++    ///
++    /// # Note
++    ///
++    /// - Serialized [`Module`]s are created via [`Engine::precompile_module`].
++    /// - The functions of the [`Module`] are deserialized when they are called the first time.
++    /// - The deserialized functions refer to `bytes` instead of copying them. Thus `bytes` must be
++    ///   aligned to the instructions of the functions.
++    /// - Serialized [`Module`]s of other Wasmi versions or of an [`Engine`] that translates Wasm
++    ///   differently than `engine` are rejected.
++    ///
++    /// # Safety
++    ///
++    /// - `bytes` must have been returned by [`Engine::precompile_module`] unchanged.
++    /// - Violating the above rule is undefined behavior.
++    ///
++    /// # Errors
++    ///
++    /// - If `bytes` are not a serialized [`Module`] or are not aligned.
++    /// - If `bytes` were serialized by another Wasmi version or for an incompatible [`Engine`].
++    /// - If `engine` already has the functions of other modules.
++    pub unsafe fn deserialize(engine: &Engine, bytes: &'static [u8]) -> Result<Self, Error> {
++        if bytes.as_ptr().align_offset(align_of::<Op>()) != 0 {
++            return Err(Error::from(SerializationError::UnalignedBytes));
++        }
++        let (serialized_header, rest) = read_padded(bytes)?;
++        if serialized_header != header(engine.config()) {
++            return Err(Error::from(SerializationError::IncompatibleEngine));
++        }
++        let (wasm, rest) = read_padded(rest)?;
++        let (len_funcs, rest) = read_u32(rest)?;
++        let Some((mut ends, funcs)) = rest.split_at_checked(len_funcs as usize * size_of::<u32>())
++        else {
++            return Err(Error::from(SerializationError::MalformedBytes));
++        };
++        // Safety: the caller guarantees that `bytes` have been created from a valid Wasm module.
++        let module =
++            unsafe { ModuleParser::new_without_code(engine).parse_buffered_unchecked(wasm)? };
++        let engine_funcs = module.module_header().engine_funcs;
++        if !engine_funcs.is_first() {
++            return Err(Error::from(SerializationError::EngineNotEmpty));
++        }
++        if engine_funcs.len() != len_funcs {
++            return Err(Error::from(SerializationError::MalformedBytes));
++        }
++        let mut start = 0;
++        for func in engine_funcs.iter() {
++            let (end, rest) = read_u32(ends)?;
++            ends = rest;
++            let Some(func_bytes) = funcs.get(start..end as usize) else {
++                return Err(Error::from(SerializationError::MalformedBytes));
++            };
++            engine.init_serialized_func(func, func_bytes);
++            start = end as usize;
++        }
++        Ok(module)
++    }
++}
++
++/// Appends `value` as `u32` to `bytes`.
++///
++/// # Errors
++///
++/// If `value` does not fit into a `u32`.
++fn push_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), SerializationError> {
++    let value = u32::try_from(value).map_err(|_| SerializationError::ModuleTooLarge)?;
++    bytes.extend_from_slice(&value.to_le_bytes());
++    Ok(())
++}
++
++/// Appends the length of `data` as `u32` and `data` padded to the alignment of [`Op`] to `bytes`.
++///
++/// # Errors
++///
++/// If the length of `data` does not fit into a `u32`.
++fn push_padded(bytes: &mut Vec<u8>, data: &[u8]) -> Result<(), SerializationError> {
++    push_u32(bytes, data.len())?;
++    bytes.extend_from_slice(data);
++    let padding = data.len().next_multiple_of(align_of::<Op>()) - data.len();
++    bytes.extend(iter::repeat_n(0x00, padding));
++    Ok(())
++}
++
++/// Reads the data appended by [`push_padded`] from `bytes`.
++///
++/// Returns the data and the bytes that follow it.
++///
++/// # Errors
++///
++/// If `bytes` end before the data.
++fn read_padded(bytes: &[u8]) -> Result<(&[u8], &[u8]), SerializationError> {
++    let (len, rest) = read_u32(bytes)?;
++    let padded_len = (len as usize).next_multiple_of(align_of::<Op>());
++    match (rest.get(..len as usize), rest.get(padded_len..)) {
++        (Some(data), Some(rest)) => Ok((data, rest)),
++        _ => Err(SerializationError::MalformedBytes),
++    }
++}
++
++/// Returns the header of the [`Module`]s serialized for an [`Engine`] with `config`.
++///
++/// # Note
++///
++/// The [`Op`]s of serialized [`Module`]s are only meaningful to the same Wasmi version on the
++/// same target and to [`Engine`]s with a [`Config`] that translates Wasm the same way.
++/// The header identifies all of these so that incompatible [`Module`]s are rejected.
++fn header(config: &Config) -> Vec<u8> {
++    format!(
++        "wasmi {} serialized module, format: {FORMAT_VERSION}, wasmi_ir: {}, simd: {}, \
++        little endian: {}, wasm features: {:#x}, fuel costs: {:?}",
++        env!("CARGO_PKG_VERSION"),
++        ir::VERSION,
++        cfg!(feature = "simd"),
++        cfg!(target_endian = "little"),
++        config.wasm_features().bits(),
++        config.get_consume_fuel().then(|| config.fuel_costs()),
++    )
++    .into_bytes()
++}
++
++/// Returns the `wasm` module without its code and custom sections.
++///
++/// # Note
++///
++/// Serialized modules replace the code section with the serialized function translations
++/// and do not need custom sections since they do not affect execution.
++///
++/// # Errors
++///
++/// If `wasm` is malformed.
++fn without_code_and_custom_sections(wasm: &[u8]) -> Result<Vec<u8>, Error> {
++    let mut reader = BinaryReader::new(wasm, 0);
++    reader.read_bytes(WASM_PREAMBLE_LEN)?;
++    let mut bytes = wasm[..WASM_PREAMBLE_LEN].to_vec();
++    while !reader.eof() {
++        let start = reader.original_position();
++        let id = reader.read_u8()?;
++        let len = reader.read_var_u32()?;
++        reader.read_bytes(len as usize)?;
++        if id != CODE_SECTION_ID && id != CUSTOM_SECTION_ID {
++            bytes.extend_from_slice(&wasm[start..reader.original_position()]);
++        }
++    }
++    Ok(bytes)
++}

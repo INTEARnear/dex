@@ -504,7 +504,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"

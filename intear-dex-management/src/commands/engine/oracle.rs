@@ -6,7 +6,7 @@ use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
 use near_primitives::gas::Gas;
-use near_primitives::types::AccountId;
+use near_primitives::types::{AccountId, Finality};
 use near_sdk::{NearToken, PublicKeyHandle};
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
@@ -465,7 +465,7 @@ impl RemoveKeyContext {
     ) -> color_eyre::eyre::Result<Self> {
         let receiver_id: AccountId = scope.receiver_account_id.clone().into();
         // The engine removes the key that signs, which is a key of the engine's own account
-        Ok(Self(planning::write_action_context(
+        let mut action_context = planning::write_action_context(
             &previous_context,
             ENGINE_ACCOUNT_ID.to_owned(),
             move |preflight| {
@@ -495,12 +495,75 @@ impl RemoveKeyContext {
                     deploy_code: None,
                 })
             },
-        )))
+        );
+        // Each way near-cli signs here calls this with the key it's about to sign with, except
+        // sign-later, which only prints the transaction for whoever signs it
+        action_context.on_before_signing_callback =
+            std::sync::Arc::new(|unsigned_transaction, network_config| {
+                let block_reference =
+                    engine::engine_view_block(network_config, &Finality::Final.into())?;
+                ensure_signer_is_oracle_key(
+                    &unsigned_transaction.public_key,
+                    &engine::oracle_keys(network_config, &block_reference)?,
+                )
+            });
+        Ok(Self(action_context))
+    }
+}
+
+/// `remove_oracle_key` deletes whichever key signs, so signing it with any
+/// other key of the engine's account, such as a full-access one, deletes that key
+fn ensure_signer_is_oracle_key(
+    signer_public_key: &near_crypto::PublicKey,
+    oracle_keys: &[engine::OracleKey],
+) -> color_eyre::eyre::Result<()> {
+    let signer_public_key = signer_public_key.to_string();
+    if oracle_keys
+        .iter()
+        .any(|oracle_key| oracle_key.public_key.to_string() == signer_public_key)
+    {
+        Ok(())
+    } else {
+        Err(PreflightError::SignerNotAnOracleKey { signer_public_key }.into_report())
     }
 }
 
 impl From<RemoveKeyContext> for ActionContext {
     fn from(item: RemoveKeyContext) -> Self {
         item.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use near_crypto::{KeyType, SecretKey};
+
+    use super::*;
+
+    fn oracle_key_of(secret_key: &SecretKey) -> engine::OracleKey {
+        engine::OracleKey {
+            public_key: secret_key.public_key().into(),
+            gas_balance: NearToken::from_near(1),
+            nonces: 4,
+        }
+    }
+
+    #[test]
+    fn only_an_oracle_key_may_sign_its_removal() {
+        let oracle_secret_key = SecretKey::from_random(KeyType::ED25519);
+        let full_access_secret_key = SecretKey::from_random(KeyType::ED25519);
+        let oracle_keys = [oracle_key_of(&oracle_secret_key)];
+
+        ensure_signer_is_oracle_key(&oracle_secret_key.public_key(), &oracle_keys).unwrap();
+        let refusal =
+            ensure_signer_is_oracle_key(&full_access_secret_key.public_key(), &oracle_keys)
+                .unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .contains(&full_access_secret_key.public_key().to_string()),
+            "{refusal}"
+        );
+        assert!(ensure_signer_is_oracle_key(&oracle_secret_key.public_key(), &[]).is_err());
     }
 }

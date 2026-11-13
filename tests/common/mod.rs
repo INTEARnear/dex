@@ -36,6 +36,7 @@ use tokio::sync::OnceCell;
 pub struct CompiledWasms {
     pub contract_wasm: Vec<u8>,
     pub chunked_upgrade_wasm: Vec<u8>,
+    pub translator_wasm: Vec<u8>,
     pub test_dex_wasm: Vec<u8>,
     pub otc_dex_wasm: Vec<u8>,
     pub xyk_dex_wasm: Vec<u8>,
@@ -108,6 +109,30 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             )
             .unwrap();
 
+            println!("Compiling intear-dex-translator");
+            let translator_target_directory = target_directory.join("translator");
+            assert!(
+                Command::new("cargo")
+                    .current_dir(workspace_root)
+                    .env("CARGO_TARGET_DIR", &translator_target_directory)
+                    .args([
+                        "near",
+                        "build",
+                        "non-reproducible-wasm",
+                        "--manifest-path",
+                        "translator/Cargo.toml",
+                    ])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let translator_wasm = std::fs::read(
+                translator_target_directory
+                    .join("near/intear_dex_translator/intear_dex_translator.wasm"),
+            )
+            .unwrap();
+
             let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
 
             let test_dex_wasm =
@@ -126,6 +151,7 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             CompiledWasms {
                 contract_wasm,
                 chunked_upgrade_wasm,
+                translator_wasm,
                 test_dex_wasm,
                 otc_dex_wasm,
                 xyk_dex_wasm,
@@ -626,6 +652,22 @@ async fn setup_test_environment_around_engine(
     config: TestSetupConfig,
 ) -> TestContext {
     let wasms = get_compiled_wasms().await;
+
+    let translator = dex_engine_contract
+        .as_account()
+        .create_subaccount("translator")
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    translator
+        .deploy(&wasms.translator_wasm)
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
 
     let (user1, user1_key) = create_user(&sandbox, "user1").await;
     let (user2, user2_key) = create_user(&sandbox, "user2").await;

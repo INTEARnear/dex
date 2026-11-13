@@ -274,12 +274,6 @@ impl DexEngine {
             request.0.len() <= MAX_ORACLE_REQUEST_BYTES,
             "Request is more than {MAX_ORACLE_REQUEST_BYTES} bytes"
         );
-        expect!(
-            !operations
-                .iter()
-                .any(|operation| matches!(operation, Operation::DeployDexCode { .. })),
-            "Dex code can't be deployed after an oracle request"
-        );
         let nonce = near_sdk::env::random_seed_array();
         let yield_id = oracle_yield_id(&oracle_key, near_sdk::env::sha256_array(&request.0), nonce);
         IntearDexEvent::OracleRequest {

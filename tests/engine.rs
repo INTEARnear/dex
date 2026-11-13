@@ -58,7 +58,7 @@ async fn test_minimal_flow() {
     let result = deployer
         .call(dex_engine_contract.id(), "dex_storage_deposit")
         .max_gas()
-        .deposit(engine_user_storage_deposit())
+        .deposit(engine_dex_storage_deposit())
         .args_json(json!({
             "dex_id": dex_id,
         }))
@@ -408,7 +408,7 @@ async fn test_dex_storage_actions() {
     let result = deployer
         .call(dex_engine_contract.id(), "dex_storage_deposit")
         .max_gas()
-        .deposit(engine_user_storage_deposit())
+        .deposit(engine_dex_storage_deposit())
         .args_json(json!({
             "dex_id": dex_id.clone(),
             "registration_only": true,
@@ -915,7 +915,7 @@ async fn test_execute_operations() {
     let result = user1
         .call(dex_engine_contract.id(), "dex_storage_deposit")
         .max_gas()
-        .deposit(engine_user_storage_deposit())
+        .deposit(engine_dex_storage_deposit())
         .args_json(json!({
             "dex_id": dex_id,
         }))
@@ -957,6 +957,19 @@ async fn test_execute_operations() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    let result = user1
+        .call(dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": dex_id_string,
+            "code_base64": BASE64_STANDARD.encode(dex_wasm),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
     let operations = vec![
         Operation::RegisterAssets {
             asset_ids: vec![AssetId::Near],
@@ -964,10 +977,6 @@ async fn test_execute_operations() {
                 deployer: user1.id().clone(),
                 id: dex_id_string.clone(),
             })),
-        },
-        Operation::DeployDexCode {
-            last_part_of_id: dex_id_string.clone(),
-            code_base64: Base64VecU8(dex_wasm.to_vec()),
         },
         Operation::DexCall {
             dex_id: DexId {
@@ -1613,7 +1622,7 @@ async fn test_operations_with_ft_deposit() {
     let result = user1
         .call(dex_engine_contract.id(), "dex_storage_deposit")
         .max_gas()
-        .deposit(engine_user_storage_deposit())
+        .deposit(engine_dex_storage_deposit())
         .args_json(json!({
             "dex_id": dex_id,
         }))
@@ -2960,14 +2969,12 @@ async fn test_withdraw_at_least() {
 async fn test_dex_code_deployment_permissions() {
     let TestContext {
         dex_engine_contract,
-        ft1,
         user1,
         user2,
         deployer,
         ..
     } = setup_test_environment_with_config(TestSetupConfig {
         register_assets_for_all: true,
-        ft_storage_deposit_for_all: true,
         ..Default::default()
     })
     .await;
@@ -3020,27 +3027,6 @@ async fn test_dex_code_deployment_permissions() {
         .await
         .unwrap();
     assert!(!result.is_success());
-
-    // Operations in ft_transfer_call are executed on behalf of the sender
-    // that the token contract claims, so they can't deploy code even if
-    // the claimed sender is trusted
-    let result = deployer
-        .call(ft1.id(), "ft_transfer_call")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "receiver_id": dex_engine_contract.id(),
-            "amount": U128(1),
-            "msg": near_sdk::serde_json::to_string(&vec![Operation::DeployDexCode {
-                last_part_of_id: "dex".to_string(),
-                code_base64: Base64VecU8(dex_wasm.to_vec()),
-            }])
-            .unwrap(),
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert!(format!("{result:?}").contains("Operation only available in execute_actions"));
 
     let result = deploy(&deployer).await.unwrap();
     assert_success(&result).unwrap();
@@ -3925,7 +3911,7 @@ async fn test_dex_code_view() {
     let result = deployer
         .call(dex_engine_contract.id(), "dex_storage_deposit")
         .max_gas()
-        .deposit(engine_user_storage_deposit())
+        .deposit(engine_dex_storage_deposit())
         .args_json(json!({
             "dex_id": dex_id,
         }))
@@ -4827,7 +4813,8 @@ async fn test_deploy_code_chunks() {
     })
     .await;
     let old_code = &get_compiled_wasms().await.contract_wasm;
-    let new_code = with_padding_section(old_code, 500_000);
+    // Over the 1.5 MiB that a transaction can have, whatever the size of the engine's code
+    let new_code = with_padding_section(old_code, 1_700_000 - old_code.len());
     assert!(new_code.len() > 1_572_864);
     let chunk_size = 700_000;
     let [first_chunk, second_chunk, last_chunk] =
@@ -5623,17 +5610,6 @@ async fn test_oracle() {
     assert!(format!("{result:?}").contains(&format!(
         "Request is more than {MAX_ORACLE_REQUEST_BYTES} bytes"
     )));
-    let result = execute_operations(vec![
-        oracle_request(request.clone()),
-        Operation::DeployDexCode {
-            last_part_of_id: "dex".to_string(),
-            code_base64: Base64VecU8(get_compiled_wasms().await.test_dex_wasm.clone()),
-        },
-    ])
-    .transact()
-    .await
-    .unwrap();
-    assert!(format!("{result:?}").contains("Dex code can't be deployed after an oracle request"));
     // The gas of refunding a held deposit is paid for up front
     let storage_usage_before = storage_usage().await;
     let result = deposit_near(vec![oracle_request(request.clone())])

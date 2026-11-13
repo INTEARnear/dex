@@ -3,6 +3,7 @@ members = [
     "intear-dex-common",
     "intear-dex-types",
     "chunked-upgrade",
+    "translator",
     "dexes/test-dex",
     "dexes/test-dex/types",
     "dexes/otc",
@@ -13,6 +14,13 @@ members = [
     "dexes/amp/types",
     "intear-dex-management",
 ]
+
+[workspace.metadata.patch]
+crates = ["wasmi", "wasmi_ir"]
+
+[patch.crates-io]
+wasmi = { path = "./target/patch/wasmi-1.1.0" }
+wasmi_ir = { path = "./target/patch/wasmi_ir-1.1.0" }
 
 [package]
 name = "intear-dex"

@@ -12,7 +12,6 @@ use near_primitives::types::AccountId;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 use crate::chain::asset_metadata::AssetMetadataCache;
-use crate::chain::engine;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display;
 use crate::errors::PreflightError;
@@ -204,19 +203,6 @@ impl RunContext {
                             ..
                         } => referenced_accounts.push(account_id),
                         Operation::Withdraw { to, .. } => referenced_accounts.extend(to),
-                        Operation::DeployDexCode { .. } => {
-                            let trusted_code_deployer = engine::trusted_code_deployer(
-                                &preflight.network_config,
-                                &preflight.block_reference,
-                            )?;
-                            if signer_id != trusted_code_deployer {
-                                return Err(PreflightError::NotTrustedCodeDeployer {
-                                    signer_id,
-                                    trusted_code_deployer,
-                                }
-                                .into_report());
-                            }
-                        }
                         Operation::RegisterAssets { r#for: None, .. }
                         | Operation::StorageDeposit { r#for: None, .. } => {}
                     }
@@ -379,13 +365,6 @@ fn operation_step(
                 .collect::<Vec<_>>()
                 .join(", "),
             owner_label(r#for)
-        ),
-        Operation::DeployDexCode {
-            last_part_of_id,
-            code_base64,
-        } => format!(
-            "Deploy {} bytes of code as dex {signer_id}/{last_part_of_id}",
-            code_base64.0.len()
         ),
         Operation::Withdraw {
             asset_id,

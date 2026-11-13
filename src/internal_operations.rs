@@ -13,10 +13,10 @@ use near_contract_standards::{
 };
 use near_sdk::{
     AccountId, Gas, NearToken, Promise, PromiseError, PromiseOrValue,
-    json_types::{Base58CryptoHash, Base64VecU8, U128},
+    json_types::{Base64VecU8, U128},
     near,
 };
-use wasmi::{Engine, Func, Linker, Module, Store};
+use wasmi::{Func, Linker, Module, Store};
 
 use crate::{
     CallType, DexEngine, DexEngineExt, IntearDexEvent, OracleResponse, PendingStorageUpdates,
@@ -85,42 +85,10 @@ impl TradeAccount<'_> {
 }
 
 impl DexEngine {
-    pub(crate) fn internal_deploy_dex_code(
-        &mut self,
-        last_part_of_id: String,
-        code_base64: Base64VecU8,
-        deployer: AccountId,
-    ) {
-        let code_hash = near_sdk::env::sha256_array(&code_base64.0);
-        let dex_id = DexId {
-            deployer,
-            id: last_part_of_id,
-        };
-        let storage_usage_before = near_sdk::env::storage_usage();
-        expect!(
-            near_sdk::env::predecessor_account_id() == self.trusted_code_deployer,
-            "Only the trusted code deployer can deploy dex code"
-        );
-        if let Err(err) = Module::new(&Engine::default(), &code_base64.0) {
-            near_sdk::env::panic_str(&format!("Invalid dex code: {err}"));
-        }
-        self.dex_codes.insert(dex_id.clone(), code_base64.0);
-        self.dex_codes.flush();
-        let storage_usage_after = near_sdk::env::storage_usage();
-        self.dex_storage_balances
-            .charge(&dex_id, storage_usage_before, storage_usage_after);
-
-        IntearDexEvent::DexDeployed {
-            dex_id: dex_id.clone(),
-            code_hash: Base58CryptoHash::from(code_hash),
-        }
-        .emit();
-    }
-
     /// Core WASM execution logic shared between swap, dex_call, and dex_view methods.
     /// Returns what the dex did, or why it failed.
     fn run_wasm_function<'a>(
-        code: &[u8],
+        module: &Module,
         dex_id: &DexId,
         call_type: CallType<'a>,
         request: Vec<u8>,
@@ -129,16 +97,10 @@ impl DexEngine {
         referrer: Option<AccountId>,
         oracle_response: Option<&'a OracleResponse>,
     ) -> Result<DexRun, String> {
-        let engine = Engine::default();
-        // SAFETY: already validated in internal_deploy_dex_code
-        let module = match unsafe { Module::new_unchecked(&engine, code) } {
-            Ok(module) => module,
-            Err(_) => panic!("Failed to load module"),
-        };
-
+        let engine = module.engine();
         let storage_usage_before = near_sdk::env::storage_usage();
         let mut store = Store::new(
-            &engine,
+            engine,
             RunnerData {
                 request,
                 response: None,
@@ -152,12 +114,12 @@ impl DexEngine {
                 oracle_response,
             },
         );
-        let mut linker = Linker::new(&engine);
+        let mut linker = Linker::new(engine);
 
         crate::impl_supported_host_functions!(linker);
 
         let instance = linker
-            .instantiate_and_start(&mut store, &module)
+            .instantiate_and_start(&mut store, module)
             .map_err(|err| format!("Failed to instantiate module: {err}"))?;
         let func: Func = instance
             .get_func(&mut store, method)
@@ -192,9 +154,11 @@ impl DexEngine {
         constraint: Option<TokenAmount>,
         oracle_response: Option<&OracleResponse>,
     ) -> (TokenAmount, TokenAmount) {
+        let module = self.translated_dex_codes.get(&dex_id);
         let swap = self
             .internal_simulate_swap_simple(
                 dex_id,
+                &module,
                 message,
                 trader.caller(),
                 asset_in,
@@ -231,9 +195,13 @@ impl DexEngine {
         } = swap;
         let storage_usage_before = near_sdk::env::storage_usage();
         for (key, value) in pending_storage_updates {
+            let key = (dex_id.clone(), key);
+            if self.dex_storage.get(&key) == value.as_ref() {
+                continue;
+            }
             match value {
-                Some(value) => self.dex_storage.insert((dex_id.clone(), key), value),
-                None => self.dex_storage.remove(&(dex_id.clone(), key)),
+                Some(value) => self.dex_storage.insert(key, value),
+                None => self.dex_storage.remove(&key),
             };
         }
         self.dex_storage.flush();
@@ -340,8 +308,10 @@ impl DexEngine {
         expect!(!options.is_empty(), "At least one swap option is required");
         let mut best: Option<SimulatedSwap> = None;
         for option in options {
+            let module = self.translated_dex_codes.get(&option.dex_id);
             let simulation = self.internal_simulate_swap_simple(
                 option.dex_id.clone(),
+                &module,
                 option.message,
                 trader.caller(),
                 asset_in.clone(),
@@ -475,14 +445,14 @@ impl DexEngine {
             }
         }
 
-        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
+        let module = self.translated_dex_codes.get(&dex_id);
         let storage_usage_before = near_sdk::env::storage_usage();
         let request = DexCallRequest {
             args: args.0,
             attached_assets,
         };
         let dex_run = Self::run_wasm_function(
-            code,
+            &module,
             &dex_id,
             CallType::Call {
                 dex_storage_mut: &mut self.dex_storage,
@@ -611,6 +581,7 @@ impl DexEngine {
     pub(crate) fn internal_simulate_swap_simple(
         &self,
         dex_id: DexId,
+        module: &Module,
         message: Base64VecU8,
         trader: intear_dex_common::Caller,
         asset_in: AssetId,
@@ -634,9 +605,8 @@ impl DexEngine {
             referrer: referrer.clone(),
         };
 
-        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
         let dex_run = Self::run_wasm_function(
-            code,
+            module,
             &dex_id,
             CallType::Trade {
                 dex_storage: &self.dex_storage,
@@ -692,9 +662,9 @@ impl DexEngine {
             "Method name 'swap' is reserved for the swap operation"
         );
 
-        let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
+        let module = self.translated_dex_codes.load(&dex_id);
         let dex_run = Self::run_wasm_function(
-            code,
+            &module,
             &dex_id,
             CallType::View {
                 dex_storage: &self.dex_storage,
@@ -873,25 +843,14 @@ impl DexEngine {
         }
         let by = trader.alleged_account_id().clone();
         let fully_authorized = anon_swap_available_assets.as_ref().is_none();
-        near_sdk::env::log_str(&format!("Fully authorized: {fully_authorized}"));
         let mut last_output = None;
-        for (operation_index, operation) in operations.into_iter().enumerate() {
-            near_sdk::env::log_str(&format!("Executing operation {operation_index}"));
+        for operation in operations {
             match operation {
                 Operation::RegisterAssets { asset_ids, r#for } => {
                     if !fully_authorized {
                         panic!("Operation only available in execute_actions");
                     }
                     self.internal_register_assets(asset_ids, r#for, by.clone());
-                }
-                Operation::DeployDexCode {
-                    last_part_of_id,
-                    code_base64,
-                } => {
-                    if !fully_authorized {
-                        panic!("Operation only available in execute_actions");
-                    }
-                    self.internal_deploy_dex_code(last_part_of_id, code_base64, by.clone());
                 }
                 Operation::Withdraw {
                     asset_id,
@@ -1220,7 +1179,6 @@ impl DexEngine {
         #[callback_result] result: Result<(), PromiseError>,
     ) -> bool {
         let mut events = CallEvents::default();
-        near_sdk::env::log_str(&format!("After withdraw: {result:?}"));
         let withdrawn = match result {
             Ok(()) => {
                 IntearDexEvent::Withdraw {

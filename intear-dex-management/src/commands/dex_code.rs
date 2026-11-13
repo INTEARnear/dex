@@ -15,7 +15,8 @@ use crate::chain::engine;
 use crate::errors::PreflightError;
 use crate::planning::{FunctionCall, ONE_YOCTO_NEAR, Preflight, storage};
 
-const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(100);
+// The translator validates and translates the code, and the engine stores both after it
+const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(300);
 const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
 
 /// The dex that deploy creates or replaces: <signer>/<name>

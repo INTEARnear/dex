@@ -31,6 +31,10 @@ pub enum PreflightError {
     OracleKeyExists { oracle_key: String },
     #[error("{oracle_key} isn't an oracle key of {ENGINE_ACCOUNT_ID}")]
     NotAnOracleKey { oracle_key: String },
+    #[error(
+        "{signer_public_key} would sign, but isn't an oracle key of {ENGINE_ACCOUNT_ID}, and remove_oracle_key deletes whichever key signs"
+    )]
+    SignerNotAnOracleKey { signer_public_key: String },
     #[error("{signer_id} can't pause or unpause {ENGINE_ACCOUNT_ID}")]
     NotAllowedToPause { signer_id: AccountId },
     #[error("{ENGINE_ACCOUNT_ID} is already paused")]
@@ -301,6 +305,10 @@ impl PreflightError {
             }
             Self::NotAnOracleKey { .. } => Some(
                 "`engine oracle list` shows the oracle keys, and `engine oracle create-key` adds one"
+                    .to_string(),
+            ),
+            Self::SignerNotAnOracleKey { .. } => Some(
+                "Sign with the oracle key to remove, e.g. with sign-with-plaintext-private-key; `engine oracle list` shows the oracle keys"
                     .to_string(),
             ),
             Self::UntrackedNearShort { .. } => Some(format!(

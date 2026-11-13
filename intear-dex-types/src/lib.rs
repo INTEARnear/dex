@@ -136,11 +136,6 @@ pub enum Operation {
         asset_ids: Vec<AssetId>,
         r#for: Option<AccountOrDexId>,
     },
-    /// Deploy new code to your dex. Can't be used after OracleRequest.
-    DeployDexCode {
-        last_part_of_id: String,
-        code_base64: Base64VecU8,
-    },
     /// Withdraw assets to `to`, or to the user if it's None.
     /// They come from the user's inner balance, or when the
     /// operations come with a deposit, from what the deposit

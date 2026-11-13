@@ -3,6 +3,7 @@
 
 pub mod asset_deposit;
 pub mod call_events;
+pub mod dex_code;
 pub mod host_functions;
 pub mod internal_asset_operations;
 pub mod internal_operations;
@@ -15,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::{
     call_events::CallEvents,
+    dex_code::TranslatedDexCodes,
     internal_operations::TradeAccount,
     oracle::{MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES},
     storage_management::StorageBalances,
@@ -75,6 +77,9 @@ pub struct DexEngine {
     /// New engine code that's uploaded in chunks, since it may not
     /// fit in one transaction.
     uploaded_code: LazyOption<Vec<u8>>,
+    /// The translation of each dex's code
+    #[borsh(skip)]
+    translated_dex_codes: TranslatedDexCodes,
 }
 
 #[derive(BorshStorageKey)]
@@ -98,6 +103,7 @@ enum StorageKey {
         dex_id: DexId,
     },
     UploadedCode,
+    TranslatedDexCodes,
 }
 
 enum CallType<'a> {
@@ -192,7 +198,13 @@ impl CallType<'_> {
             CallType::View { .. } => Err(wasmi::Error::new("Cannot modify data in view-only mode")),
             CallType::Call {
                 dex_storage_mut, ..
-            } => Ok(dex_storage_mut.insert((dex_id, key), value)),
+            } => {
+                let key = (dex_id, key);
+                if dex_storage_mut.get(&key) == Some(&value) {
+                    return Ok(Some(value));
+                }
+                Ok(dex_storage_mut.insert(key, value))
+            }
         }
     }
 
@@ -305,6 +317,7 @@ impl DexEngine {
             paused: false,
             trusted_code_deployer,
             uploaded_code: LazyOption::new(StorageKey::UploadedCode, None),
+            translated_dex_codes: TranslatedDexCodes::default(),
         }
     }
 
@@ -399,16 +412,25 @@ impl DexEngine {
         self.paused
     }
 
-    /// Deploy or upgrade the code for a dex.
+    /// Deploy or upgrade the code for a dex, once the translator translated it.
     #[payable]
-    pub fn deploy_dex_code(&mut self, last_part_of_id: String, code_base64: Base64VecU8) {
+    pub fn deploy_dex_code(
+        &mut self,
+        last_part_of_id: String,
+        code_base64: Base64VecU8,
+    ) -> Promise {
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
-        self.internal_deploy_dex_code(
-            last_part_of_id,
-            code_base64,
-            near_sdk::env::predecessor_account_id(),
-        )
+        let deployer = near_sdk::env::predecessor_account_id();
+        expect!(
+            deployer == self.trusted_code_deployer,
+            "Only the trusted code deployer can deploy dex code"
+        );
+        let dex_id = DexId {
+            deployer,
+            id: last_part_of_id,
+        };
+        Self::translate_dex_code(dex_id, code_base64.0, true)
     }
 
     /// Swap one asset for another on a specific dex.
@@ -670,8 +692,10 @@ impl DexEngine {
                 }
             },
         );
+        let module = self.translated_dex_codes.load(&dex_id);
         self.internal_simulate_swap_simple(
             dex_id,
+            &module,
             message,
             Caller::Direct(trader),
             asset_in,

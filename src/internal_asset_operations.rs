@@ -72,24 +72,14 @@ impl DexEngine {
         asset_id: AssetId,
         amount: TokenAmount,
     ) {
-        let balance = match &account_or_dex_id {
-            AccountOrDexId::Account(account) => self
-                .user_balances
-                .get(account)
-                .and_then(|asset_balances| asset_balances.get(&asset_id))
-                .unwrap_or_else(|| {
-                    panic!("User balance not found for account {account} and asset {asset_id}")
-                }),
-            AccountOrDexId::Dex(dex_id) => self
-                .dex_balances
-                .get(dex_id)
-                .and_then(|asset_balances| asset_balances.get(&asset_id))
-                .unwrap_or_else(|| {
-                    panic!("Dex balance not found for dex {dex_id} and asset {asset_id}")
-                }),
-        };
+        let balance = self
+            .asset_balances(&account_or_dex_id)
+            .and_then(|asset_balances| asset_balances.get(&asset_id).copied())
+            .unwrap_or_else(|| {
+                panic!("Balance not found for {account_or_dex_id} and asset {asset_id}")
+            });
         expect!(
-            *balance >= amount,
+            balance >= amount,
             "Insufficient balance of {} for {}: {} < {}",
             asset_id,
             account_or_dex_id,
@@ -105,41 +95,17 @@ impl DexEngine {
         asset_id: AssetId,
         amount: TokenAmount,
     ) {
-        self.assert_asset_registered(account_or_dex_id.clone(), asset_id.clone());
-        match account_or_dex_id {
-            AccountOrDexId::Account(account) => {
-                let balance = self.user_balances
-                    .get_mut(&account)
-                    .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
-                    .unwrap_or_else(|| panic!("Failed to deposit assets to user balance: user {account} balance for asset {asset_id} was not found"));
-                *balance = balance.checked_add(amount).unwrap_or_else(|| {
-                    panic!(
-                        "Balance overflow for account {account} and asset {asset_id}: {} + {} > {}",
-                        balance,
-                        amount,
-                        u128::MAX
-                    )
-                });
-                let balance = *balance;
-                events.balance_updated(AccountOrDexId::Account(account), asset_id, balance);
-            }
-            AccountOrDexId::Dex(dex_id) => {
-                let balance = self.dex_balances
-                    .get_mut(&dex_id)
-                    .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
-                    .unwrap_or_else(|| panic!("Failed to deposit assets to dex balance: dex {dex_id} balance for asset {asset_id} was not found"));
-                *balance = balance.checked_add(amount).unwrap_or_else(|| {
-                    panic!(
-                        "Balance overflow for dex {dex_id} and asset {asset_id}: {} + {} > {}",
-                        balance,
-                        amount,
-                        u128::MAX
-                    )
-                });
-                let balance = *balance;
-                events.balance_updated(AccountOrDexId::Dex(dex_id), asset_id, balance);
-            }
-        }
+        let balance = self.update_registered_balance(&account_or_dex_id, &asset_id, |balance| {
+            balance.checked_add(amount).unwrap_or_else(|| {
+                panic!(
+                    "Balance overflow for {account_or_dex_id} and asset {asset_id}: {} + {} > {}",
+                    balance,
+                    amount,
+                    u128::MAX
+                )
+            })
+        });
+        events.balance_updated(account_or_dex_id, asset_id, balance);
     }
 
     pub fn internal_decrease_assets(
@@ -149,39 +115,33 @@ impl DexEngine {
         asset_id: AssetId,
         amount: TokenAmount,
     ) {
-        match account_or_dex_id {
-            AccountOrDexId::Account(account) => {
-                let balance = self.user_balances
-                    .get_mut(&account)
-                    .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
-                    .unwrap_or_else(|| {
-                        panic!("Failed to withdraw assets from user balance: user {account} balance for asset {asset_id} was not found")
-                    });
-                *balance = balance.checked_sub(amount).unwrap_or_else(|| {
-                    panic!(
-                        "Insufficient balance for account {account} and asset {asset_id}: {} < {}",
-                        balance, amount
-                    )
-                });
-                let balance = *balance;
-                events.balance_updated(AccountOrDexId::Account(account), asset_id, balance);
-            }
-            AccountOrDexId::Dex(dex_id) => {
-                let balance = self.dex_balances
-                    .get_mut(&dex_id)
-                    .and_then(|asset_balances| asset_balances.get_mut(&asset_id))
-                    .unwrap_or_else(|| {
-                        panic!("Failed to withdraw assets from dex balance: dex {dex_id} balance for asset {asset_id} was not found")
-                    });
-                *balance = balance.checked_sub(amount).unwrap_or_else(|| {
-                    panic!(
-                        "Insufficient balance for dex {dex_id} and asset {asset_id}: {} < {}",
-                        balance, amount
-                    )
-                });
-                let balance = *balance;
-                events.balance_updated(AccountOrDexId::Dex(dex_id), asset_id, balance);
-            }
-        }
+        let balance = self.update_registered_balance(&account_or_dex_id, &asset_id, |balance| {
+            balance.checked_sub(amount).unwrap_or_else(|| {
+                panic!(
+                    "Insufficient balance for {account_or_dex_id} and asset {asset_id}: {} < {}",
+                    balance, amount
+                )
+            })
+        });
+        events.balance_updated(account_or_dex_id, asset_id, balance);
+    }
+
+    fn update_registered_balance(
+        &mut self,
+        account_or_dex_id: &AccountOrDexId,
+        asset_id: &AssetId,
+        update: impl FnOnce(TokenAmount) -> TokenAmount,
+    ) -> TokenAmount {
+        let asset_balances = match account_or_dex_id {
+            AccountOrDexId::Account(account) => self.user_balances.get_mut(account),
+            AccountOrDexId::Dex(dex_id) => self.dex_balances.get_mut(dex_id),
+        };
+        let Some(balance) =
+            asset_balances.and_then(|asset_balances| asset_balances.get_mut(asset_id))
+        else {
+            panic!("Asset {asset_id} is not registered for {account_or_dex_id}");
+        };
+        *balance = update(*balance);
+        *balance
     }
 }

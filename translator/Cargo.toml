@@ -1,0 +1,13 @@
+[package]
+name = "intear-dex-translator"
+description = "Validates and translates the code of dexes for the dex engine"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
+# With its default features, which validate and translate Wasm, unlike those of the engine
+wasmi = "1"
