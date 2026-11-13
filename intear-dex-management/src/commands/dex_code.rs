@@ -134,6 +134,14 @@ pub fn build_dex_package(
     std::fs::read(&wasm_path).wrap_err_with(|| format!("Couldn't read {}", wasm_path.display()))
 }
 
+/// The translation of `code` that the engine stores next to it, as the translator makes it
+/// with the same wasmi as this
+pub fn translate(code: &[u8]) -> color_eyre::eyre::Result<Vec<u8>> {
+    wasmi::Engine::default()
+        .precompile_module(code)
+        .map_err(|err| eyre!("The translator rejects {} bytes of code: {err}", code.len()))
+}
+
 /// What deploying code to a dex takes: the storage for the code, and the
 /// deploy itself
 pub struct CodeDeployment {
@@ -176,28 +184,32 @@ pub fn plan_code_deployment(
     );
     let mut steps = Vec::new();
     let mut function_calls = Vec::new();
-    let code_bytes = |code: &[u8]| {
-        storage::dex_code_record_bytes(
-            dex_id,
-            code.len(),
-            preflight.protocol_limits.extra_bytes_per_record,
-        )
+    // The engine stores the code and its translation
+    let stored_bytes = |code: &[u8]| -> color_eyre::eyre::Result<u64> {
+        let extra_bytes_per_record = preflight.protocol_limits.extra_bytes_per_record;
+        storage::dex_code_record_bytes(dex_id, code.len(), extra_bytes_per_record)?
+            .checked_add(storage::dex_code_translation_record_bytes(
+                dex_id,
+                translate(code)?.len(),
+                extra_bytes_per_record,
+            )?)
+            .ok_or_else(|| eyre!("Storage size overflow"))
     };
-    // The engine charges an upgrade only for what the new code takes more
-    // than the old, and frees what it takes less
+    // The engine charges an upgrade only for what the new code and its translation
+    // take more than the old, and frees what they take less
     let bytes = match &deployed_code {
-        Some(deployed_code) => code_bytes(code)?.saturating_sub(code_bytes(deployed_code)?),
-        None => code_bytes(code)?
+        Some(deployed_code) => stored_bytes(code)?.saturating_sub(stored_bytes(deployed_code)?),
+        None => stored_bytes(code)?
             .checked_add(extra_state_bytes)
             .ok_or_else(|| eyre!("Storage size overflow"))?,
     };
     if let Some(storage_top_up) = preflight.dex_storage_top_up(dex_id, bytes)? {
         steps.push(storage_top_up.step(&match &deployed_code {
             Some(deployed_code) => format!(
-                "what the new code takes more than the {} bytes of the old",
+                "what the new code and its translation take more than the old code of {} bytes and its translation",
                 deployed_code.len()
             ),
-            None => "the code".to_string(),
+            None => "the code and its translation".to_string(),
         }));
         function_calls.push(storage_top_up.function_call());
     }

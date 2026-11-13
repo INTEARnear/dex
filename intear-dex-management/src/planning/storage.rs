@@ -182,6 +182,23 @@ pub fn dex_code_record_bytes(
     )
 }
 
+/// The engine's record of the translation of a dex's code, which it stores as the
+/// translator returned it
+pub fn dex_code_translation_record_bytes(
+    dex_id: &DexId,
+    translation_bytes: usize,
+    extra_bytes_per_record: u64,
+) -> color_eyre::eyre::Result<u64> {
+    record_bytes(
+        &[
+            COLLECTION_PREFIX_BYTES,
+            near_sdk::borsh::to_vec(dex_id)?.len(),
+            translation_bytes,
+        ],
+        extra_bytes_per_record,
+    )
+}
+
 pub fn storage_cost(
     bytes: u64,
     storage_byte_cost: NearToken,

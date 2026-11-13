@@ -9,7 +9,7 @@ use near_jsonrpc_client::methods::block::RpcBlockRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::types::{AccountId, BlockId, BlockReference, StoreKey};
-use near_primitives::views::{AccessKeyPermissionView, BlockView, QueryRequest};
+use near_primitives::views::{AccessKeyPermissionView, BlockView, QueryRequest, ViewStateResult};
 use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
 use serde_json::json;
@@ -346,31 +346,14 @@ pub fn dex_ids(
     let mut dex_ids = Vec::new();
     let mut after_key = None;
     loop {
-        let response = network_config
-            .json_rpc_client()
-            .blocking_call(RpcQueryRequest {
-                block_reference: block_reference.clone(),
-                request: QueryRequest::ViewState {
-                    account_id: ENGINE_ACCOUNT_ID.to_owned(),
-                    prefix: StoreKey::from(vec![ENGINE_DEX_CODES_PREFIX]),
-                    after_key,
-                    limit: Some(PAGE_LIMIT),
-                    include_proof: false,
-                },
-            })
-            .map_err(color_eyre::eyre::Report::new)
-            .wrap_err_with(|| {
-                format!(
-                    "Couldn't read the dex codes of {ENGINE_ACCOUNT_ID} on network {} (RPC {})",
-                    network_config.network_name, network_config.rpc_url
-                )
-            })?;
-        let QueryResponseKind::ViewState(state) = response.kind else {
-            bail!(
-                "RPC {} answered a state query with something other than state",
-                network_config.rpc_url
-            );
-        };
+        let state = engine_state_page(
+            network_config,
+            block_reference,
+            vec![ENGINE_DEX_CODES_PREFIX],
+            after_key,
+            PAGE_LIMIT,
+        )
+        .wrap_err("Couldn't read the dex codes")?;
         for item in state.values {
             // The mainnet engine also has keys under the prefix that aren't dex ids, from an
             // earlier layout of its state that it doesn't read anymore
@@ -383,6 +366,71 @@ pub fn dex_ids(
             None => return Ok(dex_ids),
         }
     }
+}
+
+/// The length of the translation of a dex's code that the engine stores, `None` while it
+/// stores none. The engine has no view for it, so this reads it from the engine's state.
+pub fn dex_code_translation_len(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<usize>> {
+    // The engine keeps the translation of every dex's code under this prefix, keyed by the dex id
+    const ENGINE_TRANSLATED_DEX_CODES_PREFIX: u8 = 12;
+    let key = [
+        vec![ENGINE_TRANSLATED_DEX_CODES_PREFIX],
+        near_sdk::borsh::to_vec(dex_id)?,
+    ]
+    .concat();
+    let state = engine_state_page(
+        network_config,
+        block_reference,
+        key.clone(),
+        None,
+        NonZeroU32::MIN,
+    )
+    .wrap_err_with(|| format!("Couldn't read the translation of {dex_id}'s code"))?;
+    Ok(state
+        .values
+        .into_iter()
+        .find(|item| *item.key == key)
+        .map(|item| item.value.len()))
+}
+
+/// Up to `limit` records of the engine's state under `prefix` that come after `after_key`
+fn engine_state_page(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    prefix: Vec<u8>,
+    after_key: Option<StoreKey>,
+    limit: NonZeroU32,
+) -> color_eyre::eyre::Result<ViewStateResult> {
+    let response = network_config
+        .json_rpc_client()
+        .blocking_call(RpcQueryRequest {
+            block_reference: block_reference.clone(),
+            request: QueryRequest::ViewState {
+                account_id: ENGINE_ACCOUNT_ID.to_owned(),
+                prefix: StoreKey::from(prefix),
+                after_key,
+                limit: Some(limit),
+                include_proof: false,
+            },
+        })
+        .map_err(color_eyre::eyre::Report::new)
+        .wrap_err_with(|| {
+            format!(
+                "Couldn't read the state of {ENGINE_ACCOUNT_ID} on network {} (RPC {})",
+                network_config.network_name, network_config.rpc_url
+            )
+        })?;
+    let QueryResponseKind::ViewState(state) = response.kind else {
+        bail!(
+            "RPC {} answered a state query with something other than state",
+            network_config.rpc_url
+        );
+    };
+    Ok(state)
 }
 
 /// A view method of a dex, with arguments and result as the dex encodes them

@@ -102,6 +102,10 @@ pub enum PreflightError {
     #[error("Only {deployer}, which deployed {dex_id}, can withdraw its storage balance")]
     NotDexDeployer { dex_id: DexId, deployer: AccountId },
     #[error(
+        "{dex_id}'s storage balance on {ENGINE_ACCOUNT_ID} already covers the translation of its code"
+    )]
+    DexStorageCoversTranslation { dex_id: DexId },
+    #[error(
         "{signer_id} can't deploy dex code: {ENGINE_ACCOUNT_ID} only takes code from its trusted code deployer, {trusted_code_deployer}"
     )]
     NotTrustedCodeDeployer {
@@ -345,6 +349,7 @@ impl PreflightError {
             | Self::ZeroAmount
             | Self::TooMuchGas { .. }
             | Self::NotDexDeployer { .. }
+            | Self::DexStorageCoversTranslation { .. }
             | Self::AlreadyTrustedCodeDeployer { .. }
             | Self::CustodyDeficit { .. }
             | Self::NothingToRescue { .. }

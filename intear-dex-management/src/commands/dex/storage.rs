@@ -10,6 +10,7 @@ use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 use crate::chain::asset_metadata::AssetMetadata;
 use crate::chain::engine;
+use crate::commands::dex_code;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
@@ -18,6 +19,7 @@ use crate::inputs::near_amount::NearAmountOrAllArg;
 use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{
     self, ENGINE_STORAGE_DEPOSIT_GAS, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, format_near,
+    storage,
 };
 
 const DEX_STORAGE_WITHDRAW_GAS: Gas = Gas::from_teragas(10);
@@ -44,6 +46,11 @@ pub enum StorageAction {
     ))]
     /// Add NEAR to a dex's storage balance, which pays for its code and state
     Deposit(Deposit),
+    #[strum_discriminants(strum(
+        message = "top-up    - Add what a dex's storage balance lacks for the translation of its code"
+    ))]
+    /// Add what a dex's storage balance lacks for the translation of its code
+    TopUp(TopUp),
     #[strum_discriminants(strum(
         message = "withdraw  - Take NEAR that a dex doesn't use back to its deployer's wallet"
     ))]
@@ -252,6 +259,115 @@ impl DepositContext {
 
 impl From<DepositContext> for ActionContext {
     fn from(item: DepositContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = crate::GlobalContext)]
+#[interactive_clap(output_context = TopUpContext)]
+pub struct TopUp {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account pays?
+    signer_account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The dex as <deployer>/<name>
+    dex: DexIdArg,
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
+}
+
+impl TopUp {
+    fn input_signer_account_id(
+        context: &crate::GlobalContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        near_cli_rs::common::input_signer_account_id_from_used_account_list(
+            &context.config.credentials_home_dir,
+            "Which account pays for the dex's storage?",
+        )
+    }
+
+    fn input_dex(_context: &crate::GlobalContext) -> color_eyre::eyre::Result<Option<DexIdArg>> {
+        super::input_dex_id()
+    }
+}
+
+#[derive(Clone)]
+pub struct TopUpContext(ActionContext);
+
+impl TopUpContext {
+    pub fn from_previous_context(
+        previous_context: crate::GlobalContext,
+        scope: &<TopUp as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let signer_id: AccountId = scope.signer_account_id.clone().into();
+        let DexIdArg(dex_id) = scope.dex.clone();
+        Ok(Self(planning::write_action_context(
+            &previous_context,
+            signer_id,
+            move |preflight| {
+                preflight.ensure_engine_not_paused()?;
+                let code = engine::dex_code(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &dex_id,
+                )?
+                .ok_or_else(|| {
+                    PreflightError::DexMissing {
+                        dex_id: dex_id.clone(),
+                        network_name: preflight.network_config.network_name.clone(),
+                    }
+                    .into_report()
+                })?;
+                let translation_bytes = |translation_len| {
+                    storage::dex_code_translation_record_bytes(
+                        &dex_id,
+                        translation_len,
+                        preflight.protocol_limits.extra_bytes_per_record,
+                    )
+                };
+                // A new translation replaces the one that the engine stores, if it has one
+                let stored_translation_bytes = match engine::dex_code_translation_len(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &dex_id,
+                )? {
+                    Some(stored_translation_len) => translation_bytes(stored_translation_len)?,
+                    None => 0,
+                };
+                let bytes = translation_bytes(dex_code::translate(&code)?.len())?
+                    .saturating_sub(stored_translation_bytes);
+                let Some(storage_top_up) = preflight.dex_storage_top_up(&dex_id, bytes)? else {
+                    return Err(PreflightError::DexStorageCoversTranslation {
+                        dex_id: dex_id.clone(),
+                    }
+                    .into_report());
+                };
+                Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps: vec![storage_top_up.step("the translation of its code")],
+                    function_calls: vec![storage_top_up.function_call()],
+                    expected_outcome: ExpectedOutcome {
+                        action_name: "dex storage top-up",
+                        success_message: format!(
+                            "Deposited {} into {dex_id}'s storage balance on {ENGINE_ACCOUNT_ID}, which now covers the translation of its code",
+                            format_near(storage_top_up.deposit)
+                        ),
+                        transfer_call: None,
+                        dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::NotRead,
+                        deployment: None,
+                    },
+                    deploy_code: None,
+                })
+            },
+        )))
+    }
+}
+
+impl From<TopUpContext> for ActionContext {
+    fn from(item: TopUpContext) -> Self {
         item.0
     }
 }
