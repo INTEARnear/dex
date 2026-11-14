@@ -11,6 +11,7 @@ use crate::{
 pub struct SwapAmounts {
     pub amount_in: TokenAmount,
     pub amount_out: TokenAmount,
+    pub oracle_fee: TokenAmount,
     pub pool_fee: TokenAmount,
     pub protocol_fee: TokenAmount,
 }
@@ -18,7 +19,8 @@ pub struct SwapAmounts {
 impl SwapAmounts {
     pub fn amount_in_after_fees(&self) -> TokenAmount {
         self.amount_in
-            .checked_sub(self.pool_fee)
+            .checked_sub(self.oracle_fee)
+            .and_then(|amount| amount.checked_sub(self.pool_fee))
             .and_then(|amount| amount.checked_sub(self.protocol_fee))
             .expect("Fee exceeds 100%")
     }
@@ -28,6 +30,7 @@ impl SwapAmounts {
 pub enum SwapError {
     ZeroAmount,
     AmountOutNotLessThanBalance,
+    AmountInNotMoreThanFixedFee,
 }
 
 impl std::fmt::Display for SwapError {
@@ -35,6 +38,9 @@ impl std::fmt::Display for SwapError {
         match self {
             Self::ZeroAmount => write!(f, "Amount must be greater than 0"),
             Self::AmountOutNotLessThanBalance => write!(f, "Amount must be less than out balance"),
+            Self::AmountInNotMoreThanFixedFee => {
+                write!(f, "Amount in must be more than the pool's fixed oracle fee")
+            }
         }
     }
 }
@@ -58,12 +64,13 @@ pub struct RatedPool {
 
 impl RatedPool {
     /// The amounts of a swap of `amount` of the asset at `in_index` with `fees`, which are parts of
-    /// the input: an exact output takes as much more input as the fees need
+    /// the input after `fixed_fee`: an exact output takes as much more input as the fees need
     pub fn swap_amounts(
         &self,
         in_index: AssetIndex,
         amount: SwapRequestAmount,
         fees: SwapFees,
+        oracle_fee: TokenAmount,
     ) -> Result<SwapAmounts, SwapError> {
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = amount;
@@ -77,13 +84,22 @@ impl RatedPool {
                     return Err(SwapError::AmountOutNotLessThanBalance);
                 }
                 self.exact_out_amount_in(in_index, amount_out, fees.total())
+                    .checked_add(oracle_fee)
+                    .expect("Amount must be less than u128::MAX")
             }
+        };
+        let Some(amount_in_after_oracle_fee) = amount_in
+            .checked_sub(oracle_fee)
+            .filter(|amount| !amount.is_zero())
+        else {
+            return Err(SwapError::AmountInNotMoreThanFixedFee);
         };
         let mut amounts = SwapAmounts {
             amount_in,
             amount_out: TokenAmount::ZERO,
-            pool_fee: fees.pool.of(amount_in),
-            protocol_fee: fees.protocol.of(amount_in),
+            oracle_fee,
+            pool_fee: fees.pool.of(amount_in_after_oracle_fee),
+            protocol_fee: fees.protocol.of(amount_in_after_oracle_fee),
         };
         amounts.amount_out = match amount {
             SwapRequestAmount::ExactIn(_) => {

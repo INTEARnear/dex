@@ -78,8 +78,14 @@ impl ListContext {
                             println!("{dex_id} has no pools that match");
                             return Ok(());
                         }
-                        let mut table =
-                            display::table(&["Pool", "Pair", "Reserves", "Amplification", "Fee"]);
+                        let mut table = display::table(&[
+                            "Pool",
+                            "Pair",
+                            "Reserves",
+                            "Amplification",
+                            "Fee",
+                            "Oracle fees",
+                        ]);
                         for (pool_id, pool) in &pools {
                             let [(asset_id_0, reserve_0), (asset_id_1, reserve_1)] =
                                 pool_assets(pool);
@@ -98,7 +104,19 @@ impl ListContext {
                                     display::format_amount(reserve_1, metadata_1.as_ref())
                                 ),
                                 pool.amplification,
-                                display::format_fee(pool.fee),
+                                display::format_fee(pool.fees.fraction),
+                                format!(
+                                    "{} / {} to {}",
+                                    display::format_amount(
+                                        pool.fees.oracle_fee_per_swap.0.get(),
+                                        metadata_0.as_ref()
+                                    ),
+                                    display::format_amount(
+                                        pool.fees.oracle_fee_per_swap.1.get(),
+                                        metadata_1.as_ref()
+                                    ),
+                                    pool.fees.oracle_fee_receiver
+                                ),
                             ]);
                         }
                         print!("{table}");

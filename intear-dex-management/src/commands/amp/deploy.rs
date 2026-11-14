@@ -1,15 +1,21 @@
+use amp_dex_types::PROTOCOL_FEE_RECEIVER_ID;
 use color_eyre::Section;
 use color_eyre::eyre::eyre;
 use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
+use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 use super::AmpContext;
+use crate::chain::amp;
 use crate::commands::dex_code;
 use crate::deployment::{DEFAULT_AMP_DEX_NAME, ENGINE_ACCOUNT_ID};
+use crate::errors::PreflightError;
 use crate::outcome::{DexEvents, ExpectedDeployment, ExpectedOutcome};
-use crate::planning::{self, TransactionPlan};
+use crate::planning::{self, TransactionPlan, amp_storage, storage};
+
+const MIGRATE_GAS: Gas = Gas::from_teragas(200);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = AmpContext)]
@@ -22,6 +28,9 @@ pub struct Deploy {
     #[interactive_clap(skip_interactive_input)]
     /// The name of the dex after <signer>/ (default: amp)
     name: Option<String>,
+    #[interactive_clap(long)]
+    /// Migrate the dex's pools to the new code's layout, which gives them fixed fees of 0, in the same transaction, so that a failed migration reverts the deploy
+    migrate: bool,
     #[interactive_clap(subcommand)]
     code: DeployCode,
 }
@@ -56,6 +65,7 @@ fn deployed_dex_id(
 pub struct DeployContext {
     global_context: crate::GlobalContext,
     dex_id: DexId,
+    migrates: bool,
 }
 
 impl DeployContext {
@@ -71,6 +81,7 @@ impl DeployContext {
         Ok(Self {
             global_context: previous_context.global_context,
             dex_id,
+            migrates: scope.migrate,
         })
     }
 }
@@ -152,6 +163,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
     let DeployContext {
         global_context,
         dex_id,
+        migrates,
     } = deploy_context;
     let signer_id: AccountId = dex_id.deployer.clone();
     planning::write_action_context(&global_context, signer_id, move |preflight| {
@@ -163,11 +175,8 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             code_hash,
             code_label,
             mut steps,
-            function_calls,
+            mut function_calls,
         } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0)?;
-        if is_upgrade {
-            steps.push("Keep the state as it is".to_string());
-        }
         let init_command = shell_words::join([
             "near",
             "intear-dex-management",
@@ -179,13 +188,54 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             "network-config",
             &preflight.connection_name,
         ]);
+        if migrates {
+            if !is_upgrade {
+                return Err(PreflightError::NothingToMigrate {
+                    dex_id: dex_id.clone(),
+                    init_command,
+                }
+                .into_report());
+            }
+            let pool_count = amp::pool_count(
+                &preflight.network_config,
+                &preflight.block_reference,
+                &dex_id,
+            )?;
+            let storage_near = storage::storage_cost(
+                amp_storage::oracle_fees_migration_bytes(pool_count)?,
+                preflight.protocol_limits.storage_byte_cost,
+            )?;
+            let (migration_steps, migration_calls) =
+                crate::commands::xyk::dex_call_paying_for_storage(
+                    preflight,
+                    &dex_id,
+                    format!(
+                        "Migrate the {pool_count} pools of {dex_id} to the new code's layout, which gives them fixed fees of 0 for {PROTOCOL_FEE_RECEIVER_ID}, in the same transaction; if the migration fails, the deploy is reverted too"
+                    ),
+                    // It takes no args
+                    ("migrate", &()),
+                    storage_near,
+                    MIGRATE_GAS,
+                )?;
+            steps.extend(migration_steps);
+            function_calls.extend(migration_calls);
+        } else if is_upgrade {
+            steps.push(
+                "Keep the state as it is; code that changes its layout deploys with --migrate"
+                    .to_string(),
+            );
+        }
         Ok(TransactionPlan {
             receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
             steps,
             function_calls,
             expected_outcome: ExpectedOutcome {
                 action_name: "deploy",
-                success_message: format!("Deployed {code_label} to {dex_id}"),
+                success_message: if migrates {
+                    format!("Deployed {code_label} to {dex_id} and migrated its pools")
+                } else {
+                    format!("Deployed {code_label} to {dex_id}")
+                },
                 transfer_call: None,
                 dex_id: Some(dex_id.clone()),
                 dex_events: DexEvents::Amp,

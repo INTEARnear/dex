@@ -1,6 +1,6 @@
 use amp_dex_types::{
-    Amplification, CreatePoolArgs, FULL_FEE_FRACTION, FeeFraction, FeePayoutType,
-    PROTOCOL_FEE_RECEIVER_ID, PROTOCOL_FEE_SHARE, TokenAmount,
+    Amplification, CreatePoolArgs, FeePayoutType, PROTOCOL_FEE_RECEIVER_ID, PROTOCOL_FEE_SHARE,
+    TokenAmount,
 };
 use intear_dex_common::{AssetId, DexId};
 use intear_dex_types::AccountOrDexId;
@@ -59,8 +59,8 @@ pub struct CreatePool {
     /// How the signer takes its part of the pool's fees: 'keep' to keep both assets, or the asset to take them in
     creator_payout: PayoutArg,
     #[interactive_clap(named_arg)]
-    /// The fee of swaps
-    fee: PoolFee,
+    /// The fees of swaps
+    fees: PoolFees,
 }
 
 impl CreatePool {
@@ -148,19 +148,51 @@ impl NewPoolContext {
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = NewPoolContext)]
-#[interactive_clap(output_context = PoolFeeContext)]
-pub struct PoolFee {
+#[interactive_clap(output_context = PoolFeesContext)]
+pub struct PoolFees {
     #[interactive_clap(skip_default_input_arg)]
     /// The fee of swaps, of which the protocol takes 20%, e.g. 0.05%
     fee: PercentArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The oracle fee of swaps of one asset, such as for the gas of the oracle's responses, e.g. '0.001 NEAR'
+    oracle_fee_0: AmountArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The oracle fee of swaps of the other asset, e.g. '0.005 USDC'
+    oracle_fee_1: AmountArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account takes the oracle fees, in the fees it collects on the dex?
+    oracle_fee_receiver: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
 }
 
-impl PoolFee {
+impl PoolFees {
     fn input_fee(_context: &NewPoolContext) -> color_eyre::eyre::Result<Option<PercentArg>> {
         crate::inputs::prompt("The fee of swaps? The protocol takes 20% of it. e.g. 0.05%")
+    }
+
+    fn input_oracle_fee_0(
+        _context: &NewPoolContext,
+    ) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt(
+            "The oracle fee of swaps of one asset, such as for the gas of the oracle's responses? e.g. '0.001 NEAR'",
+        )
+    }
+
+    fn input_oracle_fee_1(
+        _context: &NewPoolContext,
+    ) -> color_eyre::eyre::Result<Option<AmountArg>> {
+        crate::inputs::prompt("The oracle fee of swaps of the other asset? e.g. '0.005 USDC'")
+    }
+
+    fn input_oracle_fee_receiver(
+        context: &NewPoolContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
+            &context.global_context.config.credentials_home_dir,
+            "Which account takes the oracle fees, in the fees it collects on the dex?",
+        )
     }
 }
 
@@ -180,12 +212,12 @@ fn asset_decimals(
 }
 
 #[derive(Clone)]
-pub struct PoolFeeContext(ActionContext);
+pub struct PoolFeesContext(ActionContext);
 
-impl PoolFeeContext {
+impl PoolFeesContext {
     pub fn from_previous_context(
         previous_context: NewPoolContext,
-        scope: &<PoolFee as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        scope: &<PoolFees as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let NewPoolContext {
             global_context,
@@ -198,6 +230,8 @@ impl PoolFeeContext {
             creator_payout,
         } = previous_context;
         let PercentArg(fee_millionths) = scope.fee;
+        let oracle_fees = (scope.oracle_fee_0.clone(), scope.oracle_fee_1.clone());
+        let oracle_fee_receiver: AccountId = scope.oracle_fee_receiver.clone().into();
         Ok(Self(planning::write_action_context(
             &global_context,
             signer_id,
@@ -259,18 +293,18 @@ impl PoolFeeContext {
                         "Amp pools don't reinvest fees: keep them, or take them in one of the pool's assets"
                     ),
                 };
-                let fee = FeeFraction::new(fee_millionths);
-                if fee >= FULL_FEE_FRACTION {
-                    return Err(PreflightError::FeesNotAllowed {
-                        problem: "the fee must be less than 100%".to_string(),
-                    }
-                    .into_report());
-                }
+                let fees = super::fee_configuration(
+                    fee_millionths,
+                    &oracle_fees,
+                    oracle_fee_receiver.clone(),
+                    &asset_metadata,
+                    &pair,
+                )?;
 
                 let extra_bytes_per_record = preflight.protocol_limits.extra_bytes_per_record;
-                // The pool starts fee balances for the protocol in both
-                // assets, and for the creator in the assets its payout
-                // takes fees in
+                // The pool starts fee balances for the protocol and the
+                // oracle fee receiver in both assets, and for the creator in
+                // the assets its payout takes fees in
                 let fee_balances = [
                     FeeBalances {
                         kind: FeeBalanceKind::CollectedByOwner,
@@ -286,12 +320,18 @@ impl PoolFeeContext {
                             FeePayoutType::ConvertToSecondAsset => vec![assets.1.clone()],
                         },
                     },
+                    FeeBalances {
+                        kind: FeeBalanceKind::CollectedByOwner,
+                        account_id: oracle_fee_receiver.clone(),
+                        asset_ids: vec![assets.0.clone(), assets.1.clone()],
+                    },
                 ];
                 let storage_bytes = [
                     amp_storage::new_pool_bytes(
                         &dex_id,
                         (&assets.0, &assets.1),
                         &oracle_key,
+                        &fees,
                         extra_bytes_per_record,
                     )?,
                     amp_storage::liquidity_position_bytes(
@@ -336,7 +376,14 @@ impl PoolFeeContext {
                 let mut function_calls = registration_calls.function_calls;
                 steps.push(format!(
                     "Create a {pair} pool on {dex_id} with amplification {amplification} and a fee of {}, of which the protocol takes {PROTOCOL_FEE_SHARE}",
-                    display::format_fee(fee)
+                    display::format_fee(fees.fraction)
+                ));
+                steps.push(format!(
+                    "Swaps that put in {} pay {oracle_fee_receiver} an oracle fee of {}, and swaps that put in {} pay it {}, before the fee",
+                    display::asset_label(&assets.0, asset_metadata[0].1.as_ref()),
+                    display::format_amount(fees.oracle_fee_per_swap.0.get(), asset_metadata[0].1.as_ref()),
+                    display::asset_label(&assets.1, asset_metadata[1].1.as_ref()),
+                    display::format_amount(fees.oracle_fee_per_swap.1.get(), asset_metadata[1].1.as_ref())
                 ));
                 steps.push(format!(
                     "Swaps on it ask the oracle {oracle_key} for the prices of whole tokens of both assets, which rate them at {} and {} decimals",
@@ -374,7 +421,7 @@ impl PoolFeeContext {
                                 decimals,
                                 amplification,
                                 oracle_key: oracle_key.clone(),
-                                fee,
+                                fees,
                                 initial_liquidity: (
                                     TokenAmount::new(amount_0),
                                     TokenAmount::new(amount_1),
@@ -407,8 +454,8 @@ impl PoolFeeContext {
     }
 }
 
-impl From<PoolFeeContext> for ActionContext {
-    fn from(item: PoolFeeContext) -> Self {
+impl From<PoolFeesContext> for ActionContext {
+    fn from(item: PoolFeesContext) -> Self {
         item.0
     }
 }

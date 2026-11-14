@@ -84,13 +84,34 @@ pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("
 
 /// Who takes a part of the fee of a swap
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum FeeReceiver {
     /// The liquidity providers of the pool, and its liquidity
     Pool,
     /// [`PROTOCOL_FEE_RECEIVER_ID`], which keeps its fees in the asset that swaps pay them in
     Protocol,
+    /// The pools have a small fee to compensate oracle's gas fees
+    Oracle(AccountId),
+}
+
+/// The fees of swaps on a pool
+#[near(serializers=[borsh, json])]
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct FeeConfiguration {
+    pub fraction: FeeFraction,
+    pub oracle_fee_per_swap: (TokenAmount, TokenAmount),
+    pub oracle_fee_receiver: AccountId,
+}
+
+impl FeeConfiguration {
+    pub fn oracle_fee(&self, in_index: AssetIndex) -> TokenAmount {
+        match in_index {
+            AssetIndex::First => self.oracle_fee_per_swap.0,
+            AssetIndex::Second => self.oracle_fee_per_swap.1,
+        }
+    }
 }
 
 /// The fee of a swap, split between its receivers
@@ -233,9 +254,7 @@ pub struct CreatePoolArgs {
     pub amplification: Amplification,
     /// The oracle that swaps ask for the prices of `assets`
     pub oracle_key: PublicKeyHandle,
-    /// The fee of swaps, which goes to the pool, of which the protocol takes
-    /// [`PROTOCOL_FEE_SHARE`]
-    pub fee: FeeFraction,
+    pub fees: FeeConfiguration,
     /// Amounts of `assets` to deposit as the first liquidity, taken from the attached assets
     pub initial_liquidity: (TokenAmount, TokenAmount),
     /// How the creator takes its part of the pool's fees, as the provider of the first liquidity
@@ -260,6 +279,13 @@ pub struct SetAmplificationArgs {
 pub struct SetOracleKeyArgs {
     pub pool_id: PoolId,
     pub oracle_key: PublicKeyHandle,
+}
+
+#[near(serializers=[borsh])]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct SetFeesArgs {
+    pub pool_id: PoolId,
+    pub fees: FeeConfiguration,
 }
 
 #[near(serializers=[borsh])]
@@ -350,8 +376,7 @@ pub struct PoolView {
     /// The median of the oracle's prices of a whole token of the first asset in the second that
     /// the last swap rated the pool at, `None` before the first swap
     pub last_oracle_price: Option<Price>,
-    /// The fee of swaps, of which the protocol takes [`PROTOCOL_FEE_SHARE`]
-    pub fee: FeeFraction,
+    pub fees: FeeConfiguration,
     pub total_shares: TotalShares,
 }
 
@@ -363,7 +388,7 @@ impl PoolView {
 
     /// The fees of a swap on the pool without a discount
     pub fn swap_fees(&self) -> SwapFees {
-        SwapFees::of_pool_fee(self.fee)
+        SwapFees::of_pool_fee(self.fees.fraction)
     }
 
     /// The pool rated at `price` of its first asset in its second, to quote swaps on it

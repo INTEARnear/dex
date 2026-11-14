@@ -2,7 +2,7 @@ use intear_dex_common::AssetId;
 use near_sdk::{AccountId, PublicKeyHandle, near, store::LookupMap};
 
 use crate::{
-    Amplification, AssetWithBalance, FeeFraction, LiquidityPosition, PayoutGroups, PoolAssets,
+    Amplification, AssetWithBalance, FeeConfiguration, LiquidityPosition, PayoutGroups, PoolAssets,
     PoolView, Price, PricesRequest, ProviderShares, SwapFees, TokenAmount, TotalShares,
     math::RatedPool,
 };
@@ -16,7 +16,7 @@ pub struct Pool {
     pub amplification: Amplification,
     pub oracle_key: PublicKeyHandle,
     pub last_oracle_price: Price,
-    pub fee: FeeFraction,
+    pub fees: FeeConfiguration,
     pub providers: LookupMap<AccountId, LiquidityPosition>,
     pub total_shares: TotalShares,
     pub payout_groups: PayoutGroups,
@@ -58,9 +58,9 @@ impl Pool {
             .map(|position| position.shares)
     }
 
-    /// The fees of a swap without a discount
+    /// The fees of a swap without a discount, besides its fixed fee
     pub fn swap_fees(&self) -> SwapFees {
-        SwapFees::of_pool_fee(self.fee)
+        SwapFees::of_pool_fee(self.fees.fraction)
     }
 
     /// The pool as views and events show it
@@ -72,7 +72,7 @@ impl Pool {
             oracle_key: self.oracle_key.clone(),
             last_oracle_price: (!self.last_oracle_price.is_zero())
                 .then_some(self.last_oracle_price),
-            fee: self.fee,
+            fees: self.fees.clone(),
             total_shares: self.total_shares,
         }
     }

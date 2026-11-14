@@ -11,8 +11,8 @@ use amp_dex_types::{
     PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolView,
     Price, PricesRequest, PricesResponse, ProviderShares, RegisterLiquidityArgs,
     RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs,
-    SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs, SwapRoute,
-    TokenAmount, TotalShares, WithdrawFeesArgs,
+    SetFeeDiscountSignerArgs, SetFeesArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs,
+    SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
     math::{RatedPool, SwapAmounts},
 };
 use intear_dex_common::{
@@ -25,6 +25,8 @@ use near_sdk::{
     near,
     store::{LookupMap, Vector},
 };
+
+mod migration;
 
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
@@ -228,11 +230,12 @@ impl AmpDex {
             None => pool.swap_fees(),
         };
         let swap_amounts = rated_pool
-            .swap_amounts(in_index, amount, swap_fees)
+            .swap_amounts(in_index, amount, swap_fees, pool.fees.oracle_fee(in_index))
             .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()));
         let SwapAmounts {
             amount_in,
             amount_out,
+            oracle_fee,
             pool_fee,
             protocol_fee,
         } = swap_amounts;
@@ -319,6 +322,18 @@ impl AmpDex {
             ));
         }
         fees_breakdown.push((FeeReceiver::Protocol, asset_in.clone(), protocol_fee));
+        if !oracle_fee.is_zero() {
+            self.fees_collected_by_users.credit(
+                &pool.fees.oracle_fee_receiver,
+                &asset_in,
+                oracle_fee,
+            );
+            fees_breakdown.push((
+                FeeReceiver::Oracle(pool.fees.oracle_fee_receiver.clone()),
+                asset_in.clone(),
+                oracle_fee,
+            ));
+        }
 
         let response = SwapResponse {
             amount_in,
@@ -517,7 +532,7 @@ impl AmpDex {
             decimals,
             amplification,
             oracle_key,
-            fee,
+            fees,
             initial_liquidity,
             creator_fee_payout_type,
         }) = near_sdk::borsh::from_slice(&args)
@@ -542,7 +557,10 @@ impl AmpDex {
             (MIN_AMPLIFICATION..=MAX_AMPLIFICATION).contains(&amplification),
             "Amplification must be from {MIN_AMPLIFICATION} to {MAX_AMPLIFICATION}"
         );
-        expect!(fee < FULL_FEE_FRACTION, "The fee must be less than 100%");
+        expect!(
+            fees.fraction < FULL_FEE_FRACTION,
+            "The fee must be less than 100%"
+        );
         expect!(
             !initial_liquidity.0.is_zero() && !initial_liquidity.1.is_zero(),
             "Initial liquidity amounts must be greater than 0"
@@ -554,6 +572,10 @@ impl AmpDex {
             .start(&protocol_fee_receiver_id, &assets.0);
         self.fees_collected_by_users
             .start(&protocol_fee_receiver_id, &assets.1);
+        self.fees_collected_by_users
+            .start(&fees.oracle_fee_receiver, &assets.0);
+        self.fees_collected_by_users
+            .start(&fees.oracle_fee_receiver, &assets.1);
         self.fees_collected_by_users.flush();
 
         let mut attached_near = NearToken::from_yoctonear(
@@ -625,7 +647,7 @@ impl AmpDex {
             amplification,
             oracle_key,
             last_oracle_price: Price::from_units(0),
-            fee,
+            fees,
             providers,
             total_shares: TotalShares::NONE.minted(INITIAL_SHARES).expect("Overflow"),
             payout_groups,
@@ -720,6 +742,83 @@ impl AmpDex {
         }
         .emit();
         DexCallResponse::default()
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn set_fees(
+        &mut self,
+        #[serializer(borsh)]
+        #[allow(unused_mut)]
+        mut attached_assets: HashMap<AssetId, TokenAmount>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        assert_private_beta_access();
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
+        expect!(
+            caller_id == env::dex_id().deployer,
+            "Only the owner of the dex can set the fees"
+        );
+        let Ok(SetFeesArgs { pool_id, fees }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        let attached_near = NearToken::from_yoctonear(
+            attached_assets
+                .remove(&AssetId::Near)
+                .unwrap_or_default()
+                .get(),
+        );
+        expect!(
+            attached_assets.is_empty(),
+            "No assets other than NEAR should be attached"
+        );
+        expect!(
+            fees.fraction < FULL_FEE_FRACTION,
+            "The fee must be less than 100%"
+        );
+        let storage_usage_before = near_sdk::env::storage_usage();
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
+            panic!("Pool not found");
+        };
+        let (asset_0, asset_1) = pool.asset_ids();
+        self.fees_collected_by_users
+            .start(&fees.oracle_fee_receiver, asset_0);
+        self.fees_collected_by_users
+            .start(&fees.oracle_fee_receiver, asset_1);
+        self.fees_collected_by_users.flush();
+        pool.fees = fees;
+        AmpDexEvent::PoolUpdated {
+            pool_id,
+            pool: pool.view(),
+        }
+        .emit();
+        self.pools.flush();
+        let storage_usage_after = near_sdk::env::storage_usage();
+        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
+            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
+        );
+        expect!(
+            let Some(leftover) = attached_near.checked_sub(storage_cost),
+            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
+        );
+        DexCallResponse {
+            asset_withdraw_requests: if !leftover.is_zero() {
+                vec![AssetWithdrawRequest {
+                    asset_id: AssetId::Near,
+                    amount: TokenAmount::new(leftover.as_yoctonear()),
+                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
+                        caller_id.clone(),
+                    ),
+                }]
+            } else {
+                vec![]
+            },
+            add_storage_deposit: storage_cost,
+            ..Default::default()
+        }
     }
 
     /// Change the oracle of a pool, which may have a key that takes more storage, paid for with

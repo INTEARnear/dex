@@ -1,6 +1,7 @@
 //! What the amp contract's records take in the dex's storage. Its fee
 //! balances are stored as xyk's, so [`super::xyk_storage`] counts them.
 
+use amp_dex_types::{FeeConfiguration, PROTOCOL_FEE_RECEIVER_ID};
 use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use near_sdk::PublicKeyHandle;
@@ -15,7 +16,8 @@ use super::xyk_storage::{
 // The decimals of both assets
 const DECIMALS_BYTES: usize = 2;
 const AMPLIFICATION_BYTES: usize = U32_BYTES;
-const FEE_BYTES: usize = U32_BYTES;
+// The oracle fee of each asset
+const ORACLE_FEES_BYTES: usize = U128_BYTES * 2;
 const PRICE_BYTES: usize = U128_BYTES;
 // The shares and fee growth of each of the three payout groups
 const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES) * 3;
@@ -42,6 +44,7 @@ pub fn new_pool_bytes(
     dex_id: &DexId,
     assets: (&AssetId, &AssetId),
     oracle_key: &PublicKeyHandle,
+    fees: &FeeConfiguration,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
     let asset_with_balance_bytes =
@@ -54,7 +57,7 @@ pub fn new_pool_bytes(
         borsh_bytes(oracle_key)?,
         // The last oracle price, which takes its full size before the first swap
         PRICE_BYTES,
-        FEE_BYTES,
+        borsh_bytes(fees)?,
         SHARE_MAP_BYTES,
         ENUM_TAG_BYTES,
         U128_BYTES,
@@ -80,6 +83,28 @@ pub fn liquidity_position_bytes(
         LIQUIDITY_POSITION_BYTES,
         extra_bytes_per_record,
     )
+}
+
+/// What the pools' records grow by when the migration gives each of them oracle fees, which go
+/// to the protocol
+pub fn oracle_fees_migration_bytes(pool_count: u32) -> color_eyre::eyre::Result<u64> {
+    let pool_growth = sum_bytes(&[
+        ORACLE_FEES_BYTES,
+        borsh_bytes(&PROTOCOL_FEE_RECEIVER_ID.to_owned())?,
+    ])?;
+    u64::from(pool_count)
+        .checked_mul(u64::try_from(pool_growth)?)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Storage size overflow"))
+}
+
+/// What a pool's record grows by when its fees change to ones with a
+/// longer oracle fee receiver; a shorter one frees storage instead
+pub fn fees_growth_bytes(
+    current_fees: &FeeConfiguration,
+    new_fees: &FeeConfiguration,
+) -> color_eyre::eyre::Result<u64> {
+    let growth = borsh_bytes(new_fees)?.saturating_sub(borsh_bytes(current_fees)?);
+    Ok(u64::try_from(growth)?)
 }
 
 /// What a pool's record grows by when its oracle changes to one with a
@@ -116,6 +141,11 @@ mod tests {
         // The fields of the contract's Pool in order, with its providers' map
         // stored as its prefix: the variant after its pools, and the pool id
         let providers_prefix = near_sdk::borsh::to_vec(&(1u8, PoolId::new(0))).unwrap();
+        let fees = FeeConfiguration {
+            fraction: FeeFraction::new(500),
+            oracle_fee_per_swap: (TokenAmount::new(1), TokenAmount::new(1)),
+            oracle_fee_receiver: "oracle.intear.near".parse().unwrap(),
+        };
         let pool_fields = (
             (
                 AssetWithBalance {
@@ -131,13 +161,13 @@ mod tests {
             Amplification::new(100),
             oracle_key.clone(),
             Price::from_units(0),
-            FeeFraction::new(500),
+            fees.clone(),
             providers_prefix,
             TotalShares::NONE.minted(INITIAL_SHARES).unwrap(),
             PayoutGroups::default(),
         );
         assert_eq!(
-            new_pool_bytes(&dex_id, (&assets.0, &assets.1), &oracle_key, 40).unwrap(),
+            new_pool_bytes(&dex_id, (&assets.0, &assets.1), &oracle_key, &fees, 40).unwrap(),
             dex_storage_record_bytes(
                 &dex_id,
                 POOL_KEY_BYTES,
@@ -168,6 +198,23 @@ mod tests {
                 40
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn migration_counts_what_the_fees_take_more_than_the_fee() {
+        let migrated_fees = FeeConfiguration {
+            fraction: FeeFraction::new(500),
+            oracle_fee_per_swap: (TokenAmount::ZERO, TokenAmount::ZERO),
+            oracle_fee_receiver: PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+        };
+        let pool_growth = near_sdk::borsh::to_vec(&migrated_fees).unwrap().len()
+            - near_sdk::borsh::to_vec(&migrated_fees.fraction)
+                .unwrap()
+                .len();
+        assert_eq!(
+            oracle_fees_migration_bytes(3).unwrap(),
+            u64::try_from(pool_growth * 3).unwrap()
         );
     }
 

@@ -333,41 +333,6 @@ pub fn dex_code(
     }
 }
 
-/// Every dex that has code. The engine can't list a map's entries, so this reads
-/// them from the engine's state, a page at a time.
-pub fn dex_ids(
-    network_config: &NetworkConfig,
-    block_reference: &BlockReference,
-) -> color_eyre::eyre::Result<Vec<DexId>> {
-    // The engine keeps the code of every dex under this prefix, keyed by the dex id
-    const ENGINE_DEX_CODES_PREFIX: u8 = 2;
-    // Nodes return fewer when the page would be too big
-    const PAGE_LIMIT: NonZeroU32 = NonZeroU32::new(1000).unwrap();
-    let mut dex_ids = Vec::new();
-    let mut after_key = None;
-    loop {
-        let state = engine_state_page(
-            network_config,
-            block_reference,
-            vec![ENGINE_DEX_CODES_PREFIX],
-            after_key,
-            PAGE_LIMIT,
-        )
-        .wrap_err("Couldn't read the dex codes")?;
-        for item in state.values {
-            // The mainnet engine also has keys under the prefix that aren't dex ids, from an
-            // earlier layout of its state that it doesn't read anymore
-            if let Ok(dex_id) = near_sdk::borsh::from_slice::<DexId>(&item.key[1..]) {
-                dex_ids.push(dex_id);
-            }
-        }
-        match state.last_key {
-            Some(last_key) => after_key = Some(last_key),
-            None => return Ok(dex_ids),
-        }
-    }
-}
-
 /// The length of the translation of a dex's code that the engine stores, `None` while it
 /// stores none. The engine has no view for it, so this reads it from the engine's state.
 pub fn dex_code_translation_len(

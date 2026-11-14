@@ -18,7 +18,7 @@ pub fn pool_assets(pool: &PoolView) -> [(AssetId, u128); 2] {
 pub fn fee_label(pool: &PoolView) -> String {
     format!(
         "{}, of which the protocol takes {PROTOCOL_FEE_SHARE}",
-        display::format_fee(pool.fee)
+        display::format_fee(pool.fees.fraction)
     )
 }
 
@@ -36,7 +36,7 @@ pub fn pool_label(
         asset_label(&asset_id_0, metadata_0.as_ref()),
         asset_label(&asset_id_1, metadata_1.as_ref()),
         pool.amplification,
-        display::format_fee(pool.fee),
+        display::format_fee(pool.fees.fraction),
         display::format_amount(reserve_0, metadata_0.as_ref()),
         display::format_amount(reserve_1, metadata_1.as_ref()),
     ))
@@ -48,15 +48,20 @@ pub fn pool_json(
     metadata_cache: &AssetMetadataCache,
 ) -> color_eyre::eyre::Result<serde_json::Value> {
     let mut assets_json = Vec::new();
-    for ((asset_id, reserve), decimals) in pool_assets(pool)
+    for (((asset_id, reserve), decimals), oracle_fee) in pool_assets(pool)
         .iter()
         .zip([pool.decimals.0, pool.decimals.1])
+        .zip([
+            pool.fees.oracle_fee_per_swap.0,
+            pool.fees.oracle_fee_per_swap.1,
+        ])
     {
         let metadata = metadata_cache.get(asset_id)?;
         assets_json.push(json!({
             "asset_id": asset_id,
             "decimals": decimals,
             "reserve": display::amount_json(*reserve, metadata.as_ref()),
+            "oracle_fee": display::amount_json(oracle_fee.get(), metadata.as_ref()),
         }));
     }
     let swap_fees = pool.swap_fees();
@@ -66,7 +71,8 @@ pub fn pool_json(
         "amplification": pool.amplification,
         "oracle_key": pool.oracle_key,
         "last_oracle_price": pool.last_oracle_price,
-        "fee": display::fee_json(pool.fee),
+        "fee": display::fee_json(pool.fees.fraction),
+        "oracle_fee_receiver": pool.fees.oracle_fee_receiver,
         "fees": {
             "pool": display::fee_json(swap_fees.pool),
             "protocol": display::fee_json(swap_fees.protocol),

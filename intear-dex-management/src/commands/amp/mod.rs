@@ -1,6 +1,7 @@
-use amp_dex_types::PoolView;
+use amp_dex_types::{FULL_FEE_FRACTION, FeeConfiguration, FeeFraction, PoolView, TokenAmount};
 use color_eyre::eyre::bail;
 use intear_dex_common::{AssetId, DexId};
+use near_primitives::types::AccountId;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
@@ -8,6 +9,7 @@ use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::commands::xyk::{FeesContext, FeesDex};
 use crate::deployment::{DEFAULT_AMP_DEX_DEPLOYER, DEFAULT_AMP_DEX_NAME};
 use crate::errors::PreflightError;
+use crate::inputs::amount::AmountArg;
 use crate::inputs::dex_id::DexIdArg;
 use crate::inputs::pool_id::PoolIdArg;
 use crate::planning::Preflight;
@@ -80,9 +82,9 @@ pub enum AmpAction {
     /// List or count pools
     Pools(self::pools::PoolsCommands),
     #[strum_discriminants(strum(
-        message = "pool            - One pool in detail, or change it: set-amplification, set-oracle-key"
+        message = "pool            - One pool in detail, or change it: set-amplification, set-oracle-key, set-fees"
     ))]
-    /// One pool in detail, or change it: set-amplification, set-oracle-key
+    /// One pool in detail, or change it: set-amplification, set-oracle-key, set-fees
     Pool(self::pool::PoolCommands),
     #[strum_discriminants(strum(message = "liquidity       - Show, add or remove liquidity"))]
     /// Show, add or remove liquidity
@@ -102,8 +104,10 @@ pub enum AmpAction {
     ))]
     /// Create a pool rated at an oracle's prices, as the owner of the dex
     CreatePool(self::create_pool::CreatePool),
-    #[strum_discriminants(strum(message = "deploy          - Deploy amp code as <signer>/<name>"))]
-    /// Deploy amp code as <signer>/<name>
+    #[strum_discriminants(strum(
+        message = "deploy          - Deploy amp code as <signer>/<name>; --migrate converts the state too"
+    ))]
+    /// Deploy amp code as <signer>/<name>; --migrate converts the state too
     Deploy(self::deploy::Deploy),
     #[strum_discriminants(strum(message = "init            - Initialize a newly deployed dex"))]
     /// Initialize a newly deployed dex
@@ -208,6 +212,42 @@ fn ensure_dex_owner(
         .into_report());
     }
     Ok(())
+}
+
+/// The fees of a pool of `assets` with a fee of `fee_millionths`, and oracle fees for
+/// `oracle_fee_receiver` that name their assets in either order, which can be zero
+fn fee_configuration(
+    fee_millionths: u32,
+    oracle_fees: &(AmountArg, AmountArg),
+    oracle_fee_receiver: AccountId,
+    assets: &[(AssetId, Option<AssetMetadata>); 2],
+    pair_label: &str,
+) -> color_eyre::eyre::Result<FeeConfiguration> {
+    let fraction = FeeFraction::new(fee_millionths);
+    if fraction >= FULL_FEE_FRACTION {
+        return Err(PreflightError::FeesNotAllowed {
+            problem: "the fee must be less than 100%".to_string(),
+        }
+        .into_report());
+    }
+    let (first_asset_id, first_fixed_fee) = oracle_fees.0.resolve(assets)?;
+    let (second_asset_id, second_fixed_fee) = oracle_fees.1.resolve(assets)?;
+    if first_asset_id == second_asset_id {
+        return Err(PreflightError::AmountsOfOneAsset {
+            pair: pair_label.to_string(),
+        }
+        .into_report());
+    }
+    let (fixed_fee_0, fixed_fee_1) = if first_asset_id == assets[0].0 {
+        (first_fixed_fee, second_fixed_fee)
+    } else {
+        (second_fixed_fee, first_fixed_fee)
+    };
+    Ok(FeeConfiguration {
+        fraction,
+        oracle_fee_per_swap: (TokenAmount::new(fixed_fee_0), TokenAmount::new(fixed_fee_1)),
+        oracle_fee_receiver,
+    })
 }
 
 /// A pool that a write changes, with the metadata of its two assets

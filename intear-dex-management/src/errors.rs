@@ -46,10 +46,6 @@ pub enum PreflightError {
     )]
     UntrackedNearShort { available: String, needed: String },
     #[error(
-        "{translator_id} has no code, and {ENGINE_ACCOUNT_ID} translates the code of dexes with it"
-    )]
-    TranslatorWithoutCode { translator_id: AccountId },
-    #[error(
         "{account_id} can spend {available} from its wallet, but this transaction needs up to {needed}"
     )]
     InsufficientWalletBalance {
@@ -145,6 +141,8 @@ pub enum PreflightError {
     ReservedDexMethod,
     #[error("{dex_id} is already initialized")]
     AlreadyInitialized { dex_id: DexId },
+    #[error("{dex_id} has no code yet, so there's nothing to migrate")]
+    NothingToMigrate { dex_id: DexId, init_command: String },
     #[error("{signer_id} can't change who signs fee discounts; only {setter_id} can")]
     NotAllowedToSetFeeDiscountSigner {
         signer_id: AccountId,
@@ -322,12 +320,12 @@ impl PreflightError {
             Self::UntrackedNearShort { .. } => Some(format!(
                 "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
             )),
-            Self::TranslatorWithoutCode { translator_id } => Some(format!(
-                "Deploy the translator, the translator package of the dex repository, to {translator_id} first"
-            )),
             Self::AssetNotRegisteredForSigner {
                 register_command, ..
             } => Some(format!("Register it first:\n    {register_command}")),
+            Self::NothingToMigrate { init_command, .. } => Some(format!(
+                "Deploy without --migrate, then initialize it:\n    {init_command}"
+            )),
             Self::NotRegisteredWithToken { token_id, .. } => Some(format!(
                 "Use to-balance instead, or pay for storage on {token_id} with its storage_deposit first"
             )),
