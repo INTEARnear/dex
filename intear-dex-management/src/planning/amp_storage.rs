@@ -1,7 +1,7 @@
 //! What the amp contract's records take in the dex's storage. Its fee
 //! balances are stored as xyk's, so [`super::xyk_storage`] counts them.
 
-use amp_dex_types::{FeeConfiguration, PROTOCOL_FEE_RECEIVER_ID};
+use amp_dex_types::FeeConfiguration;
 use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use near_sdk::PublicKeyHandle;
@@ -16,8 +16,6 @@ use super::xyk_storage::{
 // The decimals of both assets
 const DECIMALS_BYTES: usize = 2;
 const AMPLIFICATION_BYTES: usize = U32_BYTES;
-// The oracle fee of each asset
-const ORACLE_FEES_BYTES: usize = U128_BYTES * 2;
 const PRICE_BYTES: usize = U128_BYTES;
 // The shares and fee growth of each of the three payout groups
 const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES) * 3;
@@ -83,18 +81,6 @@ pub fn liquidity_position_bytes(
         LIQUIDITY_POSITION_BYTES,
         extra_bytes_per_record,
     )
-}
-
-/// What the pools' records grow by when the migration gives each of them oracle fees, which go
-/// to the protocol
-pub fn oracle_fees_migration_bytes(pool_count: u32) -> color_eyre::eyre::Result<u64> {
-    let pool_growth = sum_bytes(&[
-        ORACLE_FEES_BYTES,
-        borsh_bytes(&PROTOCOL_FEE_RECEIVER_ID.to_owned())?,
-    ])?;
-    u64::from(pool_count)
-        .checked_mul(u64::try_from(pool_growth)?)
-        .ok_or_else(|| color_eyre::eyre::eyre!("Storage size overflow"))
 }
 
 /// What a pool's record grows by when its fees change to ones with a
@@ -198,23 +184,6 @@ mod tests {
                 40
             )
             .unwrap()
-        );
-    }
-
-    #[test]
-    fn migration_counts_what_the_fees_take_more_than_the_fee() {
-        let migrated_fees = FeeConfiguration {
-            fraction: FeeFraction::new(500),
-            oracle_fee_per_swap: (TokenAmount::ZERO, TokenAmount::ZERO),
-            oracle_fee_receiver: PROTOCOL_FEE_RECEIVER_ID.to_owned(),
-        };
-        let pool_growth = near_sdk::borsh::to_vec(&migrated_fees).unwrap().len()
-            - near_sdk::borsh::to_vec(&migrated_fees.fraction)
-                .unwrap()
-                .len();
-        assert_eq!(
-            oracle_fees_migration_bytes(3).unwrap(),
-            u64::try_from(pool_growth * 3).unwrap()
         );
     }
 

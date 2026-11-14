@@ -9,8 +9,11 @@ pub use intear_dex_common::{
     ProviderShares, RouteFraction, SetFeeDiscountSignerArgs, TokenAmount, TotalShares,
     WithdrawFeesArgs,
 };
-use near_sdk::{AccountId, AccountIdRef, PublicKeyHandle, json_types::U128, near};
+use near_sdk::{
+    AccountId, AccountIdRef, PublicKeyHandle, borsh::BorshSerialize, json_types::U128, near,
+};
 
+mod legacy_deserialization;
 mod liquidity_fees;
 pub mod math;
 mod pool;
@@ -365,8 +368,14 @@ pub struct LiquidityPositionView {
     pub uncollected_fees: (TokenAmount, TokenAmount),
 }
 
-#[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq)]
+#[near(serializers=[json])]
+#[serde(from = "legacy_deserialization::JsonPoolView")]
+#[derive(Clone, PartialEq, BorshSerialize)]
+#[borsh(crate = "near_sdk::borsh")]
+#[cfg_attr(
+    all(feature = "abi", not(target_arch = "wasm32")),
+    derive(near_sdk::borsh::BorshSchema)
+)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct PoolView {
     pub assets: (AssetWithBalance, AssetWithBalance),

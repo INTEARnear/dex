@@ -434,8 +434,6 @@ pub const DEX_CODE_NOT_FOUND: &str = "Dex code not found";
 pub const NOT_INITIALIZED: &str = "The contract is not initialized";
 /// near-sdk's panic when a contract's code can't read its state
 pub const UNREADABLE_STATE: &str = "Cannot deserialize the contract state.";
-/// near-sdk's panic when a contract's code can't read an element of one of its collections
-pub const UNREADABLE_ELEMENT: &str = "Cannot deserialize element";
 
 struct ContractPanicHint {
     /// Part of the panic message as the contract sources spell it
