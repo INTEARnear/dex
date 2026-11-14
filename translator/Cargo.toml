@@ -9,4 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
-wasmi = { version = "=1.1.0", default-features = false, features = ["std", "translate"] }
+wasmi = { version = "=1.1.0", default-features = false, features = ["std"] }

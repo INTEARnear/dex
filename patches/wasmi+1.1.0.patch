@@ -1,16 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index f57acec..89bb07f 100644
+index f57acec..d65234f 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -55,6 +55,7 @@ features = [
- default = [
-     "std",
-     "wat",
-+    "translate",
- ]
- extra-checks = []
- hash-collections = [
-@@ -70,6 +71,7 @@ simd = [
+@@ -70,11 +70,13 @@ simd = [
      "wasmi_ir/simd",
      "wasmparser/simd",
  ]
@@ -18,14 +10,12 @@ index f57acec..89bb07f 100644
  std = [
      "wasmi_core/std",
      "wasmi_collections/std",
-@@ -79,6 +81,7 @@ std = [
- wat = [
-     "dep:wat",
-     "std",
+     "wasmparser/std",
+     "spin/std",
 +    "translate",
  ]
- 
- [lib]
+ wat = [
+     "dep:wat",
 diff --git a/src/engine/code_map.rs b/src/engine/code_map.rs
 index f1fccb0..3bdbff1 100644
 --- a/src/engine/code_map.rs

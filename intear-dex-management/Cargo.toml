@@ -37,6 +37,6 @@ otc-dex-types = { path = "../dexes/otc/types" }
 amp-dex-types = { path = "../dexes/amp/types" }
 crypto-bigint = { version = "0.6.1", default-features = false }
 # Translates dex code like the translator, which has the same features, to plan for its storage
-wasmi = { version = "=1.1.0", default-features = false, features = ["std", "translate"] }
+wasmi = { version = "=1.1.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
