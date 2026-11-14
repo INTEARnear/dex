@@ -141,8 +141,10 @@ pub enum PreflightError {
     ReservedDexMethod,
     #[error("{dex_id} is already initialized")]
     AlreadyInitialized { dex_id: DexId },
-    #[error("{dex_id} has no code yet, so there's nothing to migrate")]
-    NothingToMigrate { dex_id: DexId, init_command: String },
+    #[error(
+        "{ENGINE_ACCOUNT_ID} runs code from before call_after_deploy, which would deploy the code without calling {method} on it"
+    )]
+    EngineWithoutCallAfterDeploy { method: String },
     #[error("{signer_id} can't change who signs fee discounts; only {setter_id} can")]
     NotAllowedToSetFeeDiscountSigner {
         signer_id: AccountId,
@@ -323,9 +325,9 @@ impl PreflightError {
             Self::AssetNotRegisteredForSigner {
                 register_command, ..
             } => Some(format!("Register it first:\n    {register_command}")),
-            Self::NothingToMigrate { init_command, .. } => Some(format!(
-                "Deploy without --migrate, then initialize it:\n    {init_command}"
-            )),
+            Self::EngineWithoutCallAfterDeploy { .. } => {
+                Some("Upgrade the engine with `engine upgrade` first".to_string())
+            }
             Self::NotRegisteredWithToken { token_id, .. } => Some(format!(
                 "Use to-balance instead, or pay for storage on {token_id} with its storage_deposit first"
             )),
@@ -432,6 +434,8 @@ pub const DEX_CODE_NOT_FOUND: &str = "Dex code not found";
 pub const NOT_INITIALIZED: &str = "The contract is not initialized";
 /// near-sdk's panic when a contract's code can't read its state
 pub const UNREADABLE_STATE: &str = "Cannot deserialize the contract state.";
+/// near-sdk's panic when a contract's code can't read an element of one of its collections
+pub const UNREADABLE_ELEMENT: &str = "Cannot deserialize element";
 
 struct ContractPanicHint {
     /// Part of the panic message as the contract sources spell it

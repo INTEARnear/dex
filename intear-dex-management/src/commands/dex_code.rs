@@ -6,18 +6,23 @@ use std::process::Command;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
-use intear_dex_common::DexId;
+use intear_dex_common::{AssetId, DexId, TokenAmount};
+use intear_dex_types::DexCallAfterDeploy;
 use near_primitives::gas::Gas;
+use near_sdk::NearToken;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use serde_json::json;
 
-use crate::chain::engine;
+use crate::chain::{account, engine};
+use crate::commands::engine::deposit::DEPOSIT_NEAR_GAS;
+use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
-use crate::planning::{FunctionCall, ONE_YOCTO_NEAR, Preflight, storage};
+use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near, storage};
 
 // The translator validates and translates the code, and the engine stores both after it
 const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(300);
 const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
+const CALL_AFTER_DEPLOY_ARG: &[u8] = b"call_after_deploy";
 
 /// The dex that deploy creates or replaces: <signer>/<name>
 pub fn deployed_dex_id(
@@ -142,6 +147,18 @@ pub fn translate(code: &[u8]) -> color_eyre::eyre::Result<Vec<u8>> {
         .map_err(|err| eyre!("The translator rejects {} bytes of code: {err}", code.len()))
 }
 
+/// A method of the new code that the engine calls in the receipt that stores
+/// the code, so that the code stays as it was if the call fails
+pub struct CallAfterDeploy {
+    pub method: String,
+    pub args: Vec<u8>,
+    /// What the call takes from the signer's balance on the engine, which the
+    /// transaction deposits, such as for the storage it adds
+    pub attached_near: NearToken,
+    /// What the call does, for the plan
+    pub step: String,
+}
+
 /// What deploying code to a dex takes: the storage for the code, and the
 /// deploy itself
 pub struct CodeDeployment {
@@ -154,12 +171,14 @@ pub struct CodeDeployment {
 }
 
 /// `extra_state_bytes` is what the dex's storage balance has to cover on top
-/// of the code, for state that the dex stores as soon as it's called
+/// of the code of a new dex, for state that the dex stores as soon as it's
+/// called
 pub fn plan_code_deployment(
     preflight: &Preflight,
     dex_id: &DexId,
     code: &[u8],
     extra_state_bytes: u64,
+    call_after_deploy: Option<CallAfterDeploy>,
 ) -> color_eyre::eyre::Result<CodeDeployment> {
     let trusted_code_deployer =
         engine::trusted_code_deployer(&preflight.network_config, &preflight.block_reference)?;
@@ -169,6 +188,24 @@ pub fn plan_code_deployment(
             trusted_code_deployer,
         }
         .into_report());
+    }
+    if let Some(call_after_deploy) = &call_after_deploy {
+        // The engine ignores arguments it doesn't take, so code from before call_after_deploy
+        // would deploy without making the call. Code that takes it has its name to read it.
+        let engine_code = account::view_code(
+            &preflight.network_config,
+            &preflight.block_reference,
+            &ENGINE_ACCOUNT_ID.to_owned(),
+        )?;
+        if !engine_code
+            .windows(CALL_AFTER_DEPLOY_ARG.len())
+            .any(|bytes| bytes == CALL_AFTER_DEPLOY_ARG)
+        {
+            return Err(PreflightError::EngineWithoutCallAfterDeploy {
+                method: call_after_deploy.method.clone(),
+            }
+            .into_report());
+        }
     }
     let deployed_code = engine::dex_code(
         &preflight.network_config,
@@ -213,20 +250,76 @@ pub fn plan_code_deployment(
         }));
         function_calls.push(storage_top_up.function_call());
     }
+    if let Some(call_after_deploy) = &call_after_deploy
+        && !call_after_deploy.attached_near.is_zero()
+    {
+        let registration_calls = preflight.registration_calls(
+            &planning::storage_near_registrations(&preflight.signer_id, dex_id),
+        )?;
+        steps.extend(registration_calls.steps);
+        function_calls.extend(registration_calls.function_calls);
+        steps.push(format!(
+            "Deposit {} from {}'s wallet into its balance on {ENGINE_ACCOUNT_ID}, which {} takes; {dex_id} sends back what it doesn't use",
+            format_near(call_after_deploy.attached_near),
+            preflight.signer_id,
+            call_after_deploy.method
+        ));
+        function_calls.push(FunctionCall {
+            method_name: "deposit_near",
+            args: json!({}).into(),
+            deposit: call_after_deploy.attached_near,
+            gas: DEPOSIT_NEAR_GAS,
+        });
+    }
     steps.push(if is_upgrade {
         format!("Deploy {code_label} to {dex_id}, replacing its code")
     } else {
         format!("Deploy {code_label} to {dex_id}, a new dex")
     });
+    let gas = match &call_after_deploy {
+        Some(call_after_deploy) => {
+            steps.push(call_after_deploy.step.clone());
+            steps.push(format!(
+                "{} runs on the new code in the receipt that stores it, so if it fails, the code stays as it was",
+                call_after_deploy.method
+            ));
+            // The translation and the call after it share what's left of the transaction's gas
+            let other_calls_gas = function_calls
+                .iter()
+                .try_fold(Gas::from_gas(0), |total, call: &FunctionCall| {
+                    total.checked_add(call.gas)
+                })
+                .ok_or_else(|| eyre!("Gas overflow"))?;
+            preflight
+                .protocol_limits
+                .max_prepaid_gas
+                .checked_sub(other_calls_gas)
+                .ok_or_else(|| eyre!("The storage top-up takes all of a transaction's gas"))?
+        }
+        None => DEPLOY_DEX_CODE_GAS,
+    };
     function_calls.push(FunctionCall {
         method_name: "deploy_dex_code",
         args: json!({
             "last_part_of_id": dex_id.id,
             "code_base64": Base64VecU8(code.to_vec()),
+            "call_after_deploy": call_after_deploy.map(|call_after_deploy| DexCallAfterDeploy {
+                method: call_after_deploy.method,
+                args: Base64VecU8(call_after_deploy.args),
+                attached_assets: if call_after_deploy.attached_near.is_zero() {
+                    Default::default()
+                } else {
+                    [(
+                        AssetId::Near,
+                        TokenAmount::new(call_after_deploy.attached_near.as_yoctonear()),
+                    )]
+                    .into()
+                },
+            }),
         })
         .into(),
         deposit: ONE_YOCTO_NEAR,
-        gas: DEPLOY_DEX_CODE_GAS,
+        gas,
     });
     Ok(CodeDeployment {
         is_upgrade,

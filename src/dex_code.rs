@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use intear_dex_common::{DexId, expect};
-use intear_dex_types::IntearDexEvent;
+use intear_dex_common::{Caller, DexId, expect};
+use intear_dex_types::{DexCallAfterDeploy, IntearDexEvent};
 use near_sdk::{
     AccountId, Gas, GasWeight, IntoStorageKey, NearToken, Promise, json_types::Base58CryptoHash,
     near,
 };
 use wasmi::{Engine, Module};
 
-use crate::{DexEngine, DexEngineExt, StorageKey};
+use crate::{DexEngine, DexEngineExt, StorageKey, call_events::CallEvents};
 
 #[near]
 impl DexEngine {
@@ -18,18 +18,19 @@ impl DexEngine {
     pub fn translate_dex_codes(&mut self, dex_ids: Vec<DexId>) {
         for dex_id in dex_ids {
             let code = self.dex_codes.get(&dex_id).expect("Dex code not found");
-            Self::translate_dex_code(dex_id, code.clone(), false).detach();
+            Self::translate_dex_code(dex_id, code.clone(), false, None).detach();
         }
     }
 
     /// Store the translation of a dex's code that the translator returned, and the code if it's
-    /// being deployed, which the dex pays the storage of
+    /// being deployed, which the dex pays the storage of, and then make the call after the deploy
     #[private]
     pub fn after_dex_code_translation(
         &mut self,
         #[serializer(borsh)] dex_id: DexId,
         #[serializer(borsh)] code: Vec<u8>,
         #[serializer(borsh)] deployed: bool,
+        #[serializer(borsh)] call_after_deploy: Option<DexCallAfterDeploy>,
     ) {
         let translated_code =
             near_sdk::env::promise_result_checked(0, usize::MAX).unwrap_or_else(|err| {
@@ -57,11 +58,37 @@ impl DexEngine {
             storage_usage_before,
             near_sdk::env::storage_usage(),
         );
+        if let Some(DexCallAfterDeploy {
+            method,
+            args,
+            attached_assets,
+        }) = call_after_deploy
+        {
+            self.assert_not_paused();
+            let mut events = CallEvents::default();
+            self.internal_dex_call(
+                &mut events,
+                dex_id.clone(),
+                method,
+                args,
+                attached_assets,
+                Caller::Direct(dex_id.deployer),
+                None,
+                None,
+                None,
+            );
+            events.emit();
+        }
     }
 }
 
 impl DexEngine {
-    pub fn translate_dex_code(dex_id: DexId, code: Vec<u8>, deployed: bool) -> Promise {
+    pub fn translate_dex_code(
+        dex_id: DexId,
+        code: Vec<u8>,
+        deployed: bool,
+        call_after_deploy: Option<DexCallAfterDeploy>,
+    ) -> Promise {
         Promise::new(translator_account_id())
             .function_call_weight(
                 "translate".to_string(),
@@ -71,8 +98,12 @@ impl DexEngine {
                 GasWeight(1),
             )
             .then(
-                Self::ext(near_sdk::env::current_account_id())
-                    .after_dex_code_translation(dex_id, code, deployed),
+                Self::ext(near_sdk::env::current_account_id()).after_dex_code_translation(
+                    dex_id,
+                    code,
+                    deployed,
+                    call_after_deploy,
+                ),
             )
     }
 }

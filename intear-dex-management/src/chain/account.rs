@@ -45,11 +45,11 @@ pub fn view_account(
     }
 }
 
-pub fn view_code_size(
+pub fn view_code(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
     account_id: &AccountId,
-) -> color_eyre::eyre::Result<usize> {
+) -> color_eyre::eyre::Result<Vec<u8>> {
     let response = network_config
         .json_rpc_client()
         .blocking_call(RpcQueryRequest {
@@ -66,7 +66,7 @@ pub fn view_code_size(
             )
         })?;
     match response.kind {
-        QueryResponseKind::ViewCode(code) => Ok(code.code.len()),
+        QueryResponseKind::ViewCode(code) => Ok(code.code),
         _ => Err(eyre!(
             "RPC {} answered the code lookup of {account_id} with something other than code",
             network_config.rpc_url

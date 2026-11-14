@@ -23,8 +23,8 @@ use crate::{
 };
 use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
 use intear_dex_types::{
-    AccountOrDexId, CAN_PAUSE, DexEventData, DirectWithdrawAmount, IntearDexEvent, Operation,
-    ReferralFees, UnsignedOracleResponse,
+    AccountOrDexId, CAN_PAUSE, DexCallAfterDeploy, DexEventData, DirectWithdrawAmount,
+    IntearDexEvent, Operation, ReferralFees, UnsignedOracleResponse,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
@@ -418,6 +418,7 @@ impl DexEngine {
         &mut self,
         last_part_of_id: String,
         code_base64: Base64VecU8,
+        call_after_deploy: Option<DexCallAfterDeploy>,
     ) -> Promise {
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
@@ -430,7 +431,7 @@ impl DexEngine {
             deployer,
             id: last_part_of_id,
         };
-        Self::translate_dex_code(dex_id, code_base64.0, true)
+        Self::translate_dex_code(dex_id, code_base64.0, true, call_after_deploy)
     }
 
     /// Swap one asset for another on a specific dex.

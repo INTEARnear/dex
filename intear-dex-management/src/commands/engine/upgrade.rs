@@ -356,11 +356,12 @@ impl DeployContext {
             &previous_context,
             ENGINE_ACCOUNT_ID.to_owned(),
             move |preflight| {
-                let current_code_size = account::view_code_size(
+                let current_code_size = account::view_code(
                     &preflight.network_config,
                     &preflight.block_reference,
                     &ENGINE_ACCOUNT_ID.to_owned(),
-                )?;
+                )?
+                .len();
                 let expected_outcome = ExpectedOutcome {
                     action_name: "upgrade",
                     success_message: success_message.clone(),

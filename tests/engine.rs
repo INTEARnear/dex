@@ -5,7 +5,8 @@ use intear_dex::oracle::{
 };
 use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, Operation, SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
+    AccountOrDexId, DexCallAfterDeploy, Operation, SwapAdvancedMode, SwapOperationAmount,
+    SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
@@ -3959,6 +3960,89 @@ async fn test_dex_code_view() {
         format!("{error:?}").contains("Dex code not found"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn test_call_after_dex_code_deploy() {
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let wasms = get_compiled_wasms().await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_storage_deposit")
+        .max_gas()
+        .deposit(engine_dex_storage_deposit())
+        .args_json(json!({
+            "dex_id": dex_id,
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let deploy = |code: &[u8], method: &str| {
+        deployer
+            .call(dex_engine_contract.id(), "deploy_dex_code")
+            .gas(Gas::from_tgas(1_000))
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "last_part_of_id": dex_id.id,
+                "code_base64": BASE64_STANDARD.encode(code),
+                "call_after_deploy": DexCallAfterDeploy {
+                    method: method.to_string(),
+                    args: Base64VecU8(Vec::new()),
+                    attached_assets: HashMap::new(),
+                },
+            }))
+            .transact()
+    };
+    let dex_code = || async {
+        dex_engine_contract
+            .view("dex_code")
+            .args_json(json!({
+                "dex_id": dex_id,
+            }))
+            .await
+            .unwrap()
+            .json::<Base64VecU8>()
+            .unwrap()
+            .0
+    };
+
+    // The call runs on the new code as a dex call of the deployer, such as the dex's initialization
+    let result = deploy(&wasms.test_dex_wasm, "new").await.unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(dex_code().await, wasms.test_dex_wasm);
+    let result = deployer
+        .call(dex_engine_contract.id(), "dex_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "new",
+            "args": Base64VecU8(Vec::new()),
+            "attached_assets": {},
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("The contract has already been initialized"),
+        "{result:?}"
+    );
+
+    // The code isn't deployed if the call fails
+    let result = deploy(&wasms.otc_dex_wasm, "create_pool").await.unwrap();
+    assert!(
+        format!("{result:?}").contains("Failed to get function 'create_pool'"),
+        "{result:?}"
+    );
+    assert_eq!(dex_code().await, wasms.test_dex_wasm);
 }
 
 #[tokio::test]

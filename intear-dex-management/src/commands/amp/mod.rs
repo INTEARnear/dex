@@ -104,10 +104,8 @@ pub enum AmpAction {
     ))]
     /// Create a pool rated at an oracle's prices, as the owner of the dex
     CreatePool(self::create_pool::CreatePool),
-    #[strum_discriminants(strum(
-        message = "deploy          - Deploy amp code as <signer>/<name>; --migrate converts the state too"
-    ))]
-    /// Deploy amp code as <signer>/<name>; --migrate converts the state too
+    #[strum_discriminants(strum(message = "deploy          - Deploy amp code as <signer>/<name>"))]
+    /// Deploy amp code as <signer>/<name>
     Deploy(self::deploy::Deploy),
     #[strum_discriminants(strum(message = "init            - Initialize a newly deployed dex"))]
     /// Initialize a newly deployed dex

@@ -157,7 +157,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             code_label,
             mut steps,
             function_calls,
-        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, initial_state_bytes)?;
+        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, initial_state_bytes, None)?;
         if is_upgrade {
             steps.push("Keep the state as it is".to_string());
         }

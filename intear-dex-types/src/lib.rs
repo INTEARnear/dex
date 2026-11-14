@@ -213,6 +213,15 @@ pub enum Operation {
 
 #[derive(Clone)]
 #[cfg_attr(debug_assertions, derive(Debug))]
+#[near(serializers=[borsh, json])]
+pub struct DexCallAfterDeploy {
+    pub method: String,
+    pub args: Base64VecU8,
+    pub attached_assets: HashMap<AssetId, TokenAmount>,
+}
+
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
 #[near(serializers=[json])]
 pub struct UnsignedOracleResponse {
     pub oracle_key: PublicKeyHandle,
