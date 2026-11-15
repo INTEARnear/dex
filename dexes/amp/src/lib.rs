@@ -413,14 +413,6 @@ impl OraclePrices {
     }
 }
 
-fn assert_private_beta_access() {
-    #[cfg(feature = "private_beta")]
-    expect!(
-        env::caller().alleged_account_id() == "slimedragon.near",
-        "Only slimedragon.near can manage this dex and provide liquidity in its private beta"
-    );
-}
-
 /// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
 /// that `payout_type` takes fees in
 fn start_fee_balances(
@@ -471,7 +463,6 @@ impl AmpDex {
     #[init]
     #[payable]
     pub fn new() -> Self {
-        assert_private_beta_access();
         expect!(
             matches!(env::caller(), Caller::Direct(_)),
             "This method can only be called directly, not in a transfer call"
@@ -490,7 +481,6 @@ impl AmpDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -711,7 +701,6 @@ impl AmpDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -753,7 +742,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -832,7 +820,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -903,7 +890,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -987,7 +973,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -1148,7 +1133,6 @@ impl AmpDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -1285,7 +1269,6 @@ impl AmpDex {
         mut attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -1383,7 +1366,6 @@ impl AmpDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"
@@ -1419,7 +1401,6 @@ impl AmpDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        assert_private_beta_access();
         expect!(
             let Caller::Direct(caller_id) = env::caller(),
             "This method can only be called directly, not in a transfer call"

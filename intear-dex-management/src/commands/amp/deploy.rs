@@ -81,9 +81,9 @@ impl DeployContext {
 /// Where does the code come from?
 pub enum DeployCode {
     #[strum_discriminants(strum(
-        message = "build     - Build amp-dex for its private beta, where only slimedragon.near provides liquidity, in the checkout you're in, with cargo and wasm-opt"
+        message = "build     - Build amp-dex in the checkout you're in, with cargo and wasm-opt"
     ))]
-    /// Build amp-dex for its private beta, where only slimedragon.near provides liquidity, in the checkout you're in, with cargo and wasm-opt
+    /// Build amp-dex in the checkout you're in, with cargo and wasm-opt
     Build(Build),
     #[strum_discriminants(strum(message = "use-file  - Deploy a wasm file that's already built"))]
     /// Deploy a wasm file that's already built
@@ -107,7 +107,7 @@ impl BuildContext {
         previous_context: DeployContext,
         _scope: &<Build as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let code = dex_code::build_dex_package("amp-dex", &["private_beta"])?;
+        let code = dex_code::build_dex_package("amp-dex", &[])?;
         Ok(Self(deploy_action_context(previous_context, code)))
     }
 }
