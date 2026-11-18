@@ -224,7 +224,7 @@ impl BuildContext {
             ));
         }
         lines.push(
-            "The method runs on the new code right after it's deployed: migrate if the state changed, else a view such as is_paused".to_string(),
+            "The method runs on the new code right after it's deployed: migrate if the state changed, with its arguments as --then-call-args, else a view such as is_paused".to_string(),
         );
         tracing::info!("{}", lines.join("\n│  "));
         Ok(Self)
@@ -329,8 +329,12 @@ impl From<StoreChunkContext> for ActionContext {
 #[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = DeployContext)]
 pub struct Deploy {
-    /// Which method of the new code runs right after it's deployed? migrate if the state changed, else a view such as is_paused
+    /// Which method of the new code runs right after it's deployed? migrate if the state changed, with its arguments as --then-call-args, else a view such as is_paused
     then_call: String,
+    #[interactive_clap(long)]
+    #[interactive_clap(skip_interactive_input)]
+    /// The arguments of the method as JSON, e.g. '{"oracle_fee_receivers":[["ed25519:…","oracle.near"]]}' (default {})
+    then_call_args: Option<near_cli_rs::types::json::Json>,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
@@ -346,6 +350,10 @@ impl DeployContext {
     ) -> color_eyre::eyre::Result<Self> {
         let built = EngineCheckout::in_current_directory()?.built_code()?;
         let then_call: &'static str = scope.then_call.clone().leak();
+        let then_call_args = scope
+            .then_call_args
+            .clone()
+            .map_or_else(|| json!({}), serde_json::Value::from);
         let code_label = built.label();
         let success_message =
             format!("Deployed {code_label} to {ENGINE_ACCOUNT_ID}, and {then_call} ran on it");
@@ -381,14 +389,14 @@ impl DeployContext {
                         receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
                         steps: vec![
                             format!(
-                                "Deploy {code_label} to {ENGINE_ACCOUNT_ID}, and call {then_call} on it in the same receipt"
+                                "Deploy {code_label} to {ENGINE_ACCOUNT_ID}, and call {then_call} on it with {then_call_args} in the same receipt"
                             ),
                             stays_if_it_fails.clone(),
                         ],
                         deploy_code: Some(built.code.clone()),
                         function_calls: vec![FunctionCall {
                             method_name: then_call,
-                            args: json!({}).into(),
+                            args: then_call_args.clone().into(),
                             deposit: NearToken::from_yoctonear(0),
                             gas: THEN_CALL_GAS,
                         }],
@@ -408,7 +416,7 @@ impl DeployContext {
                             chunks.len()
                         ),
                         format!(
-                            "Deploy the code to {ENGINE_ACCOUNT_ID} if all of it has the built code's sha256, and call {then_call} on it in the same receipt"
+                            "Deploy the code to {ENGINE_ACCOUNT_ID} if all of it has the built code's sha256, and call {then_call} on it with {then_call_args} in the same receipt"
                         ),
                         format!("{stays_if_it_fails}, and the code has to be stored again"),
                     ],
@@ -420,7 +428,7 @@ impl DeployContext {
                             last_chunk,
                             built.hash_up_to(built.code.len()),
                             then_call,
-                            serde_json::to_vec(&json!({}))?,
+                            serde_json::to_vec(&then_call_args)?,
                         ))?),
                         deposit: NearToken::from_yoctonear(0),
                         // 570 Tgas for 4 MiB, and then_call gets what's left

@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use color_eyre::eyre::{Context, bail};
-use intear_dex_common::{AssetId, DexId};
+use intear_dex_common::{AssetId, DexId, TokenAmount};
 use intear_dex_types::AccountOrDexId;
 use near_cli_rs::common::JsonRpcClientExt;
 use near_cli_rs::config::NetworkConfig;
@@ -446,6 +447,36 @@ pub struct OracleKey {
     pub public_key: near_crypto::PublicKeyHandle,
     pub gas_balance: NearToken,
     pub nonces: near_primitives::types::NonceIndex,
+}
+
+/// The account that takes the fees of an oracle, `None` for a key that isn't an oracle's
+pub fn oracle_fee_receiver(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    oracle_key: &impl std::fmt::Display,
+) -> color_eyre::eyre::Result<Option<AccountId>> {
+    super::view_json(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "oracle_fee_receiver",
+        json!({ "oracle_key": oracle_key.to_string() }),
+    )
+}
+
+/// What an oracle takes for a request in each asset that it takes fees in
+pub fn oracle_fees(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    oracle_key: &impl std::fmt::Display,
+) -> color_eyre::eyre::Result<BTreeMap<AssetId, TokenAmount>> {
+    super::view_json(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "oracle_fees",
+        json!({ "oracle_key": oracle_key.to_string() }),
+    )
 }
 
 /// The gas keys of the engine that oracles respond with, which `create_oracle_key` added

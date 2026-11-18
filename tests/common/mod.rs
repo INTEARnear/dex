@@ -1206,7 +1206,7 @@ pub async fn call_engine_with_gas_key(
 }
 
 /// Add an oracle key of `key_type` to the dex engine with `deposit` for its
-/// storage and gas
+/// storage and gas, whose fees `payer` takes
 pub async fn create_oracle_key(
     dex_engine_contract: &Contract,
     payer: &Account,
@@ -1220,12 +1220,36 @@ pub async fn create_oracle_key(
         .deposit(deposit)
         .args_json(json!({
             "oracle_key": oracle_key.public_key(),
+            "fee_receiver_id": payer.id(),
         }))
         .transact()
         .await
         .unwrap();
     assert_success(&result).unwrap();
     oracle_key
+}
+
+/// Set what the oracle of `oracle_key` takes for a request in each asset, as its fee receiver
+pub async fn set_oracle_fees(
+    dex_engine_contract: &Contract,
+    fee_receiver: &Account,
+    oracle_key: &SecretKey,
+    fees: &[(AssetId, u128)],
+) -> ExecutionFinalResult {
+    fee_receiver
+        .call(dex_engine_contract.id(), "set_oracle_fees")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "oracle_key": oracle_key_handle(oracle_key),
+            "fees": fees
+                .iter()
+                .map(|(asset_id, fee)| (asset_id.clone(), U128(*fee)))
+                .collect::<HashMap<_, _>>(),
+        }))
+        .transact()
+        .await
+        .unwrap()
 }
 
 /// The operations of `transactions`, sent with `transact_async`, that wait for

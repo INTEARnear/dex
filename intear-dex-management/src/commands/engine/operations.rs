@@ -480,9 +480,11 @@ fn operation_step(
             oracle_key,
             dex_id,
             request,
+            fee: (fee_asset, fee),
         } => format!(
-            "Wait for oracle {oracle_key} to respond to {} bytes of request for {dex_id}",
-            request.0.len()
+            "Wait for oracle {oracle_key} to respond to {} bytes of request for {dex_id}, paying its fee of {}",
+            request.0.len(),
+            amount_label(fee_asset, *fee)?
         ),
     })
 }

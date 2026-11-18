@@ -97,27 +97,8 @@ pub enum FeeReceiver {
     Pool,
     /// [`PROTOCOL_FEE_RECEIVER_ID`], which keeps its fees in the asset that swaps pay them in
     Protocol,
-    /// The pools have a small fee to compensate oracle's gas fees
+    /// Not used anymore
     Oracle(AccountId),
-}
-
-/// The fees of swaps on a pool
-#[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct FeeConfiguration {
-    pub fraction: FeeFraction,
-    pub oracle_fee_per_swap: (TokenAmount, TokenAmount),
-    pub oracle_fee_receiver: AccountId,
-}
-
-impl FeeConfiguration {
-    pub fn oracle_fee(&self, in_index: AssetIndex) -> TokenAmount {
-        match in_index {
-            AssetIndex::First => self.oracle_fee_per_swap.0,
-            AssetIndex::Second => self.oracle_fee_per_swap.1,
-        }
-    }
 }
 
 /// The fee of a swap, split between its receivers
@@ -260,7 +241,7 @@ pub struct CreatePoolArgs {
     pub amplification: Amplification,
     /// The oracle that swaps ask for the prices of `assets`
     pub oracle_key: PublicKeyHandle,
-    pub fees: FeeConfiguration,
+    pub fee: FeeFraction,
     /// Amounts of `assets` to deposit as the first liquidity, taken from the attached assets
     pub initial_liquidity: (TokenAmount, TokenAmount),
     /// How the creator takes its part of the pool's fees, as the provider of the first liquidity
@@ -289,9 +270,9 @@ pub struct SetOracleKeyArgs {
 
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub struct SetFeesArgs {
+pub struct SetFeeArgs {
     pub pool_id: PoolId,
-    pub fees: FeeConfiguration,
+    pub fee: FeeFraction,
 }
 
 #[near(serializers=[borsh])]
@@ -406,7 +387,7 @@ pub struct PoolView {
     pub decimals: (u8, u8),
     pub amplification: Amplification,
     pub rate_source: PoolRateSource,
-    pub fees: FeeConfiguration,
+    pub fee: FeeFraction,
     pub total_shares: TotalShares,
 }
 
@@ -418,7 +399,7 @@ impl PoolView {
 
     /// The fees of a swap on the pool without a discount
     pub fn swap_fees(&self) -> SwapFees {
-        SwapFees::of_pool_fee(self.fees.fraction)
+        SwapFees::of_pool_fee(self.fee)
     }
 
     /// The pool rated at `price` of its first asset in its second, to quote swaps on it

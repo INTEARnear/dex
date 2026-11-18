@@ -834,6 +834,7 @@ impl DexEngine {
     ) -> Option<Promise> {
         if let Some(Operation::OracleRequest { .. }) = operations.first() {
             return Some(self.internal_wait_for_oracle(
+                events,
                 operations,
                 trader,
                 anon_swap_available_assets,

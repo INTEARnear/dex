@@ -35,6 +35,23 @@ pub enum PreflightError {
         "{signer_public_key} would sign, but isn't an oracle key of {ENGINE_ACCOUNT_ID}, and remove_oracle_key deletes whichever key signs"
     )]
     SignerNotAnOracleKey { signer_public_key: String },
+    #[error(
+        "{deposit} doesn't cover the storage of the oracle key and its fee receiver, which takes {storage_cost}"
+    )]
+    OracleKeyDepositTooSmall {
+        deposit: String,
+        storage_cost: String,
+    },
+    #[error("The oracle key {oracle_key} has no fee receiver on {ENGINE_ACCOUNT_ID}")]
+    NoOracleFeeReceiver { oracle_key: String },
+    #[error(
+        "{signer_id} can't set the fees of the oracle key {oracle_key}; only its fee receiver {fee_receiver_id} can"
+    )]
+    NotOracleFeeReceiver {
+        signer_id: AccountId,
+        oracle_key: String,
+        fee_receiver_id: AccountId,
+    },
     #[error("{signer_id} can't pause or unpause {ENGINE_ACCOUNT_ID}")]
     NotAllowedToPause { signer_id: AccountId },
     #[error("{ENGINE_ACCOUNT_ID} is already paused")]
@@ -321,6 +338,16 @@ impl PreflightError {
                 "Sign with the oracle key to remove, e.g. with sign-with-plaintext-private-key; `engine oracle list` shows the oracle keys"
                     .to_string(),
             ),
+            Self::OracleKeyDepositTooSmall { .. } => Some(
+                "Pay more than its storage takes; the rest is the gas balance of the key"
+                    .to_string(),
+            ),
+            Self::NoOracleFeeReceiver { .. } => Some(
+                "`engine oracle list` shows the oracle keys with their fee receivers".to_string(),
+            ),
+            Self::NotOracleFeeReceiver {
+                fee_receiver_id, ..
+            } => Some(format!("Sign with {fee_receiver_id}")),
             Self::UntrackedNearShort { .. } => Some(format!(
                 "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
             )),
@@ -437,6 +464,8 @@ pub const DEX_CODE_NOT_FOUND: &str = "Dex code not found";
 pub const NOT_INITIALIZED: &str = "The contract is not initialized";
 /// near-sdk's panic when a contract's code can't read its state
 pub const UNREADABLE_STATE: &str = "Cannot deserialize the contract state.";
+/// near-sdk's panic when a contract's code can't read an element of one of its collections
+pub const UNREADABLE_ELEMENT: &str = "Cannot deserialize element";
 
 struct ContractPanicHint {
     /// Part of the panic message as the contract sources spell it

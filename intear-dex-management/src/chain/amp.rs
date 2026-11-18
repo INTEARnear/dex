@@ -2,15 +2,82 @@
 //! are xyk's. Their share, fee and fee discount views are xyk's, in
 //! [`super::xyk`].
 
-use amp_dex_types::{GetPoolArgs, GetPoolsArgs, PoolView};
-use color_eyre::eyre::eyre;
+use amp_dex_types::{
+    Amplification, AssetWithBalance, FeeFraction, GetPoolArgs, GetPoolsArgs, PoolView, Price,
+    TokenAmount, TotalShares,
+};
+use color_eyre::eyre::{Context, eyre};
 use intear_dex_common::DexId;
 use near_cli_rs::config::NetworkConfig;
-use near_primitives::types::BlockReference;
+use near_primitives::types::{AccountId, BlockReference};
+use near_sdk::PublicKeyHandle;
 use xyk_dex_types::PoolId;
 
-use super::engine::dex_view;
+use super::ViewPanicked;
+use super::engine::{dex_view, dex_view_bytes};
 pub use super::xyk::{pool_count, pool_shares};
+use crate::errors;
+
+/// The pool view of code from while pools had oracle fees of their own: its assets, decimals,
+/// amplification, oracle key, last oracle price, fee, oracle fee of each asset, oracle fee
+/// receiver and total shares
+type PoolViewWithOracleFees = (
+    (AssetWithBalance, AssetWithBalance),
+    (u8, u8),
+    Amplification,
+    PublicKeyHandle,
+    Option<Price>,
+    FeeFraction,
+    (TokenAmount, TokenAmount),
+    AccountId,
+    TotalShares,
+);
+
+/// Whether the pools of an amp dex are stored with oracle fees of their own. Code from while
+/// they had them answers get_pool in that layout, and code from after them can't read those
+/// pools.
+pub fn pools_with_oracle_fees(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<bool> {
+    if pool_count(network_config, block_reference, dex_id)? == 0 {
+        return Ok(false);
+    }
+    let first_pool = match dex_view_bytes(
+        network_config,
+        block_reference,
+        dex_id,
+        "get_pool",
+        near_sdk::borsh::to_vec(&GetPoolArgs {
+            pool_id: amp_dex_types::PoolId::new(0),
+        })?,
+    ) {
+        Ok(first_pool) => first_pool,
+        Err(error) => {
+            return match error.downcast_ref::<ViewPanicked>() {
+                Some(view_panicked)
+                    if view_panicked
+                        .panic_message
+                        .contains(errors::UNREADABLE_ELEMENT) =>
+                {
+                    Ok(true)
+                }
+                _ => Err(error),
+            };
+        }
+    };
+    // PoolView reads both layouts, so the one with oracle fees is told apart first
+    if near_sdk::borsh::from_slice::<Option<PoolViewWithOracleFees>>(&first_pool).is_ok() {
+        return Ok(true);
+    }
+    near_sdk::borsh::from_slice::<Option<PoolView>>(&first_pool).wrap_err_with(|| {
+        format!(
+            "Pool #0 of {dex_id} is neither in the layout with oracle fees of its own nor in the one without"
+        )
+    })?;
+    Ok(false)
+}
 
 pub fn all_pools(
     network_config: &NetworkConfig,

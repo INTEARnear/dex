@@ -204,10 +204,18 @@ pub enum Operation {
     /// oracle responds, and deposited assets are held until then, or refunded
     /// if the oracle doesn't respond in time. The request and the response are
     /// at most 1024 bytes.
+    ///
+    /// `fee` is the asset that the oracle is paid in and what it takes for a
+    /// request in it, exactly as the oracle set it, or the request fails. It's
+    /// taken from the deposit, which must be of that asset, or from the
+    /// balance of the account that called `execute_operations`. The oracle
+    /// keeps it once it responds, even if the operations after the request
+    /// fail, and it's refunded if the oracle doesn't respond in time.
     OracleRequest {
         oracle_key: PublicKeyHandle,
         dex_id: DexId,
         request: Base64VecU8,
+        fee: (AssetId, TokenAmount),
     },
 }
 

@@ -1,7 +1,6 @@
 //! What the amp contract's records take in the dex's storage. Its fee
 //! balances are stored as xyk's, so [`super::xyk_storage`] counts them.
 
-use amp_dex_types::FeeConfiguration;
 use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use near_sdk::PublicKeyHandle;
@@ -16,6 +15,7 @@ use super::xyk_storage::{
 // The decimals of both assets
 const DECIMALS_BYTES: usize = 2;
 const AMPLIFICATION_BYTES: usize = U32_BYTES;
+const FEE_BYTES: usize = U32_BYTES;
 const PRICE_BYTES: usize = U128_BYTES;
 // The shares and fee growth of each of the three payout groups
 const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES) * 3;
@@ -42,7 +42,6 @@ pub fn new_pool_bytes(
     dex_id: &DexId,
     assets: (&AssetId, &AssetId),
     oracle_key: &PublicKeyHandle,
-    fees: &FeeConfiguration,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
     let asset_with_balance_bytes =
@@ -57,7 +56,7 @@ pub fn new_pool_bytes(
         ENUM_TAG_BYTES,
         borsh_bytes(oracle_key)?,
         PRICE_BYTES,
-        borsh_bytes(fees)?,
+        FEE_BYTES,
         SHARE_MAP_BYTES,
         ENUM_TAG_BYTES,
         U128_BYTES,
@@ -83,16 +82,6 @@ pub fn liquidity_position_bytes(
         LIQUIDITY_POSITION_BYTES,
         extra_bytes_per_record,
     )
-}
-
-/// What a pool's record grows by when its fees change to ones with a
-/// longer oracle fee receiver; a shorter one frees storage instead
-pub fn fees_growth_bytes(
-    current_fees: &FeeConfiguration,
-    new_fees: &FeeConfiguration,
-) -> color_eyre::eyre::Result<u64> {
-    let growth = borsh_bytes(new_fees)?.saturating_sub(borsh_bytes(current_fees)?);
-    Ok(u64::try_from(growth)?)
 }
 
 /// What a pool's record grows by when its oracle changes to one with a
@@ -130,11 +119,6 @@ mod tests {
         // The fields of the contract's Pool in order, with its providers' map
         // stored as its prefix: the variant after its pools, and the pool id
         let providers_prefix = near_sdk::borsh::to_vec(&(1u8, PoolId::new(0))).unwrap();
-        let fees = FeeConfiguration {
-            fraction: FeeFraction::new(500),
-            oracle_fee_per_swap: (TokenAmount::new(1), TokenAmount::new(1)),
-            oracle_fee_receiver: "oracle.intear.near".parse().unwrap(),
-        };
         let pool_fields = (
             (
                 AssetWithBalance {
@@ -152,13 +136,13 @@ mod tests {
                 key: oracle_key.clone(),
                 last_price: Price::from_units(0),
             },
-            fees.clone(),
+            FeeFraction::new(500),
             providers_prefix,
             TotalShares::NONE.minted(INITIAL_SHARES).unwrap(),
             PayoutGroups::default(),
         );
         assert_eq!(
-            new_pool_bytes(&dex_id, (&assets.0, &assets.1), &oracle_key, &fees, 40).unwrap(),
+            new_pool_bytes(&dex_id, (&assets.0, &assets.1), &oracle_key, 40).unwrap(),
             dex_storage_record_bytes(
                 &dex_id,
                 POOL_KEY_BYTES,

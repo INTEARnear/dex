@@ -1,25 +1,24 @@
 use std::collections::HashMap;
 
 use amp_dex_types::{
-    AmpDexEvent, Amplification, AssetWithBalance, FeeConfiguration, LiquidityPosition,
-    PayoutGroups, Pool, PoolId, PoolRateSource, Price, TokenAmount, TotalShares,
+    AmpDexEvent, Amplification, AssetWithBalance, FeeFraction, LiquidityPosition, PayoutGroups,
+    Pool, PoolId, PoolRateSource, Price, TokenAmount, TotalShares,
 };
-use intear_dex_common::{
-    AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, DexCallResponse, env, expect,
-};
-use near_sdk::{AccountId, IntoStorageKey, NearToken, PublicKeyHandle, near, store::LookupMap};
+use intear_dex_common::{AssetId, Caller, DexCallResponse, env, expect};
+use near_sdk::{AccountId, IntoStorageKey, PublicKeyHandle, near, store::LookupMap};
 
 use crate::{AmpDex, AmpDexExt, StorageKey};
 
 #[near]
 impl AmpDex {
+    /// Makes the oracle of every pool its rate source, and takes the fixed oracle fee and its
+    /// receiver out of it, since the engine takes the fees of oracles now. Fees that oracles
+    /// already collected stay theirs to withdraw.
     #[payable]
     #[result_serializer(borsh)]
     pub fn migrate(
         &mut self,
-        #[serializer(borsh)]
-        #[allow(unused_mut)]
-        mut attached_assets: HashMap<AssetId, TokenAmount>,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
         expect!(
@@ -31,16 +30,15 @@ impl AmpDex {
             "Only the owner of the dex can migrate"
         );
         expect!(args.is_empty(), "Migrate takes no args");
-        let attached_near = NearToken::from_yoctonear(
-            attached_assets
-                .remove(&AssetId::Near)
-                .unwrap_or_default()
-                .get(),
-        );
-        expect!(
-            attached_assets.is_empty(),
-            "No assets other than NEAR should be attached"
-        );
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+
+        #[near(serializers=[borsh])]
+        #[allow(dead_code)]
+        struct FeesBeforeMigration {
+            fraction: FeeFraction,
+            oracle_fee_per_swap: (TokenAmount, TokenAmount),
+            oracle_fee_receiver: AccountId,
+        }
 
         #[near(serializers=[borsh])]
         struct PoolBeforeMigration {
@@ -49,13 +47,12 @@ impl AmpDex {
             amplification: Amplification,
             oracle_key: PublicKeyHandle,
             last_oracle_price: Price,
-            fees: FeeConfiguration,
+            fees: FeesBeforeMigration,
             providers: LookupMap<AccountId, LiquidityPosition>,
             total_shares: TotalShares,
             payout_groups: PayoutGroups,
         }
 
-        let storage_usage_before = near_sdk::env::storage_usage();
         let pools_prefix = StorageKey::Pools.into_storage_key();
         for pool_index in 0..self.pools.len() {
             let pool_key = [pools_prefix.as_slice(), &pool_index.to_le_bytes()].concat();
@@ -81,7 +78,7 @@ impl AmpDex {
                     key: oracle_key,
                     last_price: last_oracle_price,
                 },
-                fees,
+                fee: fees.fraction,
                 providers,
                 total_shares,
                 payout_groups,
@@ -94,26 +91,6 @@ impl AmpDex {
             .emit();
         }
 
-        let storage_usage_after = near_sdk::env::storage_usage();
-        let storage_cost = near_sdk::env::storage_byte_cost().saturating_mul(
-            (storage_usage_after as u128).saturating_sub(storage_usage_before as u128),
-        );
-        expect!(
-            let Some(leftover) = attached_near.checked_sub(storage_cost),
-            "Not enough near attached for storage. Required: {storage_cost}, attached: {attached_near}"
-        );
-        DexCallResponse {
-            asset_withdraw_requests: if !leftover.is_zero() {
-                vec![AssetWithdrawRequest {
-                    asset_id: AssetId::Near,
-                    amount: TokenAmount::new(leftover.as_yoctonear()),
-                    withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(caller_id),
-                }]
-            } else {
-                vec![]
-            },
-            add_storage_deposit: storage_cost,
-            ..Default::default()
-        }
+        DexCallResponse::default()
     }
 }

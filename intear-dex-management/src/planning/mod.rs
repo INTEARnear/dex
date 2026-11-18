@@ -203,14 +203,14 @@ impl Preflight {
     }
 }
 
-/// A storage deposit that has to go before registrations, because the
-/// signer's storage balance on the engine can't pay for them
+/// A storage deposit that has to go before calls that the engine charges
+/// storage for, because the signer's storage balance on it can't pay for them
 pub struct StorageTopUp {
     pub deposit: NearToken,
 }
 
-/// What registrations take from the signer's storage balance on the engine
-pub struct RegistrationStorage {
+/// What new records take from the signer's storage balance on the engine
+pub struct ChargedStorage {
     pub needed: NearToken,
     pub top_up: Option<StorageTopUp>,
 }
@@ -239,7 +239,7 @@ impl Preflight {
     pub fn storage_for_registrations(
         &self,
         registrations: &[(AccountOrDexId, AssetId)],
-    ) -> color_eyre::eyre::Result<RegistrationStorage> {
+    ) -> color_eyre::eyre::Result<ChargedStorage> {
         let mut bytes = Vec::new();
         let mut owners_with_registered_assets: Vec<&AccountOrDexId> = Vec::new();
         let mut assets_in_custody: Vec<AssetId> = Vec::new();
@@ -263,6 +263,15 @@ impl Preflight {
             owners_with_registered_assets.push(owner);
             assets_in_custody.push(asset_id.clone());
         }
+        self.storage_charged_to_signer(bytes)
+    }
+
+    /// Records of `bytes` that the engine charges to the signer's storage
+    /// balance on it
+    pub fn storage_charged_to_signer(
+        &self,
+        mut bytes: Vec<u64>,
+    ) -> color_eyre::eyre::Result<ChargedStorage> {
         let storage_balance = engine::storage_balance_of(
             &self.network_config,
             &self.block_reference,
@@ -284,7 +293,7 @@ impl Preflight {
         });
         let minimum_deposit =
             engine::minimum_storage_deposit(&self.network_config, &self.block_reference)?;
-        Ok(RegistrationStorage {
+        Ok(ChargedStorage {
             needed,
             top_up: storage::storage_deposit_for(needed, available, minimum_deposit)
                 .map(|deposit| StorageTopUp { deposit }),

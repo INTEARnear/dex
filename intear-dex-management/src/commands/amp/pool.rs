@@ -1,13 +1,12 @@
 use amp_dex_types::{
-    FeeConfiguration, PROTOCOL_FEE_SHARE, PoolRateSource, Price, SetAmplificationArgs, SetFeesArgs,
-    SetOracleKeyArgs,
+    FULL_FEE_FRACTION, FeeFraction, PROTOCOL_FEE_SHARE, PoolRateSource, Price,
+    SetAmplificationArgs, SetFeeArgs, SetOracleKeyArgs,
 };
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
 use near_primitives::gas::Gas;
-use near_primitives::types::AccountId;
 use near_sdk::base64::{Engine, prelude::BASE64_STANDARD};
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
@@ -15,11 +14,9 @@ use super::presentation::{fee_label, pool_assets, pool_json};
 use super::{AmpContext, PoolToWrite, amp_pool_id};
 use crate::chain::asset_metadata::AssetMetadataCache;
 use crate::chain::{amp, engine};
-use crate::commands::xyk::{FeeBalanceKind, FeeBalances, new_fee_balances_bytes};
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
-use crate::inputs::amount::AmountArg;
 use crate::inputs::amplification::AmplificationArg;
 use crate::inputs::oracle_key::OracleKeyArg;
 use crate::inputs::percent::PercentArg;
@@ -29,7 +26,7 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, amp_s
 
 const SET_AMPLIFICATION_GAS: Gas = Gas::from_teragas(60);
 const SET_ORACLE_KEY_GAS: Gas = Gas::from_teragas(60);
-const SET_FEES_GAS: Gas = Gas::from_teragas(60);
+const SET_FEE_GAS: Gas = Gas::from_teragas(60);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(context = AmpContext)]
@@ -59,10 +56,10 @@ pub enum PoolAction {
     /// Change the oracle that swaps on a pool ask for prices
     SetOracleKey(SetOracleKey),
     #[strum_discriminants(strum(
-        message = "set-fees           - Change the fee and the oracle fees of swaps on a pool"
+        message = "set-fee            - Change the fee of swaps on a pool"
     ))]
-    /// Change the fee and the oracle fees of swaps on a pool
-    SetFees(SetFees),
+    /// Change the fee of swaps on a pool
+    SetFee(SetFee),
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -173,21 +170,6 @@ impl ShowContext {
                                 },
                             ),
                             ("Fee", fee_label(&pool)),
-                            (
-                                "Oracle fees",
-                                format!(
-                                    "{} / {} per swap that puts it in, to {}",
-                                    display::format_amount(
-                                        pool.fees.oracle_fee_per_swap.0.get(),
-                                        metadata_0.as_ref()
-                                    ),
-                                    display::format_amount(
-                                        pool.fees.oracle_fee_per_swap.1.get(),
-                                        metadata_1.as_ref()
-                                    ),
-                                    pool.fees.oracle_fee_receiver
-                                ),
-                            ),
                         ]);
                         print!("{}", display::key_value_table(rows));
                     }
@@ -454,10 +436,10 @@ impl From<SetOracleKeyContext> for ActionContext {
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(input_context = AmpContext)]
-#[interactive_clap(output_context = SetFeesContext)]
-pub struct SetFees {
+#[interactive_clap(output_context = SetFeeContext)]
+pub struct SetFee {
     #[interactive_clap(skip_default_input_arg)]
-    /// Which account, the owner of the dex, changes the fees?
+    /// Which account, the owner of the dex, changes the fee?
     signer_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(skip_default_input_arg)]
     /// The pool id
@@ -465,25 +447,16 @@ pub struct SetFees {
     #[interactive_clap(skip_default_input_arg)]
     /// The new fee of swaps, of which the protocol takes 20%, e.g. 0.05%
     fee: PercentArg,
-    #[interactive_clap(skip_default_input_arg)]
-    /// The new oracle fee of swaps of one asset, such as for the gas of the oracle's responses, e.g. '0.001 NEAR'
-    oracle_fee_0: AmountArg,
-    #[interactive_clap(skip_default_input_arg)]
-    /// The new oracle fee of swaps of the other asset, e.g. '0.005 USDC'
-    oracle_fee_1: AmountArg,
-    #[interactive_clap(skip_default_input_arg)]
-    /// Which account takes the oracle fees, in the fees it collects on the dex?
-    oracle_fee_receiver: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
 }
 
-impl SetFees {
+impl SetFee {
     fn input_signer_account_id(
         context: &AmpContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-        super::input_dex_owner(context, "Which account changes the fees?")
+        super::input_dex_owner(context, "Which account changes the fee?")
     }
 
     fn input_pool_id(context: &AmpContext) -> color_eyre::eyre::Result<Option<PoolIdArg>> {
@@ -493,123 +466,74 @@ impl SetFees {
     fn input_fee(_context: &AmpContext) -> color_eyre::eyre::Result<Option<PercentArg>> {
         crate::inputs::prompt("The new fee of swaps? The protocol takes 20% of it. e.g. 0.05%")
     }
-
-    fn input_oracle_fee_0(_context: &AmpContext) -> color_eyre::eyre::Result<Option<AmountArg>> {
-        crate::inputs::prompt(
-            "The new oracle fee of swaps of one asset, such as for the gas of the oracle's responses? e.g. '0.001 NEAR'",
-        )
-    }
-
-    fn input_oracle_fee_1(_context: &AmpContext) -> color_eyre::eyre::Result<Option<AmountArg>> {
-        crate::inputs::prompt("The new oracle fee of swaps of the other asset? e.g. '0.005 USDC'")
-    }
-
-    fn input_oracle_fee_receiver(
-        context: &AmpContext,
-    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-        near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
-            &context.global_context.config.credentials_home_dir,
-            "Which account takes the oracle fees, in the fees it collects on the dex?",
-        )
-    }
 }
 
 #[derive(Clone)]
-pub struct SetFeesContext(ActionContext);
+pub struct SetFeeContext(ActionContext);
 
-impl SetFeesContext {
+impl SetFeeContext {
     pub fn from_previous_context(
         previous_context: AmpContext,
-        scope: &<SetFees as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        scope: &<SetFee as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let dex_id = previous_context.dex_id;
         let PoolIdArg(pool_id) = scope.pool_id;
         let PercentArg(fee_millionths) = scope.fee;
-        let oracle_fees = (scope.oracle_fee_0.clone(), scope.oracle_fee_1.clone());
-        let oracle_fee_receiver: AccountId = scope.oracle_fee_receiver.clone().into();
         Ok(Self(planning::write_action_context(
             &previous_context.global_context,
             scope.signer_account_id.clone().into(),
             move |preflight| {
                 preflight.ensure_engine_not_paused()?;
-                super::ensure_dex_owner(preflight, &dex_id, "change the fees of its pools")?;
+                super::ensure_dex_owner(preflight, &dex_id, "change the fee of its pools")?;
                 let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
-                let fees = super::fee_configuration(
-                    fee_millionths,
-                    &oracle_fees,
-                    oracle_fee_receiver.clone(),
-                    &pool.assets,
-                    &pool.pair_label(),
-                )?;
-                let fees_label = |fees: &FeeConfiguration| {
-                    format!(
-                        "a fee of {} and oracle fees of {} and {} for {}",
-                        display::format_fee(fees.fraction),
-                        pool.format_amount(0, fees.oracle_fee_per_swap.0.get()),
-                        pool.format_amount(1, fees.oracle_fee_per_swap.1.get()),
-                        fees.oracle_fee_receiver
-                    )
-                };
-                if pool.pool.fees == fees {
-                    return Err(PreflightError::PoolSettingUnchanged {
-                        dex_id: dex_id.clone(),
-                        pool_id,
-                        setting: fees_label(&fees),
+                let fee = FeeFraction::new(fee_millionths);
+                if fee >= FULL_FEE_FRACTION {
+                    return Err(PreflightError::FeesNotAllowed {
+                        problem: "the fee must be less than 100%".to_string(),
                     }
                     .into_report());
                 }
-                // The receiver's fee balances start in both assets of the pool
-                let storage_bytes = amp_storage::fees_growth_bytes(&pool.pool.fees, &fees)?
-                    .checked_add(new_fee_balances_bytes(
-                        preflight,
-                        &dex_id,
-                        &[FeeBalances {
-                            kind: FeeBalanceKind::CollectedByOwner,
-                            account_id: oracle_fee_receiver.clone(),
-                            asset_ids: pool
-                                .assets
-                                .iter()
-                                .map(|(asset_id, _)| asset_id.clone())
-                                .collect(),
-                        }],
-                    )?)
-                    .ok_or_else(|| color_eyre::eyre::eyre!("Storage size overflow"))?;
-                let storage_near = storage::storage_cost(
-                    storage_bytes,
-                    preflight.protocol_limits.storage_byte_cost,
-                )?;
+                if pool.pool.fee == fee {
+                    return Err(PreflightError::PoolSettingUnchanged {
+                        dex_id: dex_id.clone(),
+                        pool_id,
+                        setting: format!("a fee of {}", display::format_fee(fee)),
+                    }
+                    .into_report());
+                }
                 let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
-                let (mut steps, function_calls) =
-                    crate::commands::xyk::dex_call_paying_for_storage(
-                        preflight,
-                        &dex_id,
-                        format!(
-                            "Change the fees of swaps on {pool_label} from {} to {}",
-                            fees_label(&pool.pool.fees),
-                            fees_label(&fees)
-                        ),
-                        (
-                            "set_fees",
-                            &SetFeesArgs {
-                                pool_id: amp_pool_id(pool_id),
-                                fees: fees.clone(),
-                            },
-                        ),
-                        storage_near,
-                        SET_FEES_GAS,
-                    )?;
-                steps.push(format!(
-                    "The protocol takes {PROTOCOL_FEE_SHARE} of the fee, and {oracle_fee_receiver} the oracle fixed fee of the asset a swap puts in, which is taken before the fee"
-                ));
                 Ok(TransactionPlan {
                     receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
-                    steps,
-                    function_calls,
+                    steps: vec![
+                        format!(
+                            "Change the fee of swaps on {pool_label} from {} to {}",
+                            display::format_fee(pool.pool.fee),
+                            display::format_fee(fee)
+                        ),
+                        format!("The protocol takes {PROTOCOL_FEE_SHARE} of the fee"),
+                    ],
+                    function_calls: vec![FunctionCall {
+                        method_name: "execute_operations",
+                        args: serde_json::json!({
+                            "operations": [planning::dex_call_operation(
+                                &dex_id,
+                                "set_fee",
+                                &SetFeeArgs {
+                                    pool_id: amp_pool_id(pool_id),
+                                    fee,
+                                },
+                                &[],
+                            )?],
+                        })
+                        .into(),
+                        deposit: ONE_YOCTO_NEAR,
+                        gas: SET_FEE_GAS,
+                    }],
                     expected_outcome: ExpectedOutcome {
                         action_name: "fee change",
                         success_message: format!(
-                            "Swaps on {pool_label} now pay {}",
-                            fees_label(&fees)
+                            "Swaps on {pool_label} now pay a fee of {}",
+                            display::format_fee(fee)
                         ),
                         transfer_call: None,
                         dex_id: Some(dex_id.clone()),
@@ -623,8 +547,8 @@ impl SetFeesContext {
     }
 }
 
-impl From<SetFeesContext> for ActionContext {
-    fn from(item: SetFeesContext) -> Self {
+impl From<SetFeeContext> for ActionContext {
+    fn from(item: SetFeeContext) -> Self {
         item.0
     }
 }
