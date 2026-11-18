@@ -350,9 +350,17 @@ impl DexEngine {
             uploaded_code: LazyOption<Vec<u8>>,
         }
         let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
+        let mut user_storage_balances = old_state.user_storage_balances;
         let mut receivers_by_oracle_key = LookupMap::new(StorageKey::OracleFeeReceivers);
         for (oracle_key, receiver_id) in oracle_fee_receivers {
-            receivers_by_oracle_key.insert(oracle_key, receiver_id);
+            let storage_usage_before = near_sdk::env::storage_usage();
+            receivers_by_oracle_key.insert(oracle_key, receiver_id.clone());
+            receivers_by_oracle_key.flush();
+            user_storage_balances.charge(
+                &receiver_id,
+                storage_usage_before,
+                near_sdk::env::storage_usage(),
+            );
         }
         Self {
             dex_balances: old_state.dex_balances,
@@ -360,7 +368,7 @@ impl DexEngine {
             dex_codes: old_state.dex_codes,
             dex_storage_balances: old_state.dex_storage_balances,
             user_balances: old_state.user_balances,
-            user_storage_balances: old_state.user_storage_balances,
+            user_storage_balances,
             total_in_custody: old_state.total_in_custody,
             paused: old_state.paused,
             trusted_code_deployer: old_state.trusted_code_deployer,

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use color_eyre::eyre::eyre;
 use intear_dex_common::{AssetId, TokenAmount};
 use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
@@ -9,6 +10,7 @@ use near_cli_rs::commands::account::export_account::{
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
+use near_primitives::action::Action;
 use near_primitives::gas::Gas;
 use near_primitives::types::{AccountId, Finality};
 use near_sdk::{NearToken, PublicKeyHandle};
@@ -296,9 +298,9 @@ pub struct OracleKeyCallContext {
 /// Which key?
 pub enum OracleKeySource {
     #[strum_discriminants(strum(
-        message = "public-key    - A public key that you give, e.g. of a key the oracle generated"
+        message = "public-key    - A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays"
     ))]
-    /// A public key that you give, e.g. of a key the oracle generated
+    /// A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays
     PublicKey(GivenPublicKey),
     #[strum_discriminants(strum(
         message = "from-account  - The key that near-cli has of the account that pays, which the oracle then runs with"
@@ -443,101 +445,146 @@ fn oracle_key_call_action_context(
     signer_id: AccountId,
     oracle_key_of: impl Fn(&Preflight) -> color_eyre::eyre::Result<PublicKeyHandle> + 'static,
 ) -> ActionContext {
-    planning::write_action_context(&global_context, signer_id, move |preflight| {
-        preflight.ensure_engine_not_paused()?;
-        if deposit.is_zero() {
-            return Err(PreflightError::ZeroAmount.into_report());
+    let creates_oracle_key = matches!(call, OracleKeyCall::Create { .. });
+    let mut context = planning::write_action_context(
+        &global_context,
+        signer_id,
+        move |preflight| {
+            preflight.ensure_engine_not_paused()?;
+            if deposit.is_zero() {
+                return Err(PreflightError::ZeroAmount.into_report());
+            }
+            let oracle_key = oracle_key_of(preflight)?;
+            let is_oracle_key =
+                engine::oracle_keys(&preflight.network_config, &preflight.block_reference)?
+                    .iter()
+                    .any(|existing| existing.public_key.to_string() == oracle_key.to_string());
+            let (method_name, args, steps, action_name, success_message) = match &call {
+                OracleKeyCall::Create { fee_receiver_id } => {
+                    if is_oracle_key {
+                        return Err(PreflightError::OracleKeyExists {
+                            oracle_key: oracle_key.to_string(),
+                        }
+                        .into_report());
+                    }
+                    preflight.ensure_account_exists(fee_receiver_id)?;
+                    let storage_cost = storage::storage_cost(
+                        storage::oracle_key_bytes(
+                            &oracle_key,
+                            fee_receiver_id,
+                            preflight.protocol_limits.extra_bytes_per_record,
+                        )?,
+                        preflight.protocol_limits.storage_byte_cost,
+                    )?;
+                    let Some(gas_balance) = deposit.checked_sub(storage_cost) else {
+                        return Err(PreflightError::OracleKeyDepositTooSmall {
+                            deposit: format_near(deposit),
+                            storage_cost: format_near(storage_cost),
+                        }
+                        .into_report());
+                    };
+                    (
+                        "create_oracle_key",
+                        json!({ "oracle_key": oracle_key, "fee_receiver_id": fee_receiver_id }),
+                        vec![
+                            format!(
+                                "Add {oracle_key} as an oracle key of {ENGINE_ACCOUNT_ID} that amp pools can ask for prices, with {} for the storage of the key and its fee receiver, and {} as its gas balance",
+                                format_near(storage_cost),
+                                format_near(gas_balance)
+                            ),
+                            format!(
+                                "{oracle_key} signs the transaction, as a full access key of {}, since {ENGINE_ACCOUNT_ID} only adds the key that signs",
+                                preflight.signer_id
+                            ),
+                            format!(
+                                "{fee_receiver_id} takes the oracle's fees, which are none until it sets them with `engine oracle set-fees`, and requests can only pay the oracle in assets that it takes fees in"
+                            ),
+                        ],
+                        "oracle key creation",
+                        format!(
+                            "Added the oracle key {oracle_key} to {ENGINE_ACCOUNT_ID}, with {fee_receiver_id} as its fee receiver"
+                        ),
+                    )
+                }
+                OracleKeyCall::TopUp => {
+                    if !is_oracle_key {
+                        return Err(PreflightError::NotAnOracleKey {
+                            oracle_key: oracle_key.to_string(),
+                        }
+                        .into_report());
+                    }
+                    (
+                        "top_up_oracle_key",
+                        json!({ "oracle_key": oracle_key }),
+                        vec![format!(
+                            "Add {} to the gas balance of the oracle key {oracle_key}",
+                            format_near(deposit)
+                        )],
+                        "oracle key top-up",
+                        format!(
+                            "Added {} to the gas balance of the oracle key {oracle_key}",
+                            format_near(deposit)
+                        ),
+                    )
+                }
+            };
+            Ok(TransactionPlan {
+                receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                steps,
+                function_calls: vec![FunctionCall {
+                    method_name,
+                    args: args.into(),
+                    deposit,
+                    gas: ORACLE_KEY_CALL_GAS,
+                }],
+                expected_outcome: ExpectedOutcome {
+                    action_name,
+                    success_message,
+                    transfer_call: None,
+                    dex_id: None,
+                    dex_events: DexEvents::NotRead,
+                    deployment: None,
+                },
+                deploy_code: None,
+            })
+        },
+    );
+    if creates_oracle_key {
+        // Each way near-cli signs here calls this with the key it's about to sign with, except
+        // sign-later, which only prints the transaction for whoever signs it
+        context.on_before_signing_callback =
+            std::sync::Arc::new(|unsigned_transaction, _network_config| {
+                ensure_signer_is_created_oracle_key(unsigned_transaction)
+            });
+    }
+    context
+}
+
+/// `create_oracle_key` only adds the key that signs, so that only the oracle that has the key
+/// names its fee receiver
+fn ensure_signer_is_created_oracle_key(
+    unsigned_transaction: &near_primitives::transaction::TransactionV0,
+) -> color_eyre::eyre::Result<()> {
+    let signer_public_key = unsigned_transaction.public_key.to_string();
+    let Some(Action::FunctionCall(creation)) = unsigned_transaction.actions.first() else {
+        return Err(eyre!(
+            "The transaction doesn't start with create_oracle_key"
+        ));
+    };
+    let args: serde_json::Value = serde_json::from_slice(&creation.args)?;
+    let oracle_key = args["oracle_key"]
+        .as_str()
+        .ok_or_else(|| eyre!("create_oracle_key has no oracle_key"))?
+        .to_string();
+    if oracle_key == signer_public_key {
+        Ok(())
+    } else {
+        Err(PreflightError::SignerNotCreatedOracleKey {
+            signer_public_key,
+            oracle_key,
         }
-        let oracle_key = oracle_key_of(preflight)?;
-        let is_oracle_key =
-            engine::oracle_keys(&preflight.network_config, &preflight.block_reference)?
-                .iter()
-                .any(|existing| existing.public_key.to_string() == oracle_key.to_string());
-        let (method_name, args, steps, action_name, success_message) = match &call {
-            OracleKeyCall::Create { fee_receiver_id } => {
-                if is_oracle_key {
-                    return Err(PreflightError::OracleKeyExists {
-                        oracle_key: oracle_key.to_string(),
-                    }
-                    .into_report());
-                }
-                preflight.ensure_account_exists(fee_receiver_id)?;
-                let storage_cost = storage::storage_cost(
-                    storage::oracle_key_bytes(
-                        &oracle_key,
-                        fee_receiver_id,
-                        preflight.protocol_limits.extra_bytes_per_record,
-                    )?,
-                    preflight.protocol_limits.storage_byte_cost,
-                )?;
-                let Some(gas_balance) = deposit.checked_sub(storage_cost) else {
-                    return Err(PreflightError::OracleKeyDepositTooSmall {
-                        deposit: format_near(deposit),
-                        storage_cost: format_near(storage_cost),
-                    }
-                    .into_report());
-                };
-                (
-                    "create_oracle_key",
-                    json!({ "oracle_key": oracle_key, "fee_receiver_id": fee_receiver_id }),
-                    vec![
-                        format!(
-                            "Add {oracle_key} as an oracle key of {ENGINE_ACCOUNT_ID} that amp pools can ask for prices, with {} for the storage of the key and its fee receiver, and {} as its gas balance",
-                            format_near(storage_cost),
-                            format_near(gas_balance)
-                        ),
-                        format!(
-                            "{fee_receiver_id} takes the oracle's fees, which are none until it sets them with `engine oracle set-fees`, and requests can only pay the oracle in assets that it takes fees in"
-                        ),
-                    ],
-                    "oracle key creation",
-                    format!(
-                        "Added the oracle key {oracle_key} to {ENGINE_ACCOUNT_ID}, with {fee_receiver_id} as its fee receiver"
-                    ),
-                )
-            }
-            OracleKeyCall::TopUp => {
-                if !is_oracle_key {
-                    return Err(PreflightError::NotAnOracleKey {
-                        oracle_key: oracle_key.to_string(),
-                    }
-                    .into_report());
-                }
-                (
-                    "top_up_oracle_key",
-                    json!({ "oracle_key": oracle_key }),
-                    vec![format!(
-                        "Add {} to the gas balance of the oracle key {oracle_key}",
-                        format_near(deposit)
-                    )],
-                    "oracle key top-up",
-                    format!(
-                        "Added {} to the gas balance of the oracle key {oracle_key}",
-                        format_near(deposit)
-                    ),
-                )
-            }
-        };
-        Ok(TransactionPlan {
-            receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
-            steps,
-            function_calls: vec![FunctionCall {
-                method_name,
-                args: args.into(),
-                deposit,
-                gas: ORACLE_KEY_CALL_GAS,
-            }],
-            expected_outcome: ExpectedOutcome {
-                action_name,
-                success_message,
-                transfer_call: None,
-                dex_id: None,
-                dex_events: DexEvents::NotRead,
-                deployment: None,
-            },
-            deploy_code: None,
-        })
-    })
+        .into_report())
+    }
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]

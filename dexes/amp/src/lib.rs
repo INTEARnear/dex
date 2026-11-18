@@ -8,8 +8,8 @@ use amp_dex_types::{
     FULL_FEE_FRACTION, FeeDiscountFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs,
     GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES,
     LiquidityPosition, LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS, MIN_AMPLIFICATION,
-    PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId,
-    PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
+    NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets,
+    PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
     RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction,
     SetAmplificationArgs, SetFeeArgs, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
     SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
@@ -518,7 +518,7 @@ impl AmpDex {
             assets,
             decimals,
             amplification,
-            oracle_key,
+            rate_source,
             fee,
             initial_liquidity,
             creator_fee_payout_type,
@@ -544,6 +544,16 @@ impl AmpDex {
             (MIN_AMPLIFICATION..=MAX_AMPLIFICATION).contains(&amplification),
             "Amplification must be from {MIN_AMPLIFICATION} to {MAX_AMPLIFICATION}"
         );
+        let rate_source = match rate_source {
+            NewPoolRateSource::Oracle(key) => PoolRateSource::Oracle {
+                key,
+                last_price: Price::from_units(0),
+            },
+            NewPoolRateSource::Fixed(price) => {
+                expect!(!price.is_zero(), "The fixed price must be greater than 0");
+                PoolRateSource::Fixed(price)
+            }
+        };
         expect!(fee < FULL_FEE_FRACTION, "The fee must be less than 100%");
         expect!(
             !initial_liquidity.0.is_zero() && !initial_liquidity.1.is_zero(),
@@ -625,10 +635,7 @@ impl AmpDex {
             ),
             decimals,
             amplification,
-            rate_source: PoolRateSource::Oracle {
-                key: oracle_key,
-                last_price: Price::from_units(0),
-            },
+            rate_source,
             fee,
             providers,
             total_shares: TotalShares::NONE.minted(INITIAL_SHARES).expect("Overflow"),

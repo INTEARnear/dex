@@ -1,6 +1,6 @@
 use amp_dex_types::{
     Amplification, CreatePoolArgs, FULL_FEE_FRACTION, FeeFraction, FeePayoutType,
-    PROTOCOL_FEE_RECEIVER_ID, PROTOCOL_FEE_SHARE, TokenAmount,
+    NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PROTOCOL_FEE_SHARE, TokenAmount,
 };
 use intear_dex_common::{AssetId, DexId};
 use intear_dex_types::AccountOrDexId;
@@ -373,7 +373,7 @@ impl PoolFeeContext {
                                 assets: assets.clone(),
                                 decimals,
                                 amplification,
-                                oracle_key: oracle_key.clone(),
+                                rate_source: NewPoolRateSource::Oracle(oracle_key.clone()),
                                 fee,
                                 initial_liquidity: (
                                     TokenAmount::new(amount_0),

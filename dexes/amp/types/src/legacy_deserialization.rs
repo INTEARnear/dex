@@ -45,11 +45,19 @@ impl BorshDeserialize for PoolView {
         let mut rate_source_or_oracle_key_tag = [0];
         reader.read_exact(&mut rate_source_or_oracle_key_tag)?;
         let mut reader = rate_source_or_oracle_key_tag.as_slice().chain(reader);
-        let rate_source = if rate_source_or_oracle_key_tag[0] >= PoolRateSource::FIRST_BORSH_TAG {
-            PoolRateSource::deserialize_reader(&mut reader)?
-        } else {
-            OracleBeforeRateSources::deserialize_reader(&mut reader)?.into()
-        };
+        // Pools with a rate source never had an oracle fee, and are read to their end only, so that
+        // they can be followed by other pools
+        if rate_source_or_oracle_key_tag[0] >= PoolRateSource::FIRST_BORSH_TAG {
+            return Ok(PoolView {
+                assets,
+                decimals,
+                amplification,
+                rate_source: PoolRateSource::deserialize_reader(&mut reader)?,
+                fee: FeeFraction::deserialize_reader(&mut reader)?,
+                total_shares: TotalShares::deserialize_reader(&mut reader)?,
+            });
+        }
+        let rate_source = OracleBeforeRateSources::deserialize_reader(&mut reader)?.into();
         let fee = FeeFraction::deserialize_reader(&mut reader)?;
         let mut bytes_after_fee = Vec::new();
         (&mut reader)

@@ -5904,9 +5904,26 @@ async fn test_oracle() {
     let result = wait_for_transaction(waiting).await;
     assert_success(&result).unwrap();
 
+    // Only the key that signs the transaction can be added
+    let result = user3
+        .call(dex_engine_contract.id(), "create_oracle_key")
+        .max_gas()
+        .deposit(oracle_key_deposit)
+        .args_json(json!({
+            "oracle_key": SecretKey::from_random(KeyType::ED25519).public_key(),
+            "fee_receiver_id": user3.id(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}")
+            .contains("The transaction that creates an oracle key must be signed with it")
+    );
+
     // The same key can't be added again, and the whole deposit is refunded
     let user3_near_before = near_balance_after_refunds(&sandbox, &user3).await;
-    let result = user3
+    let result = signing_with(&user3, &oracle_key)
         .call(dex_engine_contract.id(), "create_oracle_key")
         .max_gas()
         .deposit(oracle_key_deposit)

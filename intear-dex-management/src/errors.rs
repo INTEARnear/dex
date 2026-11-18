@@ -36,6 +36,13 @@ pub enum PreflightError {
     )]
     SignerNotAnOracleKey { signer_public_key: String },
     #[error(
+        "{signer_public_key} would sign, but create_oracle_key only adds the key that signs, and it would add {oracle_key}"
+    )]
+    SignerNotCreatedOracleKey {
+        signer_public_key: String,
+        oracle_key: String,
+    },
+    #[error(
         "{deposit} doesn't cover the storage of the oracle key and its fee receiver, which takes {storage_cost}"
     )]
     OracleKeyDepositTooSmall {
@@ -336,6 +343,10 @@ impl PreflightError {
             ),
             Self::SignerNotAnOracleKey { .. } => Some(
                 "Sign with the oracle key to remove, e.g. with sign-with-plaintext-private-key; `engine oracle list` shows the oracle keys"
+                    .to_string(),
+            ),
+            Self::SignerNotCreatedOracleKey { .. } => Some(
+                "Add the oracle key to the account that pays as a full access key, and sign with it, e.g. with sign-with-plaintext-private-key"
                     .to_string(),
             ),
             Self::OracleKeyDepositTooSmall { .. } => Some(

@@ -236,16 +236,23 @@ pub type FeeDiscountSignaturePayload =
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
-    /// Decimals of `assets`, which rate their amounts at the oracle's prices of whole tokens
+    /// Decimals of `assets`, which rate their amounts at the prices of whole tokens
     pub decimals: (u8, u8),
     pub amplification: Amplification,
-    /// The oracle that swaps ask for the prices of `assets`
-    pub oracle_key: PublicKeyHandle,
+    pub rate_source: NewPoolRateSource,
     pub fee: FeeFraction,
     /// Amounts of `assets` to deposit as the first liquidity, taken from the attached assets
     pub initial_liquidity: (TokenAmount, TokenAmount),
     /// How the creator takes its part of the pool's fees, as the provider of the first liquidity
     pub creator_fee_payout_type: FeePayoutType,
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub enum NewPoolRateSource {
+    Oracle(PublicKeyHandle),
+    Fixed(Price),
 }
 
 #[near(serializers=[borsh])]

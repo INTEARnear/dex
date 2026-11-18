@@ -4,9 +4,9 @@ use amp_dex_types::{
     AddLiquidityArgs, AmpDexEvent, Amplification, AssetIndex, AssetWithBalance, CreatePoolArgs,
     ExchangePrices, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FeeDiscount, FeeDiscountSignaturePayload,
     FeeFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares,
-    PayoutGroups, PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse,
-    ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction,
+    GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES, NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID,
+    PayoutGroupShares, PayoutGroups, PoolId, PoolRateSource, PoolView, Price, PricesRequest,
+    PricesResponse, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction,
     SetAmplificationArgs, SetFeeArgs, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
     SetOracleKeyArgs, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares,
     WithdrawFeesArgs,
@@ -320,7 +320,7 @@ impl AmpTest {
             assets: (self.near_asset_id.clone(), self.usdc_asset_id.clone()),
             decimals: (NEAR_DECIMALS, USDC_DECIMALS),
             amplification: Amplification::new(100),
-            oracle_key: oracle_key_handle(&self.oracle_key),
+            rate_source: NewPoolRateSource::Oracle(oracle_key_handle(&self.oracle_key)),
             fee,
             initial_liquidity: (TokenAmount::new(liquidity.0), TokenAmount::new(liquidity.1)),
             creator_fee_payout_type: FeePayoutType::KeepBoth,
@@ -1470,6 +1470,123 @@ async fn test_amp_swaps_pay_the_oracle() {
 }
 
 /// The fee discount signed by `signer` for the amp dex `dex_id`
+#[tokio::test]
+async fn test_amp_fixed_price_pool() {
+    let test = setup_amp().await;
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user1,
+        ft1,
+        ..
+    } = &test.context;
+    let dex_id = &test.dex_id;
+    let (near_asset_id, usdc_asset_id) = (&test.near_asset_id, &test.usdc_asset_id);
+    // 0.1% to the pool, of which the protocol takes 20%
+    let fee = FeeFraction::new(1_000);
+    let fee_fractions = [800, 200];
+    let liquidity = (near(1_000_000), usdc(3_750_000));
+    let fixed_price = agreeing_prices()
+        .median_price(
+            &PricesRequest::of_pools([(near_asset_id, usdc_asset_id)]),
+            near_asset_id,
+            usdc_asset_id,
+        )
+        .unwrap();
+
+    // A fixed price is more than 0
+    let result = execute_operations(
+        deployer,
+        dex_engine_contract,
+        vec![dex_call(
+            dex_id,
+            "create_pool",
+            near_sdk::borsh::to_vec(&CreatePoolArgs {
+                rate_source: NewPoolRateSource::Fixed(Price::from_units(0)),
+                ..test.create_pool_args(fee, liquidity)
+            })
+            .unwrap(),
+            &[],
+        )],
+    )
+    .await;
+    assert!(format!("{result:?}").contains("The fixed price must be greater than 0"));
+
+    let pool_id = test
+        .create_pool(CreatePoolArgs {
+            rate_source: NewPoolRateSource::Fixed(fixed_price),
+            ..test.create_pool_args(fee, liquidity)
+        })
+        .await;
+    let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
+    assert_eq!(pool.rate_source, PoolRateSource::Fixed(fixed_price));
+
+    // Swaps are rated at the fixed price, without an oracle request
+    let user1_balance = async |asset_id: &AssetId| {
+        inner_balance(
+            dex_engine_contract,
+            AccountOrDexId::Account(user1.id().clone()),
+            asset_id,
+        )
+        .await
+    };
+    let near_in = near(100);
+    deposit_near(dex_engine_contract, user1, NearToken::from_near(1)).await;
+    deposit_ft(dex_engine_contract, deployer, ft1, user1, near_in).await;
+    let usdc_before = user1_balance(usdc_asset_id).await;
+    let expected_usdc_out = pool
+        .rated(fixed_price)
+        .exact_in_amount_out(
+            AssetIndex::First,
+            TokenAmount::new(after_fees(near_in, &fee_fractions)),
+        )
+        .get();
+    let result = execute_operations(
+        user1,
+        dex_engine_contract,
+        vec![Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
+            asset_in: near_asset_id.clone(),
+            asset_out: usdc_asset_id.clone(),
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                near_in,
+            ))),
+            constraint: None,
+        }],
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert_eq!(
+        user1_balance(usdc_asset_id).await,
+        usdc_before + expected_usdc_out
+    );
+    assert_eq!(
+        get_pool(dex_engine_contract, dex_id, pool_id)
+            .await
+            .rate_source,
+        PoolRateSource::Fixed(fixed_price)
+    );
+
+    // A pool with a fixed price has no oracle to change
+    let result = execute_operations(
+        deployer,
+        dex_engine_contract,
+        vec![dex_call(
+            dex_id,
+            "set_oracle_key",
+            near_sdk::borsh::to_vec(&SetOracleKeyArgs {
+                pool_id,
+                oracle_key: oracle_key_handle(&test.oracle_key),
+            })
+            .unwrap(),
+            &[],
+        )],
+    )
+    .await;
+    assert!(format!("{result:?}").contains("The pool has a fixed price, not an oracle"));
+}
+
 fn sign_fee_discount(
     discount: FeeDiscount,
     signer: &SecretKey,
@@ -1865,7 +1982,7 @@ async fn test_amp_routes() {
     let other_oracle_key = create_free_oracle_key(&test.context, user2).await;
     let other_oracle_pool_id = test
         .create_pool(CreatePoolArgs {
-            oracle_key: oracle_key_handle(&other_oracle_key),
+            rate_source: NewPoolRateSource::Oracle(oracle_key_handle(&other_oracle_key)),
             ..test.create_pool_args(fee, near_usdc_liquidity)
         })
         .await;
@@ -2495,12 +2612,21 @@ async fn test_oracle_fees_migration_of_mainnet_state() {
         custody
     };
     let custody_before_migration = custody().await;
-    let total_storage_balances_before_migration = near_sdk::serde_json::to_value(
-        get_total_storage_balances(&dex_engine_contract)
+    // Each receiver pays for the storage of its record from its storage balance
+    for fee_receiver_id in oracle_fee_receivers.values() {
+        let result = owner
+            .call(dex_engine_contract.id(), "storage_deposit")
+            .max_gas()
+            .deposit(NearToken::from_millinear(5))
+            .args_json(json!({ "account_id": fee_receiver_id }))
+            .transact()
             .await
-            .unwrap(),
-    )
-    .unwrap();
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+    let total_storage_balances_before_migration = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
 
     // The engine of this checkout, as `engine upgrade deploy` deploys it: migrate runs on the new
     // code in the receipt that deploys it
@@ -2534,14 +2660,20 @@ async fn test_oracle_fees_migration_of_mainnet_state() {
     );
     assert!(!is_paused(&dex_engine_contract).await.unwrap());
     assert_eq!(custody().await, custody_before_migration);
+    let total_storage_balances = get_total_storage_balances(&dex_engine_contract)
+        .await
+        .unwrap();
     assert_eq!(
-        near_sdk::serde_json::to_value(
-            get_total_storage_balances(&dex_engine_contract)
-                .await
-                .unwrap()
-        )
-        .unwrap(),
-        total_storage_balances_before_migration
+        total_storage_balances.users.total,
+        total_storage_balances_before_migration.users.total
+    );
+    assert!(
+        total_storage_balances.users.available
+            < total_storage_balances_before_migration.users.available
+    );
+    assert_eq!(
+        near_sdk::serde_json::to_value(total_storage_balances.dexes).unwrap(),
+        near_sdk::serde_json::to_value(total_storage_balances_before_migration.dexes).unwrap()
     );
     for (oracle_key, fee_receiver_id) in &oracle_fee_receivers {
         assert_eq!(

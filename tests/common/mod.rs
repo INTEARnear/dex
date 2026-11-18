@@ -1205,8 +1205,16 @@ pub async fn call_engine_with_gas_key(
         .unwrap()
 }
 
+/// `account` that signs its transactions with `key`
+pub fn signing_with(account: &Account, key: &SecretKey) -> Account {
+    let mut account = account.clone();
+    account.set_secret_key(key.to_string().parse().unwrap());
+    account
+}
+
 /// Add an oracle key of `key_type` to the dex engine with `deposit` for its
-/// storage and gas, whose fees `payer` takes
+/// storage and gas, whose fees `payer` takes. The key signs the transaction
+/// that creates it, as a full access key of `payer`, which it stays.
 pub async fn create_oracle_key(
     dex_engine_contract: &Contract,
     payer: &Account,
@@ -1215,6 +1223,16 @@ pub async fn create_oracle_key(
 ) -> SecretKey {
     let oracle_key = SecretKey::from_random(key_type);
     let result = payer
+        .batch(payer.id())
+        .add_key(
+            oracle_key.public_key().to_string().parse().unwrap(),
+            near_workspaces::types::AccessKey::full_access(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = signing_with(payer, &oracle_key)
         .call(dex_engine_contract.id(), "create_oracle_key")
         .max_gas()
         .deposit(deposit)
