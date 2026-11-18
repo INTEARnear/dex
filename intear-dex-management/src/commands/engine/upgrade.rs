@@ -6,6 +6,7 @@ use std::process::Command;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
+use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_sdk::NearToken;
@@ -13,8 +14,8 @@ use near_sdk::json_types::Base58CryptoHash;
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
-use crate::chain::{account, engine};
-use crate::deployment::ENGINE_ACCOUNT_ID;
+use crate::chain::{account, amp, engine};
+use crate::deployment::{DEFAULT_AMP_DEX_DEPLOYER, DEFAULT_AMP_DEX_NAME, ENGINE_ACCOUNT_ID};
 use crate::errors::PreflightError;
 use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, CallArgs, FunctionCall, Preflight, TransactionPlan, storage};
@@ -205,7 +206,7 @@ impl BuildContext {
         if let [_] = chunks.as_slice() {
             lines.push(format!(
                 "It fits in one transaction. Deploy it with:\n    {}",
-                upgrade_command(&["deploy", "<method to call on it>"])
+                upgrade_command(&["deploy"])
             ));
         } else {
             lines.push(format!(
@@ -220,11 +221,11 @@ impl BuildContext {
             }
             lines.push(format!(
                 "and deploy it with the last one:\n    {}",
-                upgrade_command(&["deploy", "<method to call on it>"])
+                upgrade_command(&["deploy"])
             ));
         }
         lines.push(
-            "The method runs on the new code right after it's deployed: migrate if the state changed, with its arguments as --then-call-args, else a view such as is_paused".to_string(),
+            "deploy calls migrate on the new code right after it's deployed if the state of the deployed code is from before oracle fees, with the fee receivers that the amp pools have for their oracles, else is_paused".to_string(),
         );
         tracing::info!("{}", lines.join("\n│  "));
         Ok(Self)
@@ -262,7 +263,7 @@ impl StoreChunkContext {
             )
             .suggestion(format!(
                 "Deploy it with {}",
-                upgrade_command(&["deploy", "<method to call on it>"])
+                upgrade_command(&["deploy"])
             )));
         }
         let chunk = chunks[index].to_vec();
@@ -273,7 +274,7 @@ impl StoreChunkContext {
         let next_command = if index.saturating_add(1) < last_index {
             upgrade_command(&["store-chunk", &index.saturating_add(1).to_string()])
         } else {
-            upgrade_command(&["deploy", "<method to call on it>"])
+            upgrade_command(&["deploy"])
         };
         let code_label = built.label();
         Ok(Self(planning::write_action_context(
@@ -329,12 +330,6 @@ impl From<StoreChunkContext> for ActionContext {
 #[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = DeployContext)]
 pub struct Deploy {
-    /// Which method of the new code runs right after it's deployed? migrate if the state changed, with its arguments as --then-call-args, else a view such as is_paused
-    then_call: String,
-    #[interactive_clap(long)]
-    #[interactive_clap(skip_interactive_input)]
-    /// The arguments of the method as JSON, e.g. '{"oracle_fee_receivers":[["ed25519:…","oracle.near"]]}' (default {})
-    then_call_args: Option<near_cli_rs::types::json::Json>,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
@@ -346,24 +341,44 @@ pub struct DeployContext(ActionContext);
 impl DeployContext {
     pub fn from_previous_context(
         previous_context: crate::GlobalContext,
-        scope: &<Deploy as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        _scope: &<Deploy as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let built = EngineCheckout::in_current_directory()?.built_code()?;
-        let then_call: &'static str = scope.then_call.clone().leak();
-        let then_call_args = scope
-            .then_call_args
-            .clone()
-            .map_or_else(|| json!({}), serde_json::Value::from);
         let code_label = built.label();
-        let success_message =
-            format!("Deployed {code_label} to {ENGINE_ACCOUNT_ID}, and {then_call} ran on it");
-        let stays_if_it_fails = format!(
-            "If the new code doesn't compile, which NEAR doesn't check, or {then_call} fails, the old code stays"
-        );
         Ok(Self(planning::write_action_context(
             &previous_context,
             ENGINE_ACCOUNT_ID.to_owned(),
             move |preflight| {
+                // The new code can't read state from before oracle fees until it migrates it,
+                // naming the fee receivers that the amp pools have for their oracles, and
+                // otherwise a view shows that it reads the state
+                let (then_call, then_call_args) = if engine::is_before_oracle_fees(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                )? {
+                    let oracle_fee_receivers = amp::oracle_fee_receivers_of_pools(
+                        &preflight.network_config,
+                        &preflight.block_reference,
+                        &DexId {
+                            deployer: DEFAULT_AMP_DEX_DEPLOYER.to_owned(),
+                            id: DEFAULT_AMP_DEX_NAME.to_string(),
+                        },
+                    )?;
+                    (
+                        "migrate",
+                        json!({
+                            "oracle_fee_receivers": oracle_fee_receivers.into_iter().collect::<Vec<_>>(),
+                        }),
+                    )
+                } else {
+                    ("is_paused", json!({}))
+                };
+                let success_message = format!(
+                    "Deployed {code_label} to {ENGINE_ACCOUNT_ID}, and {then_call} ran on it"
+                );
+                let stays_if_it_fails = format!(
+                    "If the new code doesn't compile, which NEAR doesn't check, or {then_call} fails, the old code stays"
+                );
                 let current_code_size = account::view_code(
                     &preflight.network_config,
                     &preflight.block_reference,
@@ -372,7 +387,7 @@ impl DeployContext {
                 .len();
                 let expected_outcome = ExpectedOutcome {
                     action_name: "upgrade",
-                    success_message: success_message.clone(),
+                    success_message,
                     transfer_call: None,
                     dex_id: None,
                     dex_events: DexEvents::NotRead,
@@ -391,12 +406,12 @@ impl DeployContext {
                             format!(
                                 "Deploy {code_label} to {ENGINE_ACCOUNT_ID}, and call {then_call} on it with {then_call_args} in the same receipt"
                             ),
-                            stays_if_it_fails.clone(),
+                            stays_if_it_fails,
                         ],
                         deploy_code: Some(built.code.clone()),
                         function_calls: vec![FunctionCall {
                             method_name: then_call,
-                            args: then_call_args.clone().into(),
+                            args: then_call_args.into(),
                             deposit: NearToken::from_yoctonear(0),
                             gas: THEN_CALL_GAS,
                         }],

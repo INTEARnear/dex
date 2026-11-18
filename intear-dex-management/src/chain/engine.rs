@@ -96,6 +96,22 @@ pub fn is_paused(
     )
 }
 
+/// Whether the engine's code is from before oracle fees, so its state is without them, which
+/// `migrate` of the code with them adds
+pub fn is_before_oracle_fees(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<bool> {
+    let oracle_fees = super::view_function_result(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "oracle_fees",
+        serde_json::to_vec(&json!({ "oracle_key": "ed25519:11111111111111111111111111111111" }))?,
+    )?;
+    Ok(oracle_fees.is_none())
+}
+
 pub fn trusted_code_deployer(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
