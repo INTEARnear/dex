@@ -8,11 +8,11 @@ use amp_dex_types::{
     FULL_FEE_FRACTION, FeeDiscountFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs,
     GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES,
     LiquidityPosition, LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS, MIN_AMPLIFICATION,
-    PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolView,
-    Price, PricesRequest, PricesResponse, ProviderShares, RegisterLiquidityArgs,
-    RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs,
-    SetFeeDiscountSignerArgs, SetFeesArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs,
-    SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
+    PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId,
+    PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
+    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction,
+    SetAmplificationArgs, SetFeeDiscountSignerArgs, SetFeesArgs, SetLiquidityFeePayoutArgs,
+    SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
     math::{RatedPool, SwapAmounts},
 };
 use intear_dex_common::{
@@ -100,7 +100,7 @@ impl Dex for AmpDex {
                 &request,
                 amount,
                 fee_discount,
-                &oracle_prices,
+                oracle_prices.as_ref(),
                 &mut updated_pool_ids,
             );
             response.amount_in = response
@@ -131,7 +131,7 @@ impl AmpDex {
         request: &SwapRequest,
         amount: TokenAmount,
         fee_discount: Option<FeeDiscountFraction>,
-        oracle_prices: &OraclePrices,
+        oracle_prices: Option<&OraclePrices>,
         updated_pool_ids: &mut Vec<PoolId>,
     ) -> SwapResponse {
         let mut hops = Vec::with_capacity(pool_ids.len());
@@ -201,7 +201,7 @@ impl AmpDex {
         &mut self,
         pool_id: PoolId,
         fee_discount: Option<FeeDiscountFraction>,
-        oracle_prices: &OraclePrices,
+        oracle_prices: Option<&OraclePrices>,
         updated_pool_ids: &mut Vec<PoolId>,
         asset_in: AssetId,
         asset_out: AssetId,
@@ -221,8 +221,13 @@ impl AmpDex {
             !balances[AssetIndex::First].is_zero() && !balances[AssetIndex::Second].is_zero(),
             "Pool is empty"
         );
-        let price = oracle_prices.of_pool(pool);
-        // Rated at the oracle's price with the balances that each step of the swap leaves
+        let price = match &pool.rate_source {
+            PoolRateSource::Oracle { .. } => oracle_prices
+                .expect("Swaps on pools that an oracle rates have its prices")
+                .of_pool(pool),
+            PoolRateSource::Fixed(price) => *price,
+        };
+        // Rated at the price with the balances that each step of the swap leaves
         let rated_pool = pool.rated(balances, price);
 
         let swap_fees = match fee_discount {
@@ -302,7 +307,9 @@ impl AmpDex {
                 .expect("Overflow");
         }
         pool.set_balances(balances);
-        pool.last_oracle_price = price;
+        if let PoolRateSource::Oracle { last_price, .. } = &mut pool.rate_source {
+            *last_price = price;
+        }
 
         self.fees_collected_by_users.credit(
             &PROTOCOL_FEE_RECEIVER_ID.to_owned(),
@@ -356,34 +363,37 @@ impl AmpDex {
     }
 }
 
-/// The oracle's prices of the assets of every pool of a swap, which the swap's operations started
-/// with an oracle request of
+/// The oracle's prices of the assets of every pool of a swap that an oracle rates, which the
+/// swap's operations started with an oracle request of
 struct OraclePrices {
     request: PricesRequest,
     response: PricesResponse,
 }
 
 impl OraclePrices {
-    /// Of the pools of `routes`, which all ask the same oracle
-    fn of_routes(pools: &Vector<Pool>, routes: &[SwapRoute]) -> Self {
-        let route_pools = routes
+    /// Of the pools of `routes` that an oracle rates, which all ask the same oracle, `None` if
+    /// every pool has a fixed price
+    fn of_routes(pools: &Vector<Pool>, routes: &[SwapRoute]) -> Option<Self> {
+        let oracle_pools = routes
             .iter()
             .flat_map(|route| &route.pool_ids)
-            .map(|pool_id| {
+            .filter_map(|pool_id| {
                 let Some(pool) = pools.get(pool_id.get()) else {
                     panic!("Pool not found");
                 };
-                pool
+                match &pool.rate_source {
+                    PoolRateSource::Oracle { key, .. } => Some((pool, key)),
+                    PoolRateSource::Fixed(_) => None,
+                }
             })
             .collect::<Vec<_>>();
-        let oracle_key = &route_pools[0].oracle_key;
+        let (_, oracle_key) = *oracle_pools.first()?;
         expect!(
-            route_pools
-                .iter()
-                .all(|pool| pool.oracle_key == *oracle_key),
+            oracle_pools.iter().all(|(_, key)| *key == oracle_key),
             "Pools of a swap must ask the same oracle"
         );
-        let request = PricesRequest::of_pools(route_pools.iter().map(|pool| pool.asset_ids()));
+        let request =
+            PricesRequest::of_pools(oracle_pools.iter().map(|(pool, _)| pool.asset_ids()));
         expect!(
             let Some(response) = env::oracle_request(
                 oracle_key,
@@ -400,7 +410,7 @@ impl OraclePrices {
         let Ok(response) = near_sdk::borsh::from_slice(&response) else {
             panic!("Invalid oracle response");
         };
-        Self { request, response }
+        Some(Self { request, response })
     }
 
     /// The median of the prices of a whole token of the pool's first asset in its second, which
@@ -635,8 +645,10 @@ impl AmpDex {
             ),
             decimals,
             amplification,
-            oracle_key,
-            last_oracle_price: Price::from_units(0),
+            rate_source: PoolRateSource::Oracle {
+                key: oracle_key,
+                last_price: Price::from_units(0),
+            },
             fees,
             providers,
             total_shares: TotalShares::NONE.minted(INITIAL_SHARES).expect("Overflow"),
@@ -849,7 +861,10 @@ impl AmpDex {
         let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
-        pool.oracle_key = oracle_key;
+        match &mut pool.rate_source {
+            PoolRateSource::Oracle { key, .. } => *key = oracle_key,
+            PoolRateSource::Fixed(_) => panic!("The pool has a fixed price, not an oracle"),
+        }
         AmpDexEvent::PoolUpdated {
             pool_id,
             pool: pool.view(),

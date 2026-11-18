@@ -10,7 +10,10 @@ pub use intear_dex_common::{
     WithdrawFeesArgs,
 };
 use near_sdk::{
-    AccountId, AccountIdRef, PublicKeyHandle, borsh::BorshSerialize, json_types::U128, near,
+    AccountId, AccountIdRef, PublicKeyHandle,
+    borsh::{BorshDeserialize, BorshSerialize},
+    json_types::U128,
+    near,
 };
 
 mod legacy_deserialization;
@@ -213,9 +216,9 @@ pub const MAX_DECIMALS: u8 = 38;
 #[near(serializers=[borsh])]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub struct SwapArgs {
-    /// The parts of the swap's amount and the pools they swap through. Every pool asks the same
-    /// oracle, which one `OracleRequest` asks for the prices of all their assets with
-    /// [`PricesRequest::of_pools`].
+    /// The parts of the swap's amount and the pools they swap through. Every pool that an oracle
+    /// rates asks the same oracle, which one `OracleRequest` asks for the prices of all their
+    /// assets with [`PricesRequest::of_pools`].
     pub routes: Vec<SwapRoute>,
     pub fee_discount: Option<SignedFeeDiscount>,
 }
@@ -369,6 +372,27 @@ pub struct LiquidityPositionView {
 }
 
 #[near(serializers=[json])]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh", use_discriminant = true)]
+#[cfg_attr(
+    all(feature = "abi", not(target_arch = "wasm32")),
+    derive(near_sdk::borsh::BorshSchema)
+)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[repr(u8)]
+pub enum PoolRateSource {
+    Oracle {
+        key: PublicKeyHandle,
+        last_price: Price,
+    } = Self::FIRST_BORSH_TAG,
+    Fixed(Price) = 129,
+}
+
+impl PoolRateSource {
+    pub(crate) const FIRST_BORSH_TAG: u8 = 128;
+}
+
+#[near(serializers=[json])]
 #[serde(from = "legacy_deserialization::JsonPoolView")]
 #[derive(Clone, PartialEq, BorshSerialize)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -381,10 +405,7 @@ pub struct PoolView {
     pub assets: (AssetWithBalance, AssetWithBalance),
     pub decimals: (u8, u8),
     pub amplification: Amplification,
-    pub oracle_key: PublicKeyHandle,
-    /// The median of the oracle's prices of a whole token of the first asset in the second that
-    /// the last swap rated the pool at, `None` before the first swap
-    pub last_oracle_price: Option<Price>,
+    pub rate_source: PoolRateSource,
     pub fees: FeeConfiguration,
     pub total_shares: TotalShares,
 }

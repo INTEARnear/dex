@@ -69,8 +69,7 @@ pub fn pool_json(
         "pool_id": pool_id,
         "assets": assets_json,
         "amplification": pool.amplification,
-        "oracle_key": pool.oracle_key,
-        "last_oracle_price": pool.last_oracle_price,
+        "rate_source": pool.rate_source,
         "fee": display::fee_json(pool.fees.fraction),
         "oracle_fee_receiver": pool.fees.oracle_fee_receiver,
         "fees": {

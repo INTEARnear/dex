@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use amp_dex_types::{
-    AmpDexEvent, Amplification, AssetWithBalance, FeeConfiguration, FeeFraction, LiquidityPosition,
-    PROTOCOL_FEE_RECEIVER_ID, PayoutGroups, Pool, PoolId, Price, TokenAmount, TotalShares,
+    AmpDexEvent, Amplification, AssetWithBalance, FeeConfiguration, LiquidityPosition,
+    PayoutGroups, Pool, PoolId, PoolRateSource, Price, TokenAmount, TotalShares,
 };
 use intear_dex_common::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, DexCallResponse, env, expect,
@@ -49,7 +49,7 @@ impl AmpDex {
             amplification: Amplification,
             oracle_key: PublicKeyHandle,
             last_oracle_price: Price,
-            fee: FeeFraction,
+            fees: FeeConfiguration,
             providers: LookupMap<AccountId, LiquidityPosition>,
             total_shares: TotalShares,
             payout_groups: PayoutGroups,
@@ -65,7 +65,7 @@ impl AmpDex {
                 amplification,
                 oracle_key,
                 last_oracle_price,
-                fee,
+                fees,
                 providers,
                 total_shares,
                 payout_groups,
@@ -77,13 +77,11 @@ impl AmpDex {
                 assets,
                 decimals,
                 amplification,
-                oracle_key,
-                last_oracle_price,
-                fees: FeeConfiguration {
-                    fraction: fee,
-                    oracle_fee_per_swap: (TokenAmount::ZERO, TokenAmount::ZERO),
-                    oracle_fee_receiver: PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+                rate_source: PoolRateSource::Oracle {
+                    key: oracle_key,
+                    last_price: last_oracle_price,
                 },
+                fees,
                 providers,
                 total_shares,
                 payout_groups,

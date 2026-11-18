@@ -1,5 +1,6 @@
 use amp_dex_types::{
-    FeeConfiguration, PROTOCOL_FEE_SHARE, SetAmplificationArgs, SetFeesArgs, SetOracleKeyArgs,
+    FeeConfiguration, PROTOCOL_FEE_SHARE, PoolRateSource, Price, SetAmplificationArgs, SetFeesArgs,
+    SetOracleKeyArgs,
 };
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
@@ -99,22 +100,25 @@ impl ShowContext {
                 let pool = amp::pool(network_config, &block_reference, &dex_id, pool_id)?;
                 let metadata_cache = AssetMetadataCache::new(network_config, block_reference);
                 // What the oracle request operation that swaps start with asks for
-                let oracle_request =
-                    BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&pool.prices_request())?);
+                let oracle_request = match pool.rate_source {
+                    PoolRateSource::Oracle { .. } => Some(
+                        BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&pool.prices_request())?),
+                    ),
+                    PoolRateSource::Fixed(_) => None,
+                };
                 match output_format {
                     OutputFormat::Table => {
                         let [(asset_id_0, reserve_0), (asset_id_1, reserve_1)] = pool_assets(&pool);
                         let metadata_0 = metadata_cache.get(&asset_id_0)?;
                         let metadata_1 = metadata_cache.get(&asset_id_1)?;
-                        let last_oracle_price = match pool.last_oracle_price {
-                            Some(price) => format!(
+                        let price_label = |price: Price| {
+                            format!(
                                 "1 {} = {price} {}",
                                 display::asset_label(&asset_id_0, metadata_0.as_ref()),
                                 display::asset_label(&asset_id_1, metadata_1.as_ref())
-                            ),
-                            None => "no swaps yet".to_string(),
+                            )
                         };
-                        let rows = vec![
+                        let mut rows = vec![
                             ("Pool", format!("#{pool_id} on {dex_id}")),
                             (
                                 "Pair",
@@ -138,9 +142,28 @@ impl ShowContext {
                                 ),
                             ),
                             ("Amplification", pool.amplification.to_string()),
-                            ("Oracle key", pool.oracle_key.to_string()),
-                            ("Oracle request", oracle_request.clone()),
-                            ("Last oracle price", last_oracle_price),
+                        ];
+                        match (&pool.rate_source, &oracle_request) {
+                            (PoolRateSource::Oracle { key, last_price }, Some(oracle_request)) => {
+                                rows.extend([
+                                    ("Oracle key", key.to_string()),
+                                    ("Oracle request", oracle_request.clone()),
+                                    (
+                                        "Last oracle price",
+                                        if last_price.is_zero() {
+                                            "no swaps yet".to_string()
+                                        } else {
+                                            price_label(*last_price)
+                                        },
+                                    ),
+                                ]);
+                            }
+                            (PoolRateSource::Fixed(price), _) => {
+                                rows.push(("Fixed price", price_label(*price)));
+                            }
+                            (PoolRateSource::Oracle { .. }, None) => unreachable!(),
+                        }
+                        rows.extend([
                             (
                                 "Total shares",
                                 if pool.total_shares.is_none() {
@@ -165,13 +188,15 @@ impl ShowContext {
                                     pool.fees.oracle_fee_receiver
                                 ),
                             ),
-                        ];
+                        ]);
                         print!("{}", display::key_value_table(rows));
                     }
                     OutputFormat::Json => {
                         let mut pool_json = pool_json(pool_id, &pool, &metadata_cache)?;
                         pool_json["dex_id"] = serde_json::json!(dex_id);
-                        pool_json["oracle_request"] = serde_json::json!(oracle_request);
+                        if let Some(oracle_request) = oracle_request {
+                            pool_json["oracle_request"] = serde_json::json!(oracle_request);
+                        }
                         display::print_json(&pool_json)?;
                     }
                 }
@@ -360,7 +385,18 @@ impl SetOracleKeyContext {
                 preflight.ensure_engine_not_paused()?;
                 super::ensure_dex_owner(preflight, &dex_id, "change the oracle of its pools")?;
                 let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
-                if pool.pool.oracle_key == oracle_key {
+                let PoolRateSource::Oracle {
+                    key: current_oracle_key,
+                    ..
+                } = &pool.pool.rate_source
+                else {
+                    return Err(PreflightError::PoolHasFixedPrice {
+                        dex_id: dex_id.clone(),
+                        pool_id,
+                    }
+                    .into_report());
+                };
+                if *current_oracle_key == oracle_key {
                     return Err(PreflightError::PoolSettingUnchanged {
                         dex_id: dex_id.clone(),
                         pool_id,
@@ -369,7 +405,7 @@ impl SetOracleKeyContext {
                     .into_report());
                 }
                 let storage_near = storage::storage_cost(
-                    amp_storage::oracle_key_growth_bytes(&pool.pool.oracle_key, &oracle_key)?,
+                    amp_storage::oracle_key_growth_bytes(current_oracle_key, &oracle_key)?,
                     preflight.protocol_limits.storage_byte_cost,
                 )?;
                 let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
@@ -377,8 +413,7 @@ impl SetOracleKeyContext {
                     preflight,
                     &dex_id,
                     format!(
-                        "Change the oracle that swaps on {pool_label} ask for prices from {} to {oracle_key}",
-                        pool.pool.oracle_key
+                        "Change the oracle that swaps on {pool_label} ask for prices from {current_oracle_key} to {oracle_key}"
                     ),
                     (
                         "set_oracle_key",

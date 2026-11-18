@@ -5,10 +5,10 @@ use amp_dex_types::{
     ExchangePrices, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FeeConfiguration, FeeDiscount,
     FeeDiscountSignaturePayload, FeeFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs,
     GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES, PROTOCOL_FEE_RECEIVER_ID,
-    PayoutGroupShares, PayoutGroups, PoolId, PoolView, Price, PricesRequest, PricesResponse,
-    ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction,
-    SetAmplificationArgs, SetFeeDiscountSignerArgs, SetFeesArgs, SetLiquidityFeePayoutArgs,
-    SetOracleKeyArgs, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
+    PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
+    RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, SetAmplificationArgs,
+    SetFeeDiscountSignerArgs, SetFeesArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs,
+    SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
 };
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
 use intear_dex_types::{
@@ -23,8 +23,9 @@ use near_sdk::{
     json_types::{Base64VecU8, U128},
 };
 use near_workspaces::network::Sandbox;
+use near_workspaces::operations::Function;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::{Account, Contract, Worker};
+use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
 use std::collections::HashMap;
 
 /// ft1 is rated as NEAR, ft2 as USDC, and ft3 as XAUT
@@ -560,8 +561,11 @@ async fn test_amp_swaps_at_oracle_price() {
     assert_eq!(pool.assets.1.balance, TokenAmount::new(liquidity.1));
     assert_eq!(pool.decimals, (NEAR_DECIMALS, USDC_DECIMALS));
     assert_eq!(pool.amplification, Amplification::new(100));
-    assert_eq!(pool.oracle_key, oracle_key_handle(&test.oracle_key));
-    assert_eq!(pool.last_oracle_price, None);
+    let oracle_rate_source = |last_price: Price| PoolRateSource::Oracle {
+        key: oracle_key_handle(&test.oracle_key),
+        last_price,
+    };
+    assert_eq!(pool.rate_source, oracle_rate_source(Price::from_units(0)));
     assert_eq!(pool.fees.fraction, fee);
     assert_eq!(
         get_pool_shares(dex_engine_contract, dex_id, pool_id, deployer.id()).await,
@@ -675,13 +679,16 @@ async fn test_amp_swaps_at_oracle_price() {
     let updated_prices = amp_events(&result)
         .into_iter()
         .filter_map(|event| match event {
-            AmpDexEvent::PoolUpdated { pool, .. } => Some(pool.last_oracle_price),
+            AmpDexEvent::PoolUpdated { pool, .. } => Some(pool.rate_source),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(updated_prices, vec![Some(median_price)]);
+    assert_eq!(updated_prices, vec![oracle_rate_source(median_price)]);
     let pool_after_swap = get_pool(dex_engine_contract, dex_id, pool_id).await;
-    assert_eq!(pool_after_swap.last_oracle_price, Some(median_price));
+    assert_eq!(
+        pool_after_swap.rate_source,
+        oracle_rate_source(median_price)
+    );
     // The creator's fee is held for it, out of the pool's balance
     assert_eq!(
         pool_after_swap.assets.0.balance,
@@ -853,7 +860,14 @@ async fn test_amp_swaps_at_oracle_price() {
     assert!(format!("{result:?}").contains("Amplification must be from 1 to 1000000"));
     let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
     assert_eq!(pool.amplification, Amplification::new(1_000));
-    assert_eq!(pool.oracle_key, oracle_key_handle(&other_oracle_key));
+    // The pool keeps the price that the oracle it had last rated it at
+    assert_eq!(
+        pool.rate_source,
+        PoolRateSource::Oracle {
+            key: oracle_key_handle(&other_oracle_key),
+            last_price: median_price,
+        }
+    );
     let usdc_before = user1_balance(usdc_asset_id).await;
     let expected_usdc_out = pool
         .rated(median_price)
@@ -2222,209 +2236,115 @@ async fn test_amp_complex_route() {
 }
 
 #[tokio::test]
-async fn test_amp_migration() {
-    let test = setup_amp().await;
-    let TestContext {
-        sandbox,
-        dex_engine_contract,
-        deployer,
-        user1,
-        user2,
-        ft1,
-        ..
-    } = &test.context;
-    let dex_id = &test.dex_id;
-    let near_asset_id = &test.near_asset_id;
-    let fee = FeeFraction::new(1_000);
-    let liquidity = (near(1_000_000), usdc(3_750_000));
-    let pool_ids = [
-        test.create_pool(test.create_pool_args(fee, liquidity))
-            .await,
-        test.create_pool(CreatePoolArgs {
-            fees: FeeConfiguration {
-                fraction: FeeFraction::new(3_000),
-                oracle_fee_per_swap: (
-                    TokenAmount::new(near(1) / 1_000),
-                    TokenAmount::new(usdc(5) / 1_000),
-                ),
-                oracle_fee_receiver: user2.id().clone(),
-            },
-            ..test.create_pool_args(fee, (liquidity.0 / 2, liquidity.1 / 2))
-        })
-        .await,
-    ];
-    deposit_ft(dex_engine_contract, deployer, ft1, user1, near(10)).await;
-    let swap = async |pool_id: PoolId, near_in: u128| {
-        test.swap_with_prices(
-            user1,
-            pool_id,
-            &test.oracle_key,
-            &agreeing_prices(),
-            near_asset_id,
-            SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+async fn test_amp_migration_of_mainnet_state() {
+    let sandbox = near_workspaces::sandbox().await.unwrap();
+    let (dex_engine_contract, _) = import_mainnet_engine(&sandbox).await;
+    // The owner of the dex, which is the trusted code deployer of the engine
+    let owner_id: AccountId = "slimedragon.near".parse().unwrap();
+    let owner_key =
+        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    sandbox
+        .patch(&owner_id)
+        .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000)))
+        .access_key(
+            owner_key.public_key(),
+            near_workspaces::types::AccessKey::full_access(),
         )
+        .transact()
         .await
+        .unwrap();
+    let owner = Account::from_secret_key(owner_id, owner_key, &sandbox);
+    let dex_id = DexId {
+        deployer: owner.id().clone(),
+        id: "amp".to_string(),
     };
+
+    let pool_count: u32 = dex_view(&dex_engine_contract, &dex_id, "get_pool_count", vec![]).await;
+    assert!(pool_count > 0);
+    let pool_ids = (0..pool_count).map(PoolId::new).collect::<Vec<_>>();
     let liquidity_position = async |pool_id: PoolId| {
         dex_view::<Option<amp_dex_types::LiquidityPositionView>>(
-            dex_engine_contract,
-            dex_id,
+            &dex_engine_contract,
+            &dex_id,
             "get_liquidity_position",
             near_sdk::borsh::to_vec(&GetLiquidityPositionArgs {
                 pool_id,
-                account_id: deployer.id().clone(),
+                account_id: owner.id().clone(),
             })
             .unwrap(),
         )
         .await
     };
+    // The views of the code from before rate sources, which pool views still deserialize
     let mut pools_before_migration = Vec::new();
     let mut positions_before_migration = Vec::new();
-    for pool_id in pool_ids {
-        pools_before_migration.push(get_pool(dex_engine_contract, dex_id, pool_id).await);
+    let mut shares_before_migration = Vec::new();
+    for &pool_id in &pool_ids {
+        pools_before_migration.push(get_pool(&dex_engine_contract, &dex_id, pool_id).await);
         positions_before_migration.push(liquidity_position(pool_id).await);
+        shares_before_migration
+            .push(get_pool_shares(&dex_engine_contract, &dex_id, pool_id, owner.id()).await);
     }
 
-    // The pools as they were stored before oracle fees, with the fee where the fees are now, and the
-    // payout groups that a pool starts with, the creator's of all of its shares. The engine stores
-    // the records of dexes in StorageKey::DexStorage by dex and key, and the dex its pools in
-    // StorageKey::Pools by index.
-    let pool_record_key = |pool_id: PoolId| {
-        let dex_key = [[0u8].as_slice(), &pool_id.get().to_le_bytes()].concat();
-        [
-            vec![1],
-            near_sdk::borsh::to_vec(&(dex_id, dex_key)).unwrap(),
-        ]
-        .concat()
-    };
-    for (pool_id, pool) in pool_ids.into_iter().zip(&pools_before_migration) {
-        let mut payout_groups = PayoutGroups::default();
-        payout_groups.group_mut(FeePayoutType::KeepBoth).shares =
-            PayoutGroupShares::NONE.joined_by(INITIAL_SHARES).unwrap();
-        // StorageKey::PoolProviders of the dex
-        let providers_prefix = near_sdk::borsh::to_vec(&(1u8, pool_id)).unwrap();
-        let record_before_migration = near_sdk::borsh::to_vec(&(
-            &pool.assets,
-            pool.decimals,
-            pool.amplification,
-            &pool.oracle_key,
-            Price::from_units(0),
-            pool.fees.fraction,
-            providers_prefix,
-            pool.total_shares,
-            payout_groups,
-        ))
-        .unwrap();
-        let key = pool_record_key(pool_id);
-        sandbox
-            .patch(dex_engine_contract.id())
-            .state(
-                &key,
-                &near_sdk::borsh::to_vec(&record_before_migration).unwrap(),
-            )
-            .transact()
-            .await
-            .unwrap();
-    }
-    // The new code can't read pools stored that way
-    let error = dex_engine_contract
-        .view("dex_view")
-        .args_json(json!({
-            "dex_id": dex_id,
-            "method": "get_pool",
-            "args": BASE64_STANDARD.encode(near_sdk::borsh::to_vec(&GetPoolArgs { pool_id: pool_ids[0] }).unwrap()),
-        }))
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{error:?}").contains("Cannot deserialize element"),
-        "{error:?}"
-    );
-
-    // Only the owner migrates, with NEAR for the storage of the oracle fees and their receiver, in
-    // the receipt of a deploy that stores the code, which a failed migration reverts
-    let result = execute_operations(
-        user1,
-        dex_engine_contract,
-        vec![dex_call(dex_id, "migrate", vec![], &[])],
+    // The engine of this checkout, as `engine upgrade deploy` deploys it, with its translator,
+    // which the sandbox doesn't have
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        &get_compiled_wasms().await.contract_wasm,
+        700_000,
+        "is_paused",
+        b"{}",
     )
     .await;
-    assert!(
-        format!("{result:?}").contains("Only the owner of the dex can migrate"),
-        "{result:?}"
-    );
-    let amp_dex_wasm = &get_compiled_wasms().await.amp_dex_wasm;
-    let deploy_and_migrate = async |attached_near: NearToken| {
-        deployer
-            .call(dex_engine_contract.id(), "deploy_dex_code")
-            .gas(Gas::from_tgas(1_000))
-            .deposit(NearToken::from_yoctonear(1))
-            .args_json(json!({
-                "last_part_of_id": dex_id.id,
-                "code_base64": BASE64_STANDARD.encode(amp_dex_wasm),
-                "call_after_deploy": DexCallAfterDeploy {
-                    method: "migrate".to_string(),
-                    args: Base64VecU8(Vec::new()),
-                    attached_assets: HashMap::from([(
-                        AssetId::Near,
-                        TokenAmount::new(attached_near.as_yoctonear()),
-                    )]),
-                },
-            }))
-            .transact()
-            .await
-            .unwrap()
-    };
-    let deployer_near = async || {
-        inner_balance(
-            dex_engine_contract,
-            AccountOrDexId::Account(deployer.id().clone()),
-            &AssetId::Near,
-        )
-        .await
-    };
-    let storage_balance_before_migration = get_dex_storage_balance(dex_engine_contract, dex_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let deployer_near_before_migration = deployer_near().await;
-    let result = deploy_and_migrate(NearToken::from_yoctonear(1)).await;
-    assert!(
-        format!("{result:?}").contains("Not enough near attached for storage"),
-        "{result:?}"
-    );
-    assert_eq!(
-        get_dex_storage_balance(dex_engine_contract, dex_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .total,
-        storage_balance_before_migration.total
-    );
-    assert_eq!(deployer_near().await, deployer_near_before_migration);
-    let storage_near = NearToken::from_millinear(10);
-    let result = deploy_and_migrate(storage_near).await;
     assert_success(&result).unwrap();
-    // The NEAR comes from the deployer's balance, and the dex sends what it doesn't use to its
-    // wallet
-    assert_eq!(
-        deployer_near().await,
-        deployer_near_before_migration - storage_near.as_yoctonear()
+    create_translator(&dex_engine_contract).await;
+
+    // What `amp deploy` sends: a top-up of the dex's storage balance for the code, NEAR for the
+    // storage of the migration, and the code with the migration, which runs once the code is
+    // stored
+    let storage_near = NearToken::from_millinear(10);
+    let result = owner
+        .batch(dex_engine_contract.id())
+        .call(
+            Function::new("deposit_near")
+                .args_json(json!({}))
+                .deposit(storage_near)
+                .gas(Gas::from_tgas(10)),
+        )
+        .call(
+            Function::new("dex_storage_deposit")
+                .args_json(json!({ "dex_id": dex_id }))
+                .deposit(NearToken::from_near(5))
+                .gas(Gas::from_tgas(10)),
+        )
+        .call(
+            Function::new("deploy_dex_code")
+                .args_json(json!({
+                    "last_part_of_id": dex_id.id,
+                    "code_base64": BASE64_STANDARD.encode(&get_compiled_wasms().await.amp_dex_wasm),
+                    "call_after_deploy": DexCallAfterDeploy {
+                        method: "migrate".to_string(),
+                        args: Base64VecU8(Vec::new()),
+                        attached_assets: HashMap::from([(
+                            AssetId::Near,
+                            TokenAmount::new(storage_near.as_yoctonear()),
+                        )]),
+                    },
+                }))
+                .deposit(NearToken::from_yoctonear(1))
+                .gas(Gas::from_tgas(980)),
+        )
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    println!(
+        "GAS {:<40} {:>8.3} TGas",
+        "deposit, top up, deploy and migrate",
+        result.total_gas_burnt.as_gas() as f64 / 1e12
     );
 
-    // Every pool has oracle fees of 0 for the protocol, and the rest as it had
-    let migrated_pools = pools_before_migration
-        .into_iter()
-        .map(|pool| PoolView {
-            fees: FeeConfiguration {
-                oracle_fee_per_swap: (TokenAmount::ZERO, TokenAmount::ZERO),
-                oracle_fee_receiver: PROTOCOL_FEE_RECEIVER_ID.to_owned(),
-                ..pool.fees.clone()
-            },
-            ..pool
-        })
-        .collect::<Vec<_>>();
+    // The pools are as they were, with their oracle and its last price as their rate source
     let updated_pools = amp_events(&result)
         .into_iter()
         .filter_map(|event| match event {
@@ -2435,63 +2355,38 @@ async fn test_amp_migration() {
     assert_eq!(
         updated_pools,
         pool_ids
-            .into_iter()
-            .zip(migrated_pools.clone())
+            .iter()
+            .copied()
+            .zip(pools_before_migration.clone())
             .collect::<Vec<_>>()
     );
-    for ((pool_id, migrated_pool), position) in pool_ids
-        .into_iter()
-        .zip(migrated_pools)
+    for (((&pool_id, pool_before_migration), position), shares) in pool_ids
+        .iter()
+        .zip(pools_before_migration)
         .zip(positions_before_migration)
+        .zip(shares_before_migration)
     {
+        assert!(matches!(
+            pool_before_migration.rate_source,
+            PoolRateSource::Oracle { .. }
+        ));
         assert_eq!(
-            get_pool(dex_engine_contract, dex_id, pool_id).await,
-            migrated_pool
+            get_pool(&dex_engine_contract, &dex_id, pool_id).await,
+            pool_before_migration
         );
         assert_eq!(liquidity_position(pool_id).await, position);
+        assert_eq!(
+            get_pool_shares(&dex_engine_contract, &dex_id, pool_id, owner.id()).await,
+            shares
+        );
     }
-    // The dex kept the NEAR that the oracle fees and their receiver take in each pool, as the code
-    // and its translation take what they took
-    let migrated_bytes = 2
-        * (near_sdk::borsh::to_vec(&(TokenAmount::ZERO, TokenAmount::ZERO))
-            .unwrap()
-            .len()
-            + near_sdk::borsh::to_vec(&PROTOCOL_FEE_RECEIVER_ID.to_owned())
-                .unwrap()
-                .len());
-    assert_eq!(
-        get_dex_storage_balance(dex_engine_contract, dex_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .total,
-        storage_balance_before_migration
-            .total
-            .checked_add(
-                near_sdk::env::storage_byte_cost()
-                    .checked_mul(migrated_bytes as u128)
-                    .unwrap()
-            )
-            .unwrap()
-    );
-
-    // The migrated pools swap, and their creator keeps the fee in both assets
-    assert_success(&swap(pool_ids[0], near(10)).await).unwrap();
-    assert!(
-        !liquidity_position(pool_ids[0])
-            .await
-            .unwrap()
-            .uncollected_fees
-            .0
-            .is_zero()
-    );
-
     // A migrated pool can't be migrated again
+    deposit_near(&dex_engine_contract, &owner, NearToken::from_near(10)).await;
     let result = execute_operations(
-        deployer,
-        dex_engine_contract,
+        &owner,
+        &dex_engine_contract,
         vec![dex_call(
-            dex_id,
+            &dex_id,
             "migrate",
             vec![],
             &[(AssetId::Near, storage_near.as_yoctonear())],
@@ -2499,4 +2394,105 @@ async fn test_amp_migration() {
     )
     .await;
     assert!(format!("{result:?}").contains("Invalid pool"), "{result:?}");
+
+    // The owner moves the first pool, of NEAR, to an oracle of the test, and swaps a NEAR
+    let pool_id = pool_ids[0];
+    let oracle_key = create_oracle_key(
+        &dex_engine_contract,
+        &owner,
+        KeyType::ED25519,
+        NearToken::from_near(2),
+    )
+    .await;
+    let result = execute_operations(
+        &owner,
+        &dex_engine_contract,
+        vec![dex_call(
+            &dex_id,
+            "set_oracle_key",
+            near_sdk::borsh::to_vec(&SetOracleKeyArgs {
+                pool_id,
+                oracle_key: oracle_key_handle(&oracle_key),
+            })
+            .unwrap(),
+            &[(AssetId::Near, storage_near.as_yoctonear())],
+        )],
+    )
+    .await;
+    assert_success(&result).unwrap();
+    let pool = get_pool(&dex_engine_contract, &dex_id, pool_id).await;
+    let (asset_0, asset_1) = (&pool.assets.0.asset_id, &pool.assets.1.asset_id);
+    assert_eq!(*asset_0, AssetId::Near);
+    let owner_balance = async |asset_id: &AssetId| {
+        inner_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(owner.id().clone()),
+            asset_id,
+        )
+        .await
+    };
+    let token_0 = 10u128.pow(u32::from(pool.decimals.0));
+    let oracle_fee = pool.fees.oracle_fee(AssetIndex::First).get();
+    let swap_fees = pool.swap_fees();
+    let median_price = agreeing_prices()
+        .median_price(&pool.prices_request(), asset_0, asset_1)
+        .unwrap();
+    let expected_amount_out = pool
+        .rated(median_price)
+        .exact_in_amount_out(
+            AssetIndex::First,
+            TokenAmount::new(after_fees(
+                token_0 - oracle_fee,
+                &[
+                    u128::from(swap_fees.pool.get()),
+                    u128::from(swap_fees.protocol.get()),
+                ],
+            )),
+        )
+        .get();
+    let amount_out_before = owner_balance(asset_1).await;
+    let oracle_fees_before = get_pending_fees(
+        &dex_engine_contract,
+        &dex_id,
+        &pool.fees.oracle_fee_receiver,
+        asset_0,
+    )
+    .await;
+    let result = swap_on_routes(
+        &sandbox,
+        &dex_engine_contract,
+        &dex_id,
+        &owner,
+        SwapArgs::single_pool(pool_id),
+        &oracle_key,
+        &agreeing_prices(),
+        asset_0,
+        asset_1,
+        SwapRequestAmount::ExactIn(TokenAmount::new(token_0)),
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert_eq!(
+        owner_balance(asset_1).await,
+        amount_out_before + expected_amount_out
+    );
+    assert_eq!(
+        get_pending_fees(
+            &dex_engine_contract,
+            &dex_id,
+            &pool.fees.oracle_fee_receiver,
+            asset_0
+        )
+        .await,
+        oracle_fees_before + oracle_fee
+    );
+    assert_eq!(
+        get_pool(&dex_engine_contract, &dex_id, pool_id)
+            .await
+            .rate_source,
+        PoolRateSource::Oracle {
+            key: oracle_key_handle(&oracle_key),
+            last_price: median_price,
+        }
+    );
 }

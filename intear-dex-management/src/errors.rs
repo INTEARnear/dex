@@ -177,6 +177,8 @@ pub enum PreflightError {
         pool_id: PoolId,
         setting: String,
     },
+    #[error("Pool #{pool_id} of {dex_id} has a fixed price, not an oracle")]
+    PoolHasFixedPrice { dex_id: DexId, pool_id: PoolId },
     #[error("Launch pools pair NEAR with a token, so the token can't be NEAR itself")]
     LaunchOfNear,
     #[error("Pool #{pool_id} of {dex_id} is owned by {owner_id}, and {signer_id} signed")]
@@ -361,6 +363,7 @@ impl PreflightError {
             | Self::UnsupportedPoolAsset { .. }
             | Self::NoAssetDecimals { .. }
             | Self::PoolSettingUnchanged { .. }
+            | Self::PoolHasFixedPrice { .. }
             | Self::LaunchOfNear
             | Self::PoolLocked { .. }
             | Self::PoolKindNotSupported { .. }

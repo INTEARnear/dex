@@ -1,21 +1,20 @@
 use intear_dex_common::AssetId;
-use near_sdk::{AccountId, PublicKeyHandle, near, store::LookupMap};
+use near_sdk::{AccountId, near, store::LookupMap};
 
 use crate::{
     Amplification, AssetWithBalance, FeeConfiguration, LiquidityPosition, PayoutGroups, PoolAssets,
-    PoolView, Price, PricesRequest, ProviderShares, SwapFees, TokenAmount, TotalShares,
-    math::RatedPool,
+    PoolRateSource, PoolView, Price, PricesRequest, ProviderShares, SwapFees, TokenAmount,
+    TotalShares, math::RatedPool,
 };
 
-/// A pool of two assets that swaps on a StableSwap curve, with the assets rated at the median of
-/// the prices that its oracle collects from exchanges
+/// A pool of two assets that swaps on a StableSwap curve, with the assets rated at a fixed price
+/// or the median of the prices that its oracle collects from exchanges
 #[near(serializers=[borsh])]
 pub struct Pool {
     pub assets: (AssetWithBalance, AssetWithBalance),
     pub decimals: (u8, u8),
     pub amplification: Amplification,
-    pub oracle_key: PublicKeyHandle,
-    pub last_oracle_price: Price,
+    pub rate_source: PoolRateSource,
     pub fees: FeeConfiguration,
     pub providers: LookupMap<AccountId, LiquidityPosition>,
     pub total_shares: TotalShares,
@@ -69,9 +68,7 @@ impl Pool {
             assets: self.assets.clone(),
             decimals: self.decimals,
             amplification: self.amplification,
-            oracle_key: self.oracle_key.clone(),
-            last_oracle_price: (!self.last_oracle_price.is_zero())
-                .then_some(self.last_oracle_price),
+            rate_source: self.rate_source.clone(),
             fees: self.fees.clone(),
             total_shares: self.total_shares,
         }

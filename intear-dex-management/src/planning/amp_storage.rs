@@ -52,8 +52,10 @@ pub fn new_pool_bytes(
         asset_with_balance_bytes(assets.1)?,
         DECIMALS_BYTES,
         AMPLIFICATION_BYTES,
+        // The rate source of an oracle: its key, and the last price, which takes its full size
+        // before the first swap
+        ENUM_TAG_BYTES,
         borsh_bytes(oracle_key)?,
-        // The last oracle price, which takes its full size before the first swap
         PRICE_BYTES,
         borsh_bytes(fees)?,
         SHARE_MAP_BYTES,
@@ -107,7 +109,8 @@ pub fn oracle_key_growth_bytes(
 mod tests {
     use amp_dex_types::{
         Amplification, AssetWithBalance, FeeFraction, FeePayoutType, INITIAL_SHARES,
-        LiquidityPosition, PayoutGroup, PayoutGroups, PoolId, Price, TokenAmount, TotalShares,
+        LiquidityPosition, PayoutGroup, PayoutGroups, PoolId, PoolRateSource, Price, TokenAmount,
+        TotalShares,
     };
 
     use super::*;
@@ -145,8 +148,10 @@ mod tests {
             ),
             (24u8, 6u8),
             Amplification::new(100),
-            oracle_key.clone(),
-            Price::from_units(0),
+            PoolRateSource::Oracle {
+                key: oracle_key.clone(),
+                last_price: Price::from_units(0),
+            },
             fees.clone(),
             providers_prefix,
             TotalShares::NONE.minted(INITIAL_SHARES).unwrap(),
