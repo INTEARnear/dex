@@ -204,10 +204,9 @@ pub fn dex_code_translation_record_bytes(
 
 /// What `create_oracle_key` takes from the attached NEAR: the gas key of the
 /// oracle with its nonces, as the protocol stores them in the engine's
-/// account, and the record of its fee receiver
+/// account
 pub fn oracle_key_bytes(
     oracle_key: &PublicKeyHandle,
-    fee_receiver_id: &AccountId,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
     const ORACLE_KEY_METHODS: [&str; 2] = ["oracle_respond", "remove_oracle_key"];
@@ -227,10 +226,10 @@ pub fn oracle_key_bytes(
         ORACLE_KEY_METHODS.to_vec(),
     ))?
     .len();
-    let mut bytes = vec![
-        record_bytes(&[key_bytes, access_key_bytes], extra_bytes_per_record)?,
-        oracle_fee_receiver_record_bytes(oracle_key, fee_receiver_id, extra_bytes_per_record)?,
-    ];
+    let mut bytes = vec![record_bytes(
+        &[key_bytes, access_key_bytes],
+        extra_bytes_per_record,
+    )?];
     for _ in 0..ORACLE_KEY_NONCES {
         bytes.push(record_bytes(
             &[key_bytes, GAS_KEY_NONCE_BYTES],
@@ -240,7 +239,8 @@ pub fn oracle_key_bytes(
     sum(&bytes)
 }
 
-/// The engine's record of the account that takes the fees of an oracle
+/// The engine's record of the account that takes the fees of an oracle,
+/// which it charges to that account
 pub fn oracle_fee_receiver_record_bytes(
     oracle_key: &PublicKeyHandle,
     fee_receiver_id: &AccountId,
@@ -308,19 +308,15 @@ mod tests {
     const ED25519_ORACLE_KEY: &str = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
 
     #[test]
-    fn oracle_key_counts_the_gas_key_its_nonces_and_the_fee_receiver() {
+    fn oracle_key_counts_the_gas_key_and_its_nonces() {
         let oracle_key: PublicKeyHandle = ED25519_ORACLE_KEY.parse().unwrap();
-        let fee_receiver_id: AccountId = "oracle.intear.near".parse().unwrap();
         // access key: 33 + (8 + 1 + 16 + 2 + 1 + (4 + 15) + (4 + (4 + 14) + (4 + 17))) + 40,
-        // each of the 4 nonces: 33 + (8 + 2) + 40, fee receiver: 1 + 33 + (4 + 18) + 40
+        // each of the 4 nonces: 33 + (8 + 2) + 40
+        assert_eq!(oracle_key_bytes(&oracle_key, 40).unwrap(), 163 + 4 * 83);
+        // a secp256k1 key is 32 bytes longer in each of its 5 records
         assert_eq!(
-            oracle_key_bytes(&oracle_key, &fee_receiver_id, 40).unwrap(),
-            163 + 4 * 83 + 96
-        );
-        // a secp256k1 key is 32 bytes longer in each of its 6 records
-        assert_eq!(
-            oracle_key_bytes(&PublicKeyHandle::SECP256K1([1; 64]), &fee_receiver_id, 40).unwrap(),
-            163 + 4 * 83 + 96 + 6 * 32
+            oracle_key_bytes(&PublicKeyHandle::SECP256K1([1; 64]), 40).unwrap(),
+            163 + 4 * 83 + 5 * 32
         );
     }
 

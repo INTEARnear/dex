@@ -3,16 +3,15 @@ use std::collections::HashMap;
 use intear_dex_common::{AssetId, Caller, DexId, TokenAmount, expect};
 use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation, ReferralFees};
 use near_sdk::{
-    AccountId, Allowance, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken, Promise,
-    PromiseError, PromiseOrValue, PublicKey, PublicKeyHandle, UserYieldId,
+    AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PromiseOrValue, PublicKey, PublicKeyHandle, UserYieldId,
     json_types::{Base58CryptoHash, Base64VecU8},
     near,
     serde_json::{Value, json},
 };
 
 use crate::{
-    DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, StorageKey,
-    call_events::CallEvents,
+    DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
 };
 
 pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(10);
@@ -30,7 +29,7 @@ pub const MAX_ORACLE_REQUEST_BYTES: usize = 1024;
 
 const ORACLE_KEY_NONCES: u32 = 4;
 const ORACLE_KEY_METHODS: [&str; 2] = ["oracle_respond", "remove_oracle_key"];
-const GAS_FOR_AFTER_ORACLE_KEY_CREATION: Gas = Gas::from_tgas(5);
+const GAS_FOR_AFTER_ORACLE_KEY_CREATION: Gas = Gas::from_tgas(10);
 const GAS_FOR_AFTER_ORACLE_KEY_REMOVAL: Gas = Gas::from_tgas(10);
 
 // https://github.com/near/nearcore/blob/2.14.0/core/primitives-core/src/types.rs#L19-L21
@@ -41,21 +40,19 @@ impl DexEngine {
     /// Add a gas key that can only call `oracle_respond` and `remove_oracle_key`,
     /// for an oracle to respond with. The transaction is signed with the key, as
     /// a full access key of the account that creates it, so that only the oracle
-    /// that has the key can name its fee receiver. `fee_receiver_id` takes the
-    /// oracle's fees. The attached NEAR pays for the storage of the key and its
-    /// fee receiver, and the rest of it is the gas balance.
+    /// that has the key can name its fee receiver, which is the account that
+    /// calls this. The attached NEAR pays for the storage of the key, and the
+    /// rest of it is the gas balance. The storage balance of the fee receiver
+    /// pays for the record of it, as it does for the oracle's fees.
     #[payable]
-    pub fn create_oracle_key(
-        &mut self,
-        oracle_key: PublicKey,
-        fee_receiver_id: AccountId,
-    ) -> Promise {
+    pub fn create_oracle_key(&mut self, oracle_key: PublicKey) -> Promise {
         self.assert_not_paused();
         expect!(
             near_sdk::env::signer_account_pk() == oracle_key,
             "The transaction that creates an oracle key must be signed with it"
         );
-        let storage_cost = oracle_key_storage_cost(&oracle_key, &fee_receiver_id);
+        let fee_receiver_id = near_sdk::env::predecessor_account_id();
+        let storage_cost = oracle_key_storage_cost(&oracle_key);
         let gas_key_balance = near_sdk::env::attached_deposit()
             .checked_sub(storage_cost)
             .unwrap_or_else(|| panic!("Attach at least {storage_cost} for the storage of the key"));
@@ -69,10 +66,10 @@ impl DexEngine {
                 ORACLE_KEY_METHODS.join(","),
             )
             .transfer_to_gas_key(oracle_key.clone(), gas_key_balance)
-            // Pays for the storage of the key and its fee receiver once the key is
-            // added, and is refunded with the gas balance if it can't be
+            // Pays for the key's storage once it's added, and is refunded with the
+            // gas balance if it can't be
             .transfer(storage_cost)
-            .refund_to(near_sdk::env::predecessor_account_id())
+            .refund_to(fee_receiver_id.clone())
             .then(
                 Self::ext(current_account_id)
                     .with_static_gas(GAS_FOR_AFTER_ORACLE_KEY_CREATION)
@@ -88,8 +85,15 @@ impl DexEngine {
         #[callback_result] created: Result<(), PromiseError>,
     ) {
         expect!(created.is_ok(), "Failed to add the oracle key");
+        let storage_usage_before = near_sdk::env::storage_usage();
         self.oracle_fee_receivers
-            .insert(PublicKeyHandle::from(oracle_key), fee_receiver_id);
+            .insert(PublicKeyHandle::from(oracle_key), fee_receiver_id.clone());
+        self.oracle_fee_receivers.flush();
+        self.user_storage_balances.charge(
+            &fee_receiver_id,
+            storage_usage_before,
+            near_sdk::env::storage_usage(),
+        );
     }
 
     /// Set what an oracle takes for a request in each asset, replacing its
@@ -135,8 +139,9 @@ impl DexEngine {
             .unwrap_or_default()
     }
 
-    /// Delete the oracle key that signed the transaction with its fees, and send
-    /// the NEAR that paid for the storage of the key and its fee receiver to
+    /// Delete the oracle key that signed the transaction with its fee receiver
+    /// and fees, whose storage the storage balance of the fee receiver stops
+    /// paying for, and send the NEAR that paid for the storage of the key to
     /// `receiver_id`. Deleting a gas key burns its balance, and fails if the
     /// balance is more than 1 NEAR.
     ///
@@ -163,18 +168,18 @@ impl DexEngine {
     ) -> Promise {
         expect!(removed.is_ok(), "Failed to remove the oracle key");
         let oracle_key_handle = PublicKeyHandle::from(&oracle_key);
-        let fee_receiver_id = self.oracle_fee_receivers.remove(&oracle_key_handle);
-        expect!(let Some(fee_receiver_id) = fee_receiver_id, "No fee receiver for this oracle key");
-        self.oracle_fee_receivers.flush();
         let storage_usage_before = near_sdk::env::storage_usage();
+        let fee_receiver_id = self.oracle_fee_receivers.remove(&oracle_key_handle);
+        self.oracle_fee_receivers.flush();
         self.oracle_fees.remove(&oracle_key_handle);
         self.oracle_fees.flush();
+        expect!(let Some(fee_receiver_id) = fee_receiver_id, "No fee receiver for this oracle key");
         self.user_storage_balances.charge(
             &fee_receiver_id,
             storage_usage_before,
             near_sdk::env::storage_usage(),
         );
-        Promise::new(receiver_id).transfer(oracle_key_storage_cost(&oracle_key, &fee_receiver_id))
+        Promise::new(receiver_id).transfer(oracle_key_storage_cost(&oracle_key))
     }
 
     /// Add the attached NEAR to the gas balance of an oracle key
@@ -546,8 +551,8 @@ fn oracle_yield_id(
     ))
 }
 
-/// The NEAR that the storage of an oracle key and its fee receiver takes
-fn oracle_key_storage_cost(oracle_key: &PublicKey, fee_receiver_id: &AccountId) -> NearToken {
+/// The NEAR that the storage of an oracle key takes
+fn oracle_key_storage_cost(oracle_key: &PublicKey) -> NearToken {
     let key_bytes =
         near_sdk::borsh::object_length(&PublicKeyHandle::from(oracle_key)).unwrap() as u64;
     // Borsh of the access key: its nonce, the tag of its permission, the gas key's
@@ -562,20 +567,11 @@ fn oracle_key_storage_cost(oracle_key: &PublicKey, fee_receiver_id: &AccountId) 
         ORACLE_KEY_METHODS.to_vec(),
     ))
     .unwrap() as u64;
-    let fee_receiver_bytes = (StorageKey::OracleFeeReceivers.into_storage_key().len() as u64)
-        .checked_add(key_bytes)
-        .unwrap()
-        .checked_add(near_sdk::borsh::object_length(fee_receiver_id).unwrap() as u64)
-        .unwrap()
-        .checked_add(STORAGE_BYTES_PER_RECORD)
-        .unwrap();
     near_sdk::env::storage_byte_cost().saturating_mul(u128::from(
         key_bytes
             .checked_add(access_key_bytes)
             .unwrap()
             .checked_add(STORAGE_BYTES_PER_RECORD)
-            .unwrap()
-            .checked_add(fee_receiver_bytes)
             .unwrap()
             .checked_add(
                 u64::from(ORACLE_KEY_NONCES)

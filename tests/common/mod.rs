@@ -1213,8 +1213,9 @@ pub fn signing_with(account: &Account, key: &SecretKey) -> Account {
 }
 
 /// Add an oracle key of `key_type` to the dex engine with `deposit` for its
-/// storage and gas, whose fees `payer` takes. The key signs the transaction
-/// that creates it, as a full access key of `payer`, which it stays.
+/// storage and gas, whose fees `payer` takes, with its storage balance paying
+/// for the record of it. The key signs the transaction that creates it, as a
+/// full access key of `payer`, which it stays.
 pub async fn create_oracle_key(
     dex_engine_contract: &Contract,
     payer: &Account,
@@ -1238,7 +1239,6 @@ pub async fn create_oracle_key(
         .deposit(deposit)
         .args_json(json!({
             "oracle_key": oracle_key.public_key(),
-            "fee_receiver_id": payer.id(),
         }))
         .transact()
         .await

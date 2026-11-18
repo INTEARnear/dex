@@ -5297,7 +5297,15 @@ async fn test_oracle() {
         .unwrap();
     assert_success(&result).unwrap();
 
+    let storage_available = async |account: &near_workspaces::Account| {
+        get_storage_balance(&dex_engine_contract, account.id())
+            .await
+            .unwrap()
+            .unwrap()
+            .available
+    };
     let storage_usage_before = storage_usage().await;
+    let user3_storage_available_before = storage_available(&user3).await;
     let oracle_key = create_oracle_key(
         &dex_engine_contract,
         &user3,
@@ -5309,9 +5317,13 @@ async fn test_oracle() {
         .await
         .unwrap();
     let oracle_key_storage_cost = oracle_key_deposit.saturating_sub(oracle_key_balance);
-    // The deposit pays exactly for the storage that the key takes
+    let fee_receiver_storage_cost =
+        user3_storage_available_before.saturating_sub(storage_available(&user3).await);
+    assert!(!fee_receiver_storage_cost.is_zero());
+    // The deposit pays exactly for the storage that the key takes, and the storage balance of
+    // its fee receiver for the record of it
     assert_eq!(
-        oracle_key_storage_cost,
+        oracle_key_storage_cost.saturating_add(fee_receiver_storage_cost),
         near_sdk::env::storage_byte_cost()
             .saturating_mul((storage_usage().await - storage_usage_before) as u128)
     );
@@ -5911,7 +5923,6 @@ async fn test_oracle() {
         .deposit(oracle_key_deposit)
         .args_json(json!({
             "oracle_key": SecretKey::from_random(KeyType::ED25519).public_key(),
-            "fee_receiver_id": user3.id(),
         }))
         .transact()
         .await
@@ -5929,7 +5940,6 @@ async fn test_oracle() {
         .deposit(oracle_key_deposit)
         .args_json(json!({
             "oracle_key": oracle_key.public_key(),
-            "fee_receiver_id": user3.id(),
         }))
         .transact()
         .await
@@ -5994,8 +6004,10 @@ async fn test_oracle() {
             .is_some()
     );
 
-    // An oracle removes its key, and the NEAR that paid for its storage goes back
+    // An oracle removes its key, and the NEAR that paid for its storage goes back, as does the
+    // storage balance of its fee receiver that paid for the record of it
     let storage_usage_before = storage_usage().await;
+    let user3_storage_available_before = storage_available(&user3).await;
     let small_oracle_key = create_oracle_key(
         &dex_engine_contract,
         &user3,
@@ -6021,6 +6033,10 @@ async fn test_oracle() {
         None
     );
     assert_eq!(storage_usage().await, storage_usage_before);
+    assert_eq!(
+        storage_available(&user3).await,
+        user3_storage_available_before
+    );
     assert_near_balance(
         &user4,
         user4_near_before.saturating_add(oracle_key_storage_cost),
@@ -6060,8 +6076,16 @@ async fn test_oracle_key_types() {
             .storage_usage
     };
 
+    let storage_available = async |account: &near_workspaces::Account| {
+        get_storage_balance(&dex_engine_contract, account.id())
+            .await
+            .unwrap()
+            .unwrap()
+            .available
+    };
     for key_type in [KeyType::ED25519, KeyType::SECP256K1, KeyType::MLDSA65] {
         let storage_usage_before = storage_usage().await;
+        let user3_storage_available_before = storage_available(&user3).await;
         let oracle_key =
             create_oracle_key(&dex_engine_contract, &user3, key_type, oracle_key_deposit).await;
         let oracle_key_storage_cost = oracle_key_deposit.saturating_sub(
@@ -6069,9 +6093,12 @@ async fn test_oracle_key_types() {
                 .await
                 .unwrap(),
         );
-        // The deposit pays exactly for the storage that the key takes
+        let fee_receiver_storage_cost =
+            user3_storage_available_before.saturating_sub(storage_available(&user3).await);
+        // The deposit pays exactly for the storage that the key takes, and the storage balance
+        // of its fee receiver for the record of it
         assert_eq!(
-            oracle_key_storage_cost,
+            oracle_key_storage_cost.saturating_add(fee_receiver_storage_cost),
             near_sdk::env::storage_byte_cost()
                 .saturating_mul((storage_usage().await - storage_usage_before) as u128),
             "{key_type}"
@@ -6793,6 +6820,7 @@ async fn test_oracle_fees() {
 
     // Removing the key removes its fee receiver and fees, whose storage the receiver gets back,
     // and what the oracle took stays the receiver's
+    let storage_available_before_key = storage_available(&user3).await;
     let small_oracle_key = create_oracle_key(
         &dex_engine_contract,
         &user3,
@@ -6801,6 +6829,7 @@ async fn test_oracle_fees() {
     )
     .await;
     let storage_available_before_fees = storage_available(&user3).await;
+    assert!(storage_available_before_fees < storage_available_before_key);
     let result = set_oracle_fees(&dex_engine_contract, &user3, &small_oracle_key, &fees).await;
     assert_success(&result).unwrap();
     assert!(storage_available(&user3).await < storage_available_before_fees);
@@ -6819,7 +6848,7 @@ async fn test_oracle_fees() {
     assert!(oracle_fees(&small_oracle_key).await.is_empty());
     assert_eq!(
         storage_available(&user3).await,
-        storage_available_before_fees
+        storage_available_before_key
     );
     let result = execute_operations(vec![oracle_request(
         &small_oracle_key,

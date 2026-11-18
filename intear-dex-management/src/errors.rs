@@ -42,9 +42,7 @@ pub enum PreflightError {
         signer_public_key: String,
         oracle_key: String,
     },
-    #[error(
-        "{deposit} doesn't cover the storage of the oracle key and its fee receiver, which takes {storage_cost}"
-    )]
+    #[error("{deposit} doesn't cover the storage of the oracle key, which takes {storage_cost}")]
     OracleKeyDepositTooSmall {
         deposit: String,
         storage_cost: String,

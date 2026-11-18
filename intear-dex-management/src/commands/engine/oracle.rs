@@ -53,9 +53,9 @@ pub enum OracleAction {
     /// The keys that oracles respond with, their gas balances, fee receivers and fees
     List(List),
     #[strum_discriminants(strum(
-        message = "create-key  - Add a key for an oracle to respond with, paying for its storage and gas, and name the account that takes its fees"
+        message = "create-key  - Add a key for an oracle to respond with, paying for its storage and gas, as the account that takes its fees"
     ))]
-    /// Add a key for an oracle to respond with, paying for its storage and gas, and name the account that takes its fees
+    /// Add a key for an oracle to respond with, paying for its storage and gas, as the account that takes its fees
     CreateKey(CreateKey),
     #[strum_discriminants(strum(
         message = "set-fees    - Set what an oracle takes for a request in each asset, as its fee receiver"
@@ -68,9 +68,9 @@ pub enum OracleAction {
     /// Add NEAR to the gas balance of an oracle key
     TopUp(TopUp),
     #[strum_discriminants(strum(
-        message = "remove-key  - Remove an oracle key with its fees, signed with the key itself, and get back what its storage took"
+        message = "remove-key  - Remove an oracle key with its fee receiver and fees, signed with the key itself, and get back what its storage took"
     ))]
-    /// Remove an oracle key with its fees, signed with the key itself, and get back what its storage took
+    /// Remove an oracle key with its fee receiver and fees, signed with the key itself, and get back what its storage took
     RemoveKey(RemoveKey),
 }
 
@@ -201,24 +201,10 @@ impl From<ListContext> for ArgsForViewContext {
 #[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = CreateKeyContext)]
 pub struct CreateKey {
-    /// How much NEAR? It pays for the storage of the key and its fee receiver, and the rest is its gas balance, e.g. '0.5 NEAR'
+    /// How much NEAR? It pays for the storage of the key, and the rest is its gas balance, e.g. '0.5 NEAR'
     deposit: near_cli_rs::types::near_token::NearToken,
-    #[interactive_clap(skip_default_input_arg)]
-    /// Which account takes the oracle's fees, and sets them?
-    fee_receiver_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(subcommand)]
     oracle_key: OracleKeySource,
-}
-
-impl CreateKey {
-    fn input_fee_receiver_account_id(
-        context: &crate::GlobalContext,
-    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-        near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
-            &context.config.credentials_home_dir,
-            "Which account takes the oracle's fees, and sets them?",
-        )
-    }
 }
 
 #[derive(Clone)]
@@ -232,9 +218,7 @@ impl CreateKeyContext {
         let near_cli_rs::types::near_token::NearToken(deposit) = scope.deposit;
         Ok(Self(OracleKeyCallContext {
             global_context: previous_context,
-            call: OracleKeyCall::Create {
-                fee_receiver_id: scope.fee_receiver_account_id.clone().into(),
-            },
+            call: OracleKeyCall::Create,
             deposit,
         }))
     }
@@ -281,7 +265,7 @@ impl From<TopUpContext> for OracleKeyCallContext {
 
 #[derive(Clone)]
 enum OracleKeyCall {
-    Create { fee_receiver_id: AccountId },
+    Create,
     TopUp,
 }
 
@@ -298,14 +282,14 @@ pub struct OracleKeyCallContext {
 /// Which key?
 pub enum OracleKeySource {
     #[strum_discriminants(strum(
-        message = "public-key    - A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays"
+        message = "public-key    - A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays and takes its fees"
     ))]
-    /// A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays
+    /// A public key that you give, e.g. of a key the oracle generated, which signs if it's created, as a full access key of the account that pays and takes its fees
     PublicKey(GivenPublicKey),
     #[strum_discriminants(strum(
-        message = "from-account  - The key that near-cli has of the account that pays, which the oracle then runs with"
+        message = "from-account  - The key that near-cli has of the account that pays and takes the fees of a created key, which the oracle then runs with"
     ))]
-    /// The key that near-cli has of the account that pays, which the oracle then runs with
+    /// The key that near-cli has of the account that pays and takes the fees of a created key, which the oracle then runs with
     FromAccount(KeyOfAccount),
 }
 
@@ -445,7 +429,7 @@ fn oracle_key_call_action_context(
     signer_id: AccountId,
     oracle_key_of: impl Fn(&Preflight) -> color_eyre::eyre::Result<PublicKeyHandle> + 'static,
 ) -> ActionContext {
-    let creates_oracle_key = matches!(call, OracleKeyCall::Create { .. });
+    let creates_oracle_key = matches!(call, OracleKeyCall::Create);
     let mut context = planning::write_action_context(
         &global_context,
         signer_id,
@@ -459,21 +443,20 @@ fn oracle_key_call_action_context(
                 engine::oracle_keys(&preflight.network_config, &preflight.block_reference)?
                     .iter()
                     .any(|existing| existing.public_key.to_string() == oracle_key.to_string());
-            let (method_name, args, steps, action_name, success_message) = match &call {
-                OracleKeyCall::Create { fee_receiver_id } => {
+            let mut steps = Vec::new();
+            let mut function_calls = Vec::new();
+            let (method_name, args, action_name, success_message) = match &call {
+                OracleKeyCall::Create => {
                     if is_oracle_key {
                         return Err(PreflightError::OracleKeyExists {
                             oracle_key: oracle_key.to_string(),
                         }
                         .into_report());
                     }
-                    preflight.ensure_account_exists(fee_receiver_id)?;
+                    let fee_receiver_id = &preflight.signer_id;
+                    let extra_bytes_per_record = preflight.protocol_limits.extra_bytes_per_record;
                     let storage_cost = storage::storage_cost(
-                        storage::oracle_key_bytes(
-                            &oracle_key,
-                            fee_receiver_id,
-                            preflight.protocol_limits.extra_bytes_per_record,
-                        )?,
+                        storage::oracle_key_bytes(&oracle_key, extra_bytes_per_record)?,
                         preflight.protocol_limits.storage_byte_cost,
                     )?;
                     let Some(gas_balance) = deposit.checked_sub(storage_cost) else {
@@ -483,23 +466,34 @@ fn oracle_key_call_action_context(
                         }
                         .into_report());
                     };
+                    let fee_receiver_storage = preflight.storage_charged_to_signer(vec![
+                        storage::oracle_fee_receiver_record_bytes(
+                            &oracle_key,
+                            fee_receiver_id,
+                            extra_bytes_per_record,
+                        )?,
+                    ])?;
+                    if let Some(storage_top_up) = &fee_receiver_storage.top_up {
+                        steps.push(storage_top_up.step(fee_receiver_id));
+                        function_calls.push(storage_top_up.function_call());
+                    }
+                    steps.extend([
+                        format!(
+                            "Add {oracle_key} as an oracle key of {ENGINE_ACCOUNT_ID} that amp pools can ask for prices, with {} for the storage of the key, and {} as its gas balance",
+                            format_near(storage_cost),
+                            format_near(gas_balance)
+                        ),
+                        format!(
+                            "{oracle_key} signs the transaction, as a full access key of {fee_receiver_id}, since {ENGINE_ACCOUNT_ID} only adds the key that signs"
+                        ),
+                        format!(
+                            "{fee_receiver_id} takes the oracle's fees, which takes about {} of its storage balance. The fees are none until it sets them with `engine oracle set-fees`, and requests can only pay the oracle in assets that it takes fees in",
+                            format_near(fee_receiver_storage.needed)
+                        ),
+                    ]);
                     (
                         "create_oracle_key",
-                        json!({ "oracle_key": oracle_key, "fee_receiver_id": fee_receiver_id }),
-                        vec![
-                            format!(
-                                "Add {oracle_key} as an oracle key of {ENGINE_ACCOUNT_ID} that amp pools can ask for prices, with {} for the storage of the key and its fee receiver, and {} as its gas balance",
-                                format_near(storage_cost),
-                                format_near(gas_balance)
-                            ),
-                            format!(
-                                "{oracle_key} signs the transaction, as a full access key of {}, since {ENGINE_ACCOUNT_ID} only adds the key that signs",
-                                preflight.signer_id
-                            ),
-                            format!(
-                                "{fee_receiver_id} takes the oracle's fees, which are none until it sets them with `engine oracle set-fees`, and requests can only pay the oracle in assets that it takes fees in"
-                            ),
-                        ],
+                        json!({ "oracle_key": oracle_key }),
                         "oracle key creation",
                         format!(
                             "Added the oracle key {oracle_key} to {ENGINE_ACCOUNT_ID}, with {fee_receiver_id} as its fee receiver"
@@ -513,13 +507,13 @@ fn oracle_key_call_action_context(
                         }
                         .into_report());
                     }
+                    steps.push(format!(
+                        "Add {} to the gas balance of the oracle key {oracle_key}",
+                        format_near(deposit)
+                    ));
                     (
                         "top_up_oracle_key",
                         json!({ "oracle_key": oracle_key }),
-                        vec![format!(
-                            "Add {} to the gas balance of the oracle key {oracle_key}",
-                            format_near(deposit)
-                        )],
                         "oracle key top-up",
                         format!(
                             "Added {} to the gas balance of the oracle key {oracle_key}",
@@ -528,15 +522,16 @@ fn oracle_key_call_action_context(
                     )
                 }
             };
+            function_calls.push(FunctionCall {
+                method_name,
+                args: args.into(),
+                deposit,
+                gas: ORACLE_KEY_CALL_GAS,
+            });
             Ok(TransactionPlan {
                 receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
                 steps,
-                function_calls: vec![FunctionCall {
-                    method_name,
-                    args: args.into(),
-                    deposit,
-                    gas: ORACLE_KEY_CALL_GAS,
-                }],
+                function_calls,
                 expected_outcome: ExpectedOutcome {
                     action_name,
                     success_message,
@@ -566,10 +561,15 @@ fn ensure_signer_is_created_oracle_key(
     unsigned_transaction: &near_primitives::transaction::TransactionV0,
 ) -> color_eyre::eyre::Result<()> {
     let signer_public_key = unsigned_transaction.public_key.to_string();
-    let Some(Action::FunctionCall(creation)) = unsigned_transaction.actions.first() else {
-        return Err(eyre!(
-            "The transaction doesn't start with create_oracle_key"
-        ));
+    let Some(creation) = unsigned_transaction
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::FunctionCall(call) if call.method_name == "create_oracle_key" => Some(call),
+            _ => None,
+        })
+    else {
+        return Err(eyre!("The transaction doesn't call create_oracle_key"));
     };
     let args: serde_json::Value = serde_json::from_slice(&creation.args)?;
     let oracle_key = args["oracle_key"]
@@ -786,7 +786,7 @@ impl From<SetFeesContext> for ActionContext {
 #[interactive_clap(output_context = RemoveKeyContext)]
 pub struct RemoveKey {
     #[interactive_clap(skip_default_input_arg)]
-    /// Which account gets back the NEAR that paid for the storage of the key and its fee receiver?
+    /// Which account gets back the NEAR that paid for the storage of the key?
     receiver_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(named_arg)]
     /// Select network
@@ -799,7 +799,7 @@ impl RemoveKey {
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
         near_cli_rs::common::input_non_signer_account_id_from_used_account_list(
             &context.config.credentials_home_dir,
-            "Which account gets back the NEAR that paid for the storage of the key and its fee receiver?",
+            "Which account gets back the NEAR that paid for the storage of the key?",
         )
     }
 }
@@ -822,7 +822,7 @@ impl RemoveKeyContext {
                 Ok(TransactionPlan {
                     receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
                     steps: vec![format!(
-                        "Remove the oracle key that signs this transaction as {ENGINE_ACCOUNT_ID} with its fee receiver and fees, burning its gas balance, which can't be more than {}, and send the NEAR that paid for the storage of the key and its fee receiver to {receiver_id}",
+                        "Remove the oracle key that signs this transaction as {ENGINE_ACCOUNT_ID} with its fee receiver and fees, whose storage its fee receiver's storage balance stops paying for, burning its gas balance, which can't be more than {}, and send the NEAR that paid for the storage of the key to {receiver_id}",
                         format_near(MAX_REMOVED_GAS_BALANCE)
                     )],
                     function_calls: vec![FunctionCall {
@@ -834,7 +834,7 @@ impl RemoveKeyContext {
                     expected_outcome: ExpectedOutcome {
                         action_name: "oracle key removal",
                         success_message: format!(
-                            "Removed the oracle key, and sent the NEAR that paid for the storage of the key and its fee receiver to {receiver_id}"
+                            "Removed the oracle key, and sent the NEAR that paid for the storage of the key to {receiver_id}"
                         ),
                         transfer_call: None,
                         dex_id: None,
