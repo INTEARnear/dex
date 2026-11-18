@@ -59,14 +59,14 @@ impl FromStr for PoolId {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapReserves {
     pub input: TokenAmount,
     pub output: TokenAmount,
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct ProtocolFeeShare {
     percent: u32,
 }
@@ -110,7 +110,7 @@ const _: () = assert!(
 
 pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.near");
 
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapArgs {
     pub routes: Vec<SwapRoute>,
     pub fee_discount: Option<SignedFeeDiscount>,
@@ -146,7 +146,7 @@ impl BorshSerialize for SwapArgs {
 
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapRoute {
     pub fraction: RouteFraction,
     /// Pools that the route swaps through, in order. Each pool swaps the
@@ -161,7 +161,7 @@ pub type FeeDiscountSignaturePayload =
     intear_dex_common::FeeDiscountSignaturePayload<Vec<SwapRoute>>;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
     pub fees: FeeConfigurationV2,
@@ -177,30 +177,30 @@ pub struct CreatePoolArgs {
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CreatePoolResponse {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RegisterLiquidityArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct AddLiquidityArgs {
     pub pool_id: PoolId,
     pub min_shares_received: Option<ProviderShares>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct AddLiquidityResponse;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RemoveLiquidityArgs {
     pub pool_id: PoolId,
     pub shares_to_remove: Option<ProviderShares>,
@@ -208,77 +208,77 @@ pub struct RemoveLiquidityArgs {
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RemoveLiquidityResponse;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct EditFeesArgs {
     pub pool_id: PoolId,
     pub fees: FeeConfigurationV2,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct LockPoolArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RegisterFeeAssetsArgs {
     pub asset_ids: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct ClaimFeesArgs {
     pub account_id: AccountId,
     pub asset_ids: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetLiquidityFeePayoutArgs {
     pub pool_id: PoolId,
     pub payout_type: FeePayoutType,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CollectLiquidityFeesArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolsArgs {
     pub start_index: PoolId,
     pub limit: u32,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolSharesArgs {
     pub pool_ids: Vec<PoolId>,
     pub account_id: AccountId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetClaimableFeesArgs {
     pub account_id: AccountId,
     pub asset_ids: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetLiquidityPositionArgs {
     pub pool_id: PoolId,
     pub account_id: AccountId,
@@ -286,14 +286,14 @@ pub struct GetLiquidityPositionArgs {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct LiquidityPositionView {
     pub payout_type: FeePayoutType,
     pub uncollected_fees: (TokenAmount, TokenAmount),
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum PoolType {
     PrivateLatest,
     PublicLatest,
@@ -333,7 +333,7 @@ impl PoolType {
     all(feature = "abi", not(target_arch = "wasm32")),
     derive(near_sdk::borsh::BorshSchema)
 )]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum PoolView {
     Private {
@@ -361,7 +361,7 @@ pub enum PoolView {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CurrentFees {
     pub receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
@@ -369,7 +369,7 @@ pub struct CurrentFees {
 #[near(serializers=[borsh, json])]
 #[serde(from = "legacy_deserialization::JsonFeeConfiguration")]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct FeeConfigurationV2 {
     pub receivers: Vec<(FeeReceiver, FeeAmount)>,
 }
@@ -377,7 +377,7 @@ pub struct FeeConfigurationV2 {
 /// Who can claim an account's fees to the account
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum ClaimMode {
     /// The account, which withdraws them to its balance on the engine with `withdraw_fees`
     OnlyOwner,
@@ -391,7 +391,7 @@ pub enum ClaimMode {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum FeePayoutType {
     KeepBoth,
     ConvertToFirstAsset,
@@ -419,7 +419,7 @@ impl FeePayoutType {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum FeeAmount {
     Fixed(FeeFraction),
     Scheduled {
@@ -435,7 +435,7 @@ pub enum FeeAmount {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum ScheduledFeeCurve {
     Linear,
 }
@@ -449,7 +449,7 @@ pub enum ScheduledFeeCurve {
     all(feature = "abi", not(target_arch = "wasm32")),
     derive(near_sdk::borsh::BorshSchema)
 )]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum FeeReceiver {
     Pool = 1,
@@ -467,7 +467,7 @@ pub enum FeeReceiver {
 /// [`XykDexEventV1`] as JSON before.
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum XykDexEvent {
     PoolUpdated {
         pool_id: PoolId,

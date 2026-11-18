@@ -158,14 +158,14 @@ impl PricesRequest {
 /// What the oracle responds to a [`PricesRequest`] with, as the borsh of this
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct PricesResponse {
     pub exchanges: Vec<ExchangePrices>,
 }
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct ExchangePrices {
     pub exchange: String,
     /// The prices of whole tokens of the requested assets, in their order, in the exchange's quote

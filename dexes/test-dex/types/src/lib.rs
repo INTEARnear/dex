@@ -42,7 +42,7 @@ pub struct RemoveLiquidityArgs {
 }
 
 #[derive(PartialEq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub struct SimplePool {
     pub assets: (AssetWithBalance, AssetWithBalance),

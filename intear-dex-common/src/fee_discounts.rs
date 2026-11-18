@@ -5,7 +5,7 @@ use crate::{AssetId, DexId, FeeFraction, SwapRequestAmount};
 /// 100% = 1000000
 #[near(serializers=[borsh])]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct FeeDiscountFraction(u32);
 
 pub const FULL_FEE_DISCOUNT: FeeDiscountFraction = FeeDiscountFraction::new(1_000_000);
@@ -38,7 +38,7 @@ impl FeeDiscountFraction {
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SignedFeeDiscount<Route> {
     pub discount: FeeDiscount<Route>,
     /// signature of sha256(borsh([`FeeDiscountSignaturePayload`])) by the
@@ -48,7 +48,7 @@ pub struct SignedFeeDiscount<Route> {
 
 #[near(serializers=[borsh])]
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct FeeDiscount<Route> {
     /// Where the swap goes in the dex, like its pool or routes
     pub route: Route,
@@ -65,7 +65,7 @@ pub struct FeeDiscount<Route> {
 
 /// What the fee discount signer signs for [`SignedFeeDiscount`]
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct FeeDiscountSignaturePayload<Route> {
     pub chain_id: String,
     pub engine_contract_id: AccountId,
@@ -74,7 +74,7 @@ pub struct FeeDiscountSignaturePayload<Route> {
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetFeeDiscountSignerArgs {
     /// The key that signs fee discounts from now on, or `None` to disable them
     pub fee_discount_signer_public_key: Option<PublicKey>,

@@ -62,7 +62,7 @@ impl FromStr for PoolId {
 
 /// The part of a pool's fee that the protocol takes
 #[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct ProtocolFeeShare {
     percent: u32,
 }
@@ -91,7 +91,7 @@ pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("
 /// Who takes a part of the fee of a swap
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum FeeReceiver {
     /// The liquidity providers of the pool, and its liquidity
     Pool,
@@ -104,7 +104,7 @@ pub enum FeeReceiver {
 /// The fee of a swap, split between its receivers
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapFees {
     pub pool: FeeFraction,
     pub protocol: FeeFraction,
@@ -142,7 +142,7 @@ pub const INITIAL_SHARES: ProviderShares = ProviderShares::new(10u128.pow(18));
 /// How a liquidity provider takes its part of the pool's fee
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum FeePayoutType {
     KeepBoth,
     ConvertToFirstAsset,
@@ -195,7 +195,7 @@ impl fmt::Display for Amplification {
 pub const MAX_DECIMALS: u8 = 38;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapArgs {
     /// The parts of the swap's amount and the pools they swap through. Every pool that an oracle
     /// rates asks the same oracle, which one `OracleRequest` asks for the prices of all their
@@ -218,7 +218,7 @@ impl SwapArgs {
 
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SwapRoute {
     pub fraction: RouteFraction,
     /// Pools that the route swaps through, in order. Each pool swaps the output of the previous
@@ -233,7 +233,7 @@ pub type FeeDiscountSignaturePayload =
 
 /// Only the owner of the dex, the account that deployed it, can create pools
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CreatePoolArgs {
     pub assets: (AssetId, AssetId),
     /// Decimals of `assets`, which rate their amounts at the prices of whole tokens
@@ -249,58 +249,58 @@ pub struct CreatePoolArgs {
 
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum NewPoolRateSource {
     Oracle(PublicKeyHandle),
     Fixed(Price),
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CreatePoolResponse {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetAmplificationArgs {
     pub pool_id: PoolId,
     pub amplification: Amplification,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetOracleKeyArgs {
     pub pool_id: PoolId,
     pub oracle_key: PublicKeyHandle,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetFeeArgs {
     pub pool_id: PoolId,
     pub fee: FeeFraction,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RegisterLiquidityArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct AddLiquidityArgs {
     pub pool_id: PoolId,
     pub min_shares_received: Option<ProviderShares>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct AddLiquidityResponse;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RemoveLiquidityArgs {
     pub pool_id: PoolId,
     pub shares_to_remove: Option<ProviderShares>,
@@ -308,44 +308,44 @@ pub struct RemoveLiquidityArgs {
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RemoveLiquidityResponse;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct SetLiquidityFeePayoutArgs {
     pub pool_id: PoolId,
     pub payout_type: FeePayoutType,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct CollectLiquidityFeesArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolArgs {
     pub pool_id: PoolId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolsArgs {
     pub start_index: PoolId,
     pub limit: u32,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPoolSharesArgs {
     pub pool_ids: Vec<PoolId>,
     pub account_id: AccountId,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetLiquidityPositionArgs {
     pub pool_id: PoolId,
     pub account_id: AccountId,
@@ -353,7 +353,7 @@ pub struct GetLiquidityPositionArgs {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct LiquidityPositionView {
     pub payout_type: FeePayoutType,
     pub uncollected_fees: (TokenAmount, TokenAmount),
@@ -366,7 +366,7 @@ pub struct LiquidityPositionView {
     all(feature = "abi", not(target_arch = "wasm32")),
     derive(near_sdk::borsh::BorshSchema)
 )]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum PoolRateSource {
     Oracle {
@@ -388,7 +388,7 @@ impl PoolRateSource {
     all(feature = "abi", not(target_arch = "wasm32")),
     derive(near_sdk::borsh::BorshSchema)
 )]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct PoolView {
     pub assets: (AssetWithBalance, AssetWithBalance),
     pub decimals: (u8, u8),
@@ -424,7 +424,7 @@ impl PoolView {
 /// carried in its `dex_events_borsh` log
 #[near(serializers=[borsh])]
 #[derive(Clone, PartialEq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum AmpDexEvent {
     PoolUpdated {
         pool_id: PoolId,

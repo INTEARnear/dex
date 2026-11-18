@@ -47,7 +47,7 @@ const MAX_STEPS: usize = 255;
 /// trade at while the pool is balanced. Amounts are rated in values: units of 10^-[`Price::DECIMALS`] of a whole
 /// token of the second asset.
 #[derive(Clone, Copy)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct RatedPool {
     pub balances: PoolAssets<TokenAmount>,
     pub decimals: PoolAssets<u8>,

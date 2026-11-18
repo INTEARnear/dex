@@ -98,9 +98,9 @@ pub enum AmpAction {
     /// Who signs fee discounts: show, set-signer, disable
     FeeDiscounts(crate::commands::xyk::fee_discounts::FeeDiscountsCommands),
     #[strum_discriminants(strum(
-        message = "create-pool     - Create a pool rated at an oracle's prices, as the owner of the dex"
+        message = "create-pool     - Create a pool rated at an oracle's prices or a fixed price, as the owner of the dex"
     ))]
-    /// Create a pool rated at an oracle's prices, as the owner of the dex
+    /// Create a pool rated at an oracle's prices or a fixed price, as the owner of the dex
     CreatePool(self::create_pool::CreatePool),
     #[strum_discriminants(strum(message = "deploy          - Deploy amp code as <signer>/<name>"))]
     /// Deploy amp code as <signer>/<name>

@@ -3,13 +3,13 @@ use near_sdk::{AccountId, near};
 use crate::AssetId;
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct WithdrawFeesArgs {
     pub assets: Vec<AssetId>,
 }
 
 #[near(serializers=[borsh])]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct GetPendingFeesArgs {
     pub account_id: AccountId,
     pub asset_ids: Vec<AssetId>,

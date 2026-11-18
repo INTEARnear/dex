@@ -1,6 +1,7 @@
 //! What the amp contract's records take in the dex's storage. Its fee
 //! balances are stored as xyk's, so [`super::xyk_storage`] counts them.
 
+use amp_dex_types::NewPoolRateSource;
 use intear_dex_common::{AssetId, DexId};
 use near_primitives::types::AccountId;
 use near_sdk::PublicKeyHandle;
@@ -41,9 +42,16 @@ pub fn initial_state_bytes(
 pub fn new_pool_bytes(
     dex_id: &DexId,
     assets: (&AssetId, &AssetId),
-    oracle_key: &PublicKeyHandle,
+    rate_source: &NewPoolRateSource,
     extra_bytes_per_record: u64,
 ) -> color_eyre::eyre::Result<u64> {
+    let rate_source_bytes = match rate_source {
+        // The key, and the last price, which takes its full size before the first swap
+        NewPoolRateSource::Oracle(oracle_key) => {
+            sum_bytes(&[ENUM_TAG_BYTES, borsh_bytes(oracle_key)?, PRICE_BYTES])?
+        }
+        NewPoolRateSource::Fixed(_) => sum_bytes(&[ENUM_TAG_BYTES, PRICE_BYTES])?,
+    };
     let asset_with_balance_bytes =
         |asset_id: &AssetId| sum_bytes(&[borsh_bytes(asset_id)?, U128_BYTES]);
     let pool_bytes = sum_bytes(&[
@@ -51,11 +59,7 @@ pub fn new_pool_bytes(
         asset_with_balance_bytes(assets.1)?,
         DECIMALS_BYTES,
         AMPLIFICATION_BYTES,
-        // The rate source of an oracle: its key, and the last price, which takes its full size
-        // before the first swap
-        ENUM_TAG_BYTES,
-        borsh_bytes(oracle_key)?,
-        PRICE_BYTES,
+        rate_source_bytes,
         FEE_BYTES,
         SHARE_MAP_BYTES,
         ENUM_TAG_BYTES,
@@ -116,41 +120,53 @@ mod tests {
         let oracle_key: PublicKeyHandle = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
             .parse()
             .unwrap();
-        // The fields of the contract's Pool in order, with its providers' map
-        // stored as its prefix: the variant after its pools, and the pool id
-        let providers_prefix = near_sdk::borsh::to_vec(&(1u8, PoolId::new(0))).unwrap();
-        let pool_fields = (
+        let rate_sources = [
             (
-                AssetWithBalance {
-                    asset_id: assets.0.clone(),
-                    balance: TokenAmount::new(1),
-                },
-                AssetWithBalance {
-                    asset_id: assets.1.clone(),
-                    balance: TokenAmount::new(1),
+                NewPoolRateSource::Oracle(oracle_key.clone()),
+                PoolRateSource::Oracle {
+                    key: oracle_key,
+                    last_price: Price::from_units(0),
                 },
             ),
-            (24u8, 6u8),
-            Amplification::new(100),
-            PoolRateSource::Oracle {
-                key: oracle_key.clone(),
-                last_price: Price::from_units(0),
-            },
-            FeeFraction::new(500),
-            providers_prefix,
-            TotalShares::NONE.minted(INITIAL_SHARES).unwrap(),
-            PayoutGroups::default(),
-        );
-        assert_eq!(
-            new_pool_bytes(&dex_id, (&assets.0, &assets.1), &oracle_key, 40).unwrap(),
-            dex_storage_record_bytes(
-                &dex_id,
-                POOL_KEY_BYTES,
-                near_sdk::borsh::to_vec(&pool_fields).unwrap().len(),
-                40
-            )
-            .unwrap()
-        );
+            (
+                NewPoolRateSource::Fixed(Price::ONE),
+                PoolRateSource::Fixed(Price::ONE),
+            ),
+        ];
+        for (new_rate_source, rate_source) in rate_sources {
+            // The fields of the contract's Pool in order, with its providers' map
+            // stored as its prefix: the variant after its pools, and the pool id
+            let providers_prefix = near_sdk::borsh::to_vec(&(1u8, PoolId::new(0))).unwrap();
+            let pool_fields = (
+                (
+                    AssetWithBalance {
+                        asset_id: assets.0.clone(),
+                        balance: TokenAmount::new(1),
+                    },
+                    AssetWithBalance {
+                        asset_id: assets.1.clone(),
+                        balance: TokenAmount::new(1),
+                    },
+                ),
+                (24u8, 6u8),
+                Amplification::new(100),
+                rate_source,
+                FeeFraction::new(500),
+                providers_prefix,
+                TotalShares::NONE.minted(INITIAL_SHARES).unwrap(),
+                PayoutGroups::default(),
+            );
+            assert_eq!(
+                new_pool_bytes(&dex_id, (&assets.0, &assets.1), &new_rate_source, 40).unwrap(),
+                dex_storage_record_bytes(
+                    &dex_id,
+                    POOL_KEY_BYTES,
+                    near_sdk::borsh::to_vec(&pool_fields).unwrap().len(),
+                    40
+                )
+                .unwrap()
+            );
+        }
     }
 
     #[test]

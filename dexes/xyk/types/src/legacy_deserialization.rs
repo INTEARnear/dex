@@ -543,7 +543,7 @@ fn convert_launch_pool_view(
 
 #[near(event_json(standard = "xyk"))]
 #[derive(Deserialize)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum XykDexEventV1 {
     #[event_version("1.0.0")]
     PoolUpdated { pool_id: PoolId, pool: PoolView },

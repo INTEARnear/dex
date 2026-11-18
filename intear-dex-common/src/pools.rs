@@ -17,7 +17,7 @@ use near_sdk::{
 use crate::{AssetId, TokenAmount, mul_div};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub enum AssetIndex {
     First,
     Second,
@@ -37,7 +37,7 @@ impl AssetIndex {
 /// Something of each asset of a pool, in the order of its assets
 #[near(serializers=[borsh])]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct PoolAssets<T>(pub [T; 2]);
 
 impl<T> PoolAssets<T> {
@@ -70,7 +70,7 @@ impl<T> IndexMut<AssetIndex> for PoolAssets<T> {
 
 #[near(serializers=[borsh, json])]
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct AssetWithBalance {
     pub asset_id: AssetId,
     pub balance: TokenAmount,
@@ -78,7 +78,7 @@ pub struct AssetWithBalance {
 
 #[near(serializers=[borsh])]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct ProviderShares(u128);
 
 impl ProviderShares {
@@ -127,7 +127,7 @@ impl fmt::Display for ProviderShares {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct TotalShares(u128);
 
 impl TotalShares {
@@ -219,7 +219,7 @@ impl near_sdk::borsh::BorshSchema for TotalShares {
 
 #[near(serializers=[borsh])]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 pub struct PayoutGroupShares(u128);
 
 impl PayoutGroupShares {

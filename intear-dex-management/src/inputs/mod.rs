@@ -10,6 +10,7 @@ pub mod near_amount;
 pub mod oracle_key;
 pub mod percent;
 pub mod pool_id;
+pub mod rate_source;
 pub mod share;
 
 use std::str::FromStr;

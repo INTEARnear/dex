@@ -25,7 +25,7 @@ pub use routes::{FULL_ROUTE_FRACTION, RouteFraction};
 
 /// Request for a swap operation.
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh, json])]
 pub struct SwapRequest {
     /// Custom message to be passed to the dex. For example,
@@ -49,7 +49,7 @@ pub struct SwapRequest {
 /// To mark operation as unsuccessful and refund the attached
 /// assets to the user, the dex must panic.
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub struct SwapResponse {
     pub amount_in: TokenAmount,
@@ -57,7 +57,7 @@ pub struct SwapResponse {
 }
 
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub struct DexCallRequest {
     pub attached_assets: HashMap<AssetId, TokenAmount>,
@@ -65,7 +65,7 @@ pub struct DexCallRequest {
 }
 
 #[derive(Clone, Default)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub struct DexCallResponse {
     pub asset_withdraw_requests: Vec<AssetWithdrawRequest>,
@@ -74,7 +74,7 @@ pub struct DexCallResponse {
 }
 
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub struct AssetWithdrawRequest {
     pub asset_id: AssetId,
@@ -83,7 +83,7 @@ pub struct AssetWithdrawRequest {
 }
 
 #[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh])]
 pub enum AssetWithdrawalType {
     ToInternalUserBalance(AccountId),
@@ -184,7 +184,7 @@ impl near_sdk::schemars::JsonSchema for AssetId {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh, json])]
 pub enum SwapRequestAmount {
     ExactIn(TokenAmount),
@@ -249,7 +249,7 @@ impl near_sdk::schemars::JsonSchema for DexId {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 #[near(serializers=[borsh, json])]
 pub enum Caller {
     /// The account called the engine directly, so the call is fully authorized

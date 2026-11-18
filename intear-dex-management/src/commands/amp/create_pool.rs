@@ -7,7 +7,6 @@ use intear_dex_types::AccountOrDexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
-use near_sdk::PublicKeyHandle;
 use serde_json::json;
 
 use super::AmpContext;
@@ -23,8 +22,8 @@ use crate::inputs::amount::AmountArg;
 use crate::inputs::amplification::AmplificationArg;
 use crate::inputs::asset_ids::AssetIdArg;
 use crate::inputs::fees::PayoutArg;
-use crate::inputs::oracle_key::OracleKeyArg;
 use crate::inputs::percent::PercentArg;
+use crate::inputs::rate_source::RateSourceArg;
 use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, FunctionCall, TransactionPlan, amp_storage, format_near, storage};
 
@@ -50,11 +49,11 @@ pub struct CreatePool {
     /// How much of the other asset, e.g. '370000 USDC'
     amount_1: AmountArg,
     #[interactive_clap(skip_default_input_arg)]
-    /// How flat the curve is around the oracle's price, from 1 to 1000000, e.g. 100
+    /// How flat the curve is around the pool's rate, from 1 to 1000000, e.g. 100
     amplification: AmplificationArg,
     #[interactive_clap(skip_default_input_arg)]
-    /// The key of the oracle on dex.intear.near that swaps ask for the prices of the assets, e.g. 'ed25519:…'
-    oracle_key: OracleKeyArg,
+    /// The key of the oracle on dex.intear.near that swaps ask for the prices of the assets, e.g. 'ed25519:…', or a fixed price of a whole token of the first asset in the second, e.g. 1 for stablecoins
+    rate_source: RateSourceArg,
     #[interactive_clap(skip_default_input_arg)]
     /// How the signer takes its part of the pool's fees: 'keep' to keep both assets, or the asset to take them in
     creator_payout: PayoutArg,
@@ -95,13 +94,13 @@ impl CreatePool {
         _context: &AmpContext,
     ) -> color_eyre::eyre::Result<Option<AmplificationArg>> {
         crate::inputs::prompt(
-            "The amplification? From 1 to 1000000; the higher, the less the pool's imbalance moves its price away from the oracle's. e.g. 100",
+            "The amplification? From 1 to 1000000; the higher, the less the pool's imbalance moves its price away from its rate. e.g. 100",
         )
     }
 
-    fn input_oracle_key(_context: &AmpContext) -> color_eyre::eyre::Result<Option<OracleKeyArg>> {
+    fn input_rate_source(_context: &AmpContext) -> color_eyre::eyre::Result<Option<RateSourceArg>> {
         crate::inputs::prompt(
-            "The key of the oracle on dex.intear.near that swaps ask for prices? e.g. ed25519:…",
+            "The key of the oracle on dex.intear.near that swaps ask for prices, e.g. ed25519:…, or a fixed price of a whole token of the first asset in the second, e.g. 1 for stablecoins?",
         )
     }
 
@@ -120,7 +119,7 @@ pub struct NewPoolContext {
     assets: (AssetId, AssetId),
     amounts: (AmountArg, AmountArg),
     amplification: Amplification,
-    oracle_key: PublicKeyHandle,
+    rate_source: NewPoolRateSource,
     creator_payout: PayoutArg,
 }
 
@@ -132,7 +131,7 @@ impl NewPoolContext {
         let AssetIdArg(asset_0) = scope.asset_0.clone();
         let AssetIdArg(asset_1) = scope.asset_1.clone();
         let AmplificationArg(amplification) = scope.amplification;
-        let OracleKeyArg(oracle_key) = scope.oracle_key.clone();
+        let RateSourceArg(rate_source) = scope.rate_source.clone();
         Ok(Self {
             global_context: previous_context.global_context,
             dex_id: previous_context.dex_id,
@@ -140,7 +139,7 @@ impl NewPoolContext {
             assets: (asset_0, asset_1),
             amounts: (scope.amount_0.clone(), scope.amount_1.clone()),
             amplification,
-            oracle_key,
+            rate_source,
             creator_payout: scope.creator_payout.clone(),
         })
     }
@@ -194,7 +193,7 @@ impl PoolFeeContext {
             assets,
             amounts,
             amplification,
-            oracle_key,
+            rate_source,
             creator_payout,
         } = previous_context;
         let PercentArg(fee_millionths) = scope.fee;
@@ -291,7 +290,7 @@ impl PoolFeeContext {
                     amp_storage::new_pool_bytes(
                         &dex_id,
                         (&assets.0, &assets.1),
-                        &oracle_key,
+                        &rate_source,
                         extra_bytes_per_record,
                     )?,
                     amp_storage::liquidity_position_bytes(
@@ -338,10 +337,19 @@ impl PoolFeeContext {
                     "Create a {pair} pool on {dex_id} with amplification {amplification} and a fee of {}, of which the protocol takes {PROTOCOL_FEE_SHARE}",
                     display::format_fee(fee)
                 ));
-                steps.push(format!(
-                    "Swaps on it ask the oracle {oracle_key} for the prices of whole tokens of both assets, which rate them at {} and {} decimals",
-                    decimals.0, decimals.1
-                ));
+                steps.push(match &rate_source {
+                    NewPoolRateSource::Oracle(oracle_key) => format!(
+                        "Swaps on it ask the oracle {oracle_key} for the prices of whole tokens of both assets, which rate them at {} and {} decimals",
+                        decimals.0, decimals.1
+                    ),
+                    NewPoolRateSource::Fixed(price) => format!(
+                        "Swaps on it rate 1 {} at a fixed {price} {}, as whole tokens of {} and {} decimals",
+                        display::asset_label(&assets.0, asset_metadata[0].1.as_ref()),
+                        display::asset_label(&assets.1, asset_metadata[1].1.as_ref()),
+                        decimals.0,
+                        decimals.1
+                    ),
+                });
                 steps.push(format!(
                     "Put {} and {} from {signer_id}'s balance on {ENGINE_ACCOUNT_ID} into the pool as its first liquidity, for all of its shares",
                     amount_labels[0], amount_labels[1]
@@ -373,7 +381,7 @@ impl PoolFeeContext {
                                 assets: assets.clone(),
                                 decimals,
                                 amplification,
-                                rate_source: NewPoolRateSource::Oracle(oracle_key.clone()),
+                                rate_source: rate_source.clone(),
                                 fee,
                                 initial_liquidity: (
                                     TokenAmount::new(amount_0),
