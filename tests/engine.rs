@@ -5,8 +5,8 @@ use intear_dex::oracle::{
 };
 use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, DexCallAfterDeploy, Operation, SwapAdvancedMode, SwapOperationAmount,
-    SwapOption, WithdrawAmount,
+    AccountOrDexId, DexCallAfterDeploy, Operation, QuoteImprovementFee, SwapAdvancedMode,
+    SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
@@ -1008,6 +1008,7 @@ async fn test_execute_operations() {
                 swap_amount.as_yoctonear(),
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         },
         Operation::Withdraw {
             asset_id: AssetId::Near,
@@ -1462,6 +1463,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
                 swap_amount_in.as_yoctonear(),
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         },
         Operation::SwapSimple {
             dex_id: DexId {
@@ -1475,6 +1477,7 @@ async fn test_execute_operations_liquidity_and_swaps() {
             asset_out: AssetId::Nep141(ft2.id().clone()),
             amount: SwapOperationAmount::OutputOfLastIn,
             constraint: None,
+            quote_improvement_fee: None,
         },
     ];
 
@@ -1725,6 +1728,7 @@ async fn test_operations_with_ft_deposit() {
                 ft_swap_amount,
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         },
         Operation::Withdraw {
             asset_id: AssetId::Nep141(ft1.id().clone()),
@@ -4300,6 +4304,7 @@ async fn test_referral_fees() {
             asset_out: ft2_asset_id.clone(),
             amount: SwapOperationAmount::Amount(amount),
             constraint,
+            quote_improvement_fee: None,
         };
     let execute = |operations: Vec<Operation>, referral_fees: Vec<(AccountId, FeeFraction)>| {
         user1
@@ -4412,6 +4417,7 @@ async fn test_referral_fees() {
                 asset_out: ft1_asset_id.clone(),
                 amount: SwapOperationAmount::OutputOfLastIn,
                 constraint: None,
+                quote_improvement_fee: None,
             },
         ],
         vec![(user2.id().clone(), user2_fee_fraction)],
@@ -4544,6 +4550,336 @@ async fn test_referral_fees() {
         );
     }
     assert_eq!(balance(user2_balance, &ft1_asset_id).await, user2_ft1);
+}
+
+#[tokio::test]
+async fn test_quote_improvement_fee() {
+    let pool_creation_fee = NearToken::from_millinear(10);
+    let add_liquidity_ft1 = 1_000_000_000u128;
+    let add_liquidity_ft2 = 2_000_000_000u128;
+    let trader_ft1 = 500_000_000u128;
+    let swap_amount = 10_000_000u128;
+    let improvement = 1_000u128;
+
+    let wasms = get_compiled_wasms().await;
+    let TestContext {
+        dex_engine_contract,
+        ft1,
+        ft2,
+        deployer,
+        user1,
+        user2,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: wasms.test_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(pool_creation_fee)
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    for (ft, amount) in [(&ft1, add_liquidity_ft1), (&ft2, add_liquidity_ft2)] {
+        let result = deployer
+            .call(ft.id(), "ft_transfer_call")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": dex_engine_contract.id(),
+                "amount": U128(amount),
+                "msg": "",
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+    let result = deployer
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": [
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: (
+                                AssetId::Nep141(ft1.id().clone()),
+                                AssetId::Nep141(ft2.id().clone()),
+                            ),
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        TokenAmount::new(pool_creation_fee.as_yoctonear()),
+                    )]),
+                },
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "add_liquidity".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 0 }).unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([
+                        (AssetId::Nep141(ft1.id().clone()), TokenAmount::new(add_liquidity_ft1)),
+                        (AssetId::Nep141(ft2.id().clone()), TokenAmount::new(add_liquidity_ft2)),
+                    ]),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": user1.id(),
+            "amount": U128(trader_ft1),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(trader_ft1 - swap_amount),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+    let unregistered_receiver: AccountId = "unregistered.test.near".parse().unwrap();
+    let swap_message =
+        Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap());
+    let quote_improvement_fee = |quote_expected_output: u128, receiver: &AccountId| {
+        Some(QuoteImprovementFee {
+            quote_expected_output: TokenAmount::new(quote_expected_output),
+            quote_improvement_receiver: receiver.clone(),
+        })
+    };
+    let ft1_to_ft2 = |amount: SwapRequestAmount,
+                      constraint: Option<u128>,
+                      quote_improvement_fee: Option<QuoteImprovementFee>| {
+        Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: swap_message.clone(),
+            asset_in: ft1_asset_id.clone(),
+            asset_out: ft2_asset_id.clone(),
+            amount: SwapOperationAmount::Amount(amount),
+            constraint: constraint.map(TokenAmount::new),
+            quote_improvement_fee,
+        }
+    };
+    let execute = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({ "operations": operations }))
+            .transact()
+    };
+    let simulate = |quote_improvement_fee: Option<QuoteImprovementFee>| {
+        let view = dex_engine_contract
+            .view("simulate_swap_simple")
+            .args_json(json!({
+                "dex_id": dex_id,
+                "message": swap_message,
+                "trader": user1.id(),
+                "asset_in": ft1_asset_id,
+                "asset_out": ft2_asset_id,
+                "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+                "quote_improvement_fee": quote_improvement_fee,
+            }));
+        async move { view.await.unwrap().json::<(U128, U128)>().unwrap().1.0 }
+    };
+    let balance = |of: &AccountId| {
+        let dex_engine_contract = dex_engine_contract.clone();
+        let of = AccountOrDexId::Account(of.clone());
+        let ft2_asset_id = ft2_asset_id.clone();
+        async move {
+            get_inner_asset_balance(&dex_engine_contract, of, ft2_asset_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+        }
+    };
+
+    // The output above the quote goes to the receiver, and the constraint applies to the rest
+    let dex_amount_out = simulate(None).await;
+    let quoted_amount_out = dex_amount_out - improvement;
+    assert_eq!(
+        simulate(quote_improvement_fee(quoted_amount_out, user2.id())).await,
+        quoted_amount_out
+    );
+    let result = execute(vec![ft1_to_ft2(
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+        Some(quoted_amount_out + 1),
+        quote_improvement_fee(quoted_amount_out, user2.id()),
+    )])
+    .await
+    .unwrap();
+    assert!(
+        format!("{result:?}").contains("Output amount is less than constraint"),
+        "Expected the constraint to fail, got {result:#?}"
+    );
+    let result = execute(vec![ft1_to_ft2(
+        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+        Some(quoted_amount_out),
+        quote_improvement_fee(quoted_amount_out, user2.id()),
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    assert!(result.logs().iter().any(|log| log.contains(&format!(
+        r#""quote_improvement_fee_paid":["{}","{improvement}"]"#,
+        user2.id()
+    ))));
+    let mut user1_ft2 = quoted_amount_out;
+    let mut user2_ft2 = improvement;
+    assert_eq!(balance(user1.id()).await, user1_ft2);
+    assert_eq!(balance(user2.id()).await, user2_ft2);
+
+    // An output that doesn't beat the quote, or a receiver who didn't register the output
+    // asset, leaves the whole output to the trader
+    for unpaid_fee in [
+        quote_improvement_fee(u128::MAX, user2.id()),
+        quote_improvement_fee(0, &unregistered_receiver),
+    ] {
+        let dex_amount_out = simulate(None).await;
+        assert_eq!(simulate(unpaid_fee.clone()).await, dex_amount_out);
+        let result = execute(vec![ft1_to_ft2(
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+            None,
+            unpaid_fee,
+        )])
+        .await
+        .unwrap();
+        assert_success(&result).unwrap();
+        user1_ft2 += dex_amount_out;
+        assert_eq!(balance(user1.id()).await, user1_ft2);
+        assert_eq!(balance(user2.id()).await, user2_ft2);
+    }
+
+    // Swap advanced pays it the same way
+    let dex_amount_out = simulate(None).await;
+    let quoted_amount_out = dex_amount_out - improvement;
+    let result = execute(vec![Operation::SwapAdvanced {
+        asset_in: ft1_asset_id.clone(),
+        asset_out: ft2_asset_id.clone(),
+        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+            swap_amount,
+        ))),
+        constraint: None,
+        quote_improvement_fee: quote_improvement_fee(quoted_amount_out, user2.id()),
+        options: vec![SwapOption {
+            dex_id: dex_id.clone(),
+            message: swap_message.clone(),
+        }],
+        mode: SwapAdvancedMode::FindBest,
+    }])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    user1_ft2 += quoted_amount_out;
+    user2_ft2 += improvement;
+    assert_eq!(balance(user1.id()).await, user1_ft2);
+    assert_eq!(balance(user2.id()).await, user2_ft2);
+
+    // A deposit's swap pays it, and the swap's output that the trader withdraws is without it
+    let dex_amount_out = simulate(None).await;
+    let quoted_amount_out = dex_amount_out - improvement;
+    let user1_ft2_in_wallet = || {
+        let ft2 = ft2.clone();
+        let user1_id = user1.id().clone();
+        async move {
+            ft2.view("ft_balance_of")
+                .args_json(json!({ "account_id": user1_id }))
+                .await
+                .unwrap()
+                .json::<U128>()
+                .unwrap()
+                .0
+        }
+    };
+    let user1_ft2_in_wallet_before = user1_ft2_in_wallet().await;
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(swap_amount),
+            "msg": json!({
+                "operations": [
+                    ft1_to_ft2(
+                        SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+                        None,
+                        quote_improvement_fee(quoted_amount_out, user2.id()),
+                    ),
+                    Operation::Withdraw {
+                        asset_id: ft2_asset_id.clone(),
+                        amount: WithdrawAmount::PreviousSwapOutput,
+                        to: None,
+                        rescue_address: None,
+                    },
+                ],
+            })
+            .to_string(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    user2_ft2 += improvement;
+    assert_eq!(
+        user1_ft2_in_wallet().await,
+        user1_ft2_in_wallet_before + quoted_amount_out
+    );
+    assert_eq!(balance(user1.id()).await, user1_ft2);
+    assert_eq!(balance(user2.id()).await, user2_ft2);
+
+    let result = execute(vec![ft1_to_ft2(
+        SwapRequestAmount::ExactOut(TokenAmount::new(1_000)),
+        None,
+        quote_improvement_fee(0, user2.id()),
+    )])
+    .await
+    .unwrap();
+    assert!(
+        format!("{result:?}").contains("Quote improvement fee is only for exact-in swaps"),
+        "Expected exact-out to be refused, got {result:#?}"
+    );
 }
 
 #[tokio::test]
@@ -4701,6 +5037,7 @@ async fn test_swap_advanced() {
         asset_out: ft2_asset_id.clone(),
         amount: SwapOperationAmount::Amount(amount),
         constraint,
+        quote_improvement_fee: None,
         options: pool_ids.iter().map(|pool_id| option(*pool_id)).collect(),
         mode,
     };
@@ -4944,6 +5281,7 @@ async fn test_swap_advanced() {
                     asset_out: ft2_asset_id.clone(),
                     amount: SwapOperationAmount::EntireBalanceIn,
                     constraint: None,
+                    quote_improvement_fee: None,
                     options: vec![option(worse_pool_id), option(better_pool_id)],
                     mode: SwapAdvancedMode::FindBest,
                 },
@@ -5361,6 +5699,7 @@ async fn test_oracle() {
                 amount,
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         };
     let withdraw_swap_output = |asset_id: AssetId| Operation::Withdraw {
         asset_id,
@@ -6322,6 +6661,7 @@ async fn test_oracle_fees() {
         asset_out: ft2_asset_id.clone(),
         amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(amount))),
         constraint: None,
+        quote_improvement_fee: None,
     };
     // What a deposit leaves after the oracle's fee
     let swap_rest_of_deposit = |asset_in: &AssetId| Operation::SwapSimple {
@@ -6337,6 +6677,7 @@ async fn test_oracle_fees() {
         asset_out: ft2_asset_id.clone(),
         amount: SwapOperationAmount::EntireBalanceIn,
         constraint: None,
+        quote_improvement_fee: None,
     };
     let withdraw_swap_output = || Operation::Withdraw {
         asset_id: ft2_asset_id.clone(),

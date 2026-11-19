@@ -4,7 +4,8 @@ use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, Operation, ReferralFees, SwapAdvancedMode, SwapOperationAmount, WithdrawAmount,
+    AccountOrDexId, Operation, QuoteImprovementFee, ReferralFees, SwapAdvancedMode,
+    SwapOperationAmount, WithdrawAmount,
 };
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
@@ -179,10 +180,30 @@ impl RunContext {
                             to: AccountOrDexId::Dex(dex_id),
                             ..
                         }
-                        | Operation::SwapSimple { dex_id, .. }
                         | Operation::OracleRequest { dex_id, .. } => referenced_dexes.push(dex_id),
-                        Operation::SwapAdvanced { options, .. } => {
-                            referenced_dexes.extend(options.iter().map(|option| &option.dex_id))
+                        Operation::SwapSimple {
+                            dex_id,
+                            quote_improvement_fee,
+                            ..
+                        } => {
+                            referenced_dexes.push(dex_id);
+                            referenced_accounts.extend(
+                                quote_improvement_fee
+                                    .iter()
+                                    .map(|fee| &fee.quote_improvement_receiver),
+                            );
+                        }
+                        Operation::SwapAdvanced {
+                            options,
+                            quote_improvement_fee,
+                            ..
+                        } => {
+                            referenced_dexes.extend(options.iter().map(|option| &option.dex_id));
+                            referenced_accounts.extend(
+                                quote_improvement_fee
+                                    .iter()
+                                    .map(|fee| &fee.quote_improvement_receiver),
+                            );
                         }
                         Operation::DexCall { dex_id, method, .. } => {
                             if method == "swap" {
@@ -317,9 +338,21 @@ fn operation_step(
                       asset_in: &AssetId,
                       asset_out: &AssetId,
                       amount: &SwapOperationAmount,
-                      constraint: &Option<TokenAmount>|
+                      constraint: &Option<TokenAmount>,
+                      quote_improvement_fee: &Option<QuoteImprovementFee>|
      -> color_eyre::eyre::Result<String> {
-        Ok(match amount {
+        let quote_improvement = match quote_improvement_fee {
+            Some(QuoteImprovementFee {
+                quote_expected_output,
+                quote_improvement_receiver,
+            }) => format!(
+                ", and what it gives above {} goes to {quote_improvement_receiver} if it registered {} on {ENGINE_ACCOUNT_ID}",
+                amount_label(asset_out, *quote_expected_output)?,
+                asset_label(asset_out)?
+            ),
+            None => String::new(),
+        };
+        let swap = match amount {
             SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(amount_in)) => format!(
                 "Swap {} for {} {venue}{}",
                 amount_label(asset_in, *amount_in)?,
@@ -354,7 +387,8 @@ fn operation_step(
                 asset_label(asset_out)?,
                 at_least_out(asset_out, constraint)?
             ),
-        })
+        };
+        Ok(format!("{swap}{quote_improvement}"))
     };
     Ok(match operation {
         Operation::RegisterAssets { asset_ids, r#for } => format!(
@@ -408,18 +442,21 @@ fn operation_step(
             asset_out,
             amount,
             constraint,
+            quote_improvement_fee,
         } => swap_label(
             &format!("on {dex_id}"),
             asset_in,
             asset_out,
             amount,
             constraint,
+            quote_improvement_fee,
         )?,
         Operation::SwapAdvanced {
             asset_in,
             asset_out,
             amount,
             constraint,
+            quote_improvement_fee,
             options,
             mode,
         } => swap_label(
@@ -439,6 +476,7 @@ fn operation_step(
             asset_out,
             amount,
             constraint,
+            quote_improvement_fee,
         )?,
         Operation::DexCall {
             dex_id,

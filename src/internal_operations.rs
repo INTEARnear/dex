@@ -5,8 +5,8 @@ use intear_dex_common::{
     SwapRequest, SwapRequestAmount, SwapResponse, TokenAmount, expect,
 };
 use intear_dex_types::{
-    AccountOrDexId, DexEventData, DirectWithdrawAmount, Operation, ReferralFees, SwapAdvancedMode,
-    SwapOperationAmount, SwapOption, WithdrawAmount,
+    AccountOrDexId, DexEventData, DirectWithdrawAmount, Operation, QuoteImprovementFee,
+    ReferralFees, SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::{
     fungible_token::core::ext_ft_core, non_fungible_token::core::ext_nft_core,
@@ -44,6 +44,7 @@ pub(crate) struct SimulatedSwap {
     request: SwapRequest,
     response: SwapResponse,
     referral_fees_paid: Vec<(AccountId, TokenAmount)>,
+    quote_improvement_fee_paid: Option<(AccountId, TokenAmount)>,
     pending_storage_updates: PendingStorageUpdates,
     dex_events: Vec<DexEventData>,
 }
@@ -53,8 +54,15 @@ impl SimulatedSwap {
         amount_in_with_fees(self.response.amount_in, &self.referral_fees_paid)
     }
 
-    pub(crate) fn amount_out(&self) -> TokenAmount {
-        self.response.amount_out
+    pub(crate) fn amount_out_without_improvement_fee(&self) -> TokenAmount {
+        match &self.quote_improvement_fee_paid {
+            Some((_, fee)) => self
+                .response
+                .amount_out
+                .checked_sub(*fee)
+                .expect("Quote improvement fee exceeds the amount out"),
+            None => self.response.amount_out,
+        }
     }
 
     /// Why the swap doesn't meet `constraint`, if it doesn't
@@ -64,7 +72,9 @@ impl SimulatedSwap {
     ) -> Option<&'static str> {
         let constraint = constraint?;
         match self.request.amount {
-            SwapRequestAmount::ExactIn(_) if self.amount_out() < constraint => {
+            SwapRequestAmount::ExactIn(_)
+                if self.amount_out_without_improvement_fee() < constraint =>
+            {
                 Some("Output amount is less than constraint")
             }
             SwapRequestAmount::ExactOut(_) if self.total_amount_in() > constraint => {
@@ -152,6 +162,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<TokenAmount>,
+        quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<&OracleResponse>,
     ) -> (TokenAmount, TokenAmount) {
         let module = self.translated_dex_codes.get(&dex_id);
@@ -166,6 +177,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees,
+                quote_improvement_fee,
                 oracle_response,
             )
             .unwrap_or_else(|err| panic!("{err}"));
@@ -185,11 +197,13 @@ impl DexEngine {
             panic!("{violation_message}");
         }
         let total_amount_in = swap.total_amount_in();
+        let amount_out = swap.amount_out_without_improvement_fee();
         let SimulatedSwap {
             dex_id,
             request: swap_request,
             response,
             referral_fees_paid,
+            quote_improvement_fee_paid,
             pending_storage_updates,
             dex_events,
         } = swap;
@@ -236,8 +250,17 @@ impl DexEngine {
                     AccountOrDexId::Dex(dex_id.clone()),
                     AccountOrDexId::Account(user_trader.clone()),
                     swap_request.asset_out.clone(),
-                    response.amount_out,
+                    amount_out,
                 );
+                if let Some((receiver_id, fee)) = &quote_improvement_fee_paid {
+                    self.internal_transfer_asset(
+                        events,
+                        AccountOrDexId::Dex(dex_id.clone()),
+                        AccountOrDexId::Account(receiver_id.clone()),
+                        swap_request.asset_out.clone(),
+                        *fee,
+                    );
+                }
             }
             TradeAccount::Sandboxed { assets, .. } => {
                 // asset in
@@ -269,10 +292,18 @@ impl DexEngine {
                     swap_request.asset_out.clone(),
                     response.amount_out,
                 );
+                if let Some((receiver_id, fee)) = &quote_improvement_fee_paid {
+                    self.internal_increase_assets(
+                        events,
+                        AccountOrDexId::Account(receiver_id.clone()),
+                        swap_request.asset_out.clone(),
+                        *fee,
+                    );
+                }
                 let anon_swap_balance_out =
                     assets.entry(swap_request.asset_out.clone()).or_default();
                 *anon_swap_balance_out = anon_swap_balance_out
-                    .checked_add(response.amount_out)
+                    .checked_add(amount_out)
                     .expect("Balance overflow");
             }
         }
@@ -284,10 +315,11 @@ impl DexEngine {
             trader: dex_trader.alleged_account_id().clone(),
             referrer,
             referral_fees_paid,
+            quote_improvement_fee_paid,
         }
         .emit();
 
-        (total_amount_in, response.amount_out)
+        (total_amount_in, amount_out)
     }
 
     /// Simulates the swap on the options and makes the simulation that `mode` picks real
@@ -303,6 +335,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
         constraint: Option<TokenAmount>,
+        quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<&OracleResponse>,
     ) -> (TokenAmount, TokenAmount) {
         expect!(!options.is_empty(), "At least one swap option is required");
@@ -319,6 +352,7 @@ impl DexEngine {
                 amount,
                 referrer.clone(),
                 referral_fees.clone(),
+                quote_improvement_fee.clone(),
                 oracle_response,
             );
             let simulation = match simulation {
@@ -344,7 +378,7 @@ impl DexEngine {
             let is_better = match (&best, amount) {
                 (None, _) => true,
                 (Some(best), SwapRequestAmount::ExactIn(_)) => {
-                    simulation.amount_out() > best.amount_out()
+                    simulation.response.amount_out > best.response.amount_out
                 }
                 (Some(best), SwapRequestAmount::ExactOut(_)) => {
                     simulation.total_amount_in() < best.total_amount_in()
@@ -589,8 +623,13 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
+        quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<&OracleResponse>,
     ) -> Result<SimulatedSwap, String> {
+        expect!(
+            quote_improvement_fee.is_none() || matches!(amount, SwapRequestAmount::ExactIn(_)),
+            "Quote improvement fee is only for exact-in swaps"
+        );
         let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
         let swap_request = SwapRequest {
             message,
@@ -632,6 +671,17 @@ impl DexEngine {
             }
             _ => (),
         }
+        let quote_improvement_fee_paid = quote_improvement_fee
+            .filter(|fee| {
+                self.asset_is_registered(
+                    AccountOrDexId::Account(fee.quote_improvement_receiver.clone()),
+                    swap_request.asset_out.clone(),
+                )
+            })
+            .and_then(|fee| {
+                let improvement = response.amount_out.checked_sub(fee.quote_expected_output)?;
+                (!improvement.is_zero()).then_some((fee.quote_improvement_receiver, improvement))
+            });
 
         Ok(SimulatedSwap {
             referral_fees_paid: match amount {
@@ -643,6 +693,7 @@ impl DexEngine {
             .into_iter()
             .filter(|(_, fee)| !fee.is_zero())
             .collect(),
+            quote_improvement_fee_paid,
             dex_id,
             request: swap_request,
             response,
@@ -972,6 +1023,7 @@ impl DexEngine {
                     asset_out,
                     amount,
                     constraint,
+                    quote_improvement_fee,
                 } => {
                     let amount = self.swap_request_amount(
                         amount,
@@ -997,6 +1049,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
+                        quote_improvement_fee,
                         oracle_response,
                     );
                     last_output = Some((asset_out, amount_out));
@@ -1006,6 +1059,7 @@ impl DexEngine {
                     asset_out,
                     amount,
                     constraint,
+                    quote_improvement_fee,
                     options,
                     mode,
                 } => {
@@ -1033,6 +1087,7 @@ impl DexEngine {
                         referrer.clone(),
                         std::mem::take(&mut referral_fees_of_first_swap),
                         constraint,
+                        quote_improvement_fee,
                         oracle_response,
                     );
                     last_output = Some((asset_out, amount_out));

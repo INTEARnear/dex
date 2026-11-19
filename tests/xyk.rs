@@ -382,6 +382,7 @@ async fn run_xyk_private_flow(pool_type: PoolType) {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -751,6 +752,7 @@ async fn run_xyk_public_flow(pool_type: PoolType) {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -1738,6 +1740,7 @@ async fn test_xyk_fees() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -1978,6 +1981,7 @@ async fn test_xyk_scheduled_fees() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -2245,6 +2249,7 @@ async fn test_xyk_exact_output() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(exact_output_ft2))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -2431,6 +2436,7 @@ async fn test_xyk_pool_fees() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -2682,6 +2688,7 @@ async fn test_xyk_launch_pool_flow() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -2827,6 +2834,7 @@ async fn test_xyk_launch_pool_with_most_fee_receivers() {
             amount_in,
         ))),
         constraint: None,
+        quote_improvement_fee: None,
     };
 
     let result = user1
@@ -3003,6 +3011,7 @@ async fn test_xyk_launch_pool_create_and_first_buy() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -3172,6 +3181,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -3253,6 +3263,7 @@ async fn test_xyk_launch_pool_sell_fees_are_in_near() {
                     asset_out: AssetId::Near,
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Near,
@@ -3470,6 +3481,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                     asset_out: launched_asset_id.clone(),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(ft1_swap_in))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: launched_asset_id.clone(),
@@ -3528,6 +3540,7 @@ async fn test_xyk_launch_pool_quoted_in_ft() {
                     asset_out: quote_asset_id.clone(),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: quote_asset_id.clone(),
@@ -3724,6 +3737,7 @@ async fn test_xyk_launch_pool_restrictions() {
                     asset_out: AssetId::Near,
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(ft2_for_failed_swap))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
             ],
         }))
@@ -3916,6 +3930,7 @@ async fn test_xyk_launch_pool_community_fees() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(near_swap_in))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Nep141(ft2.id().clone()),
@@ -3991,6 +4006,7 @@ async fn test_xyk_launch_pool_community_fees() {
                     asset_out: AssetId::Near,
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(sell_amount_ft2))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: AssetId::Near,
@@ -4603,6 +4619,7 @@ async fn check_xyk_fee_discount(fee_discount_signer_key_type: KeyType) {
                         asset_out: ft2_asset_id.clone(),
                         amount: SwapOperationAmount::Amount(amount),
                         constraint: None,
+                        quote_improvement_fee: None,
                     },
                 ],
             }))
@@ -5009,6 +5026,7 @@ async fn test_xyk_fee_discount_without_signer() {
                     asset_out: AssetId::Nep141(ft2.id().clone()),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
             ],
         }))
@@ -5168,6 +5186,7 @@ async fn test_xyk_route_fee_discount() {
                         swap_amount_ft1,
                     ))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 }],
             }))
             .transact()
@@ -5500,6 +5519,7 @@ async fn test_xyk_reinvest_pool_fees() {
                     asset_out: ft2_asset_id.clone(),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: ft2_asset_id.clone(),
@@ -5929,6 +5949,7 @@ async fn test_xyk_collect_liquidity_fees() {
                         asset_out: asset_out.clone(),
                         amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(amount))),
                         constraint: None,
+                        quote_improvement_fee: None,
                     },
                     Operation::Withdraw {
                         asset_id: asset_out.clone(),

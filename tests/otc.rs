@@ -2345,6 +2345,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                     asset_out: ft_asset.clone(),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(amount_out))),
                     constraint: Some(TokenAmount::new(near_in_with_fee)),
+                    quote_improvement_fee: None,
                 }],
                 "referral_fees": referral_fees,
             }))
@@ -2545,6 +2546,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                 asset_out: ft_asset.clone(),
                 amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(trade_amount_ft))),
                 constraint: None,
+                quote_improvement_fee: None,
             }])
             .unwrap(),
         }))
@@ -2570,6 +2572,7 @@ async fn check_otc_swap(maker_key_type: KeyType) {
                     asset_out: ft_asset.clone(),
                     amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(TokenAmount::new(trade_amount_ft))),
                     constraint: Some(TokenAmount::new(trade_amount_near.as_yoctonear())),
+                    quote_improvement_fee: None,
                 },
                 Operation::Withdraw {
                     asset_id: ft_asset.clone(),

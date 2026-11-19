@@ -493,6 +493,7 @@ async fn swap_on_routes(
                     asset_out: asset_out.clone(),
                     amount: SwapOperationAmount::Amount(amount),
                     constraint: None,
+                    quote_improvement_fee: None,
                 },
             ],
         }))
@@ -600,6 +601,7 @@ async fn test_amp_swaps_at_oracle_price() {
                 near(10),
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         }],
     )
     .await;
@@ -1377,6 +1379,7 @@ async fn test_amp_swaps_pay_the_oracle() {
                 asset_out: usdc_asset_id.clone(),
                 amount: SwapOperationAmount::EntireBalanceIn,
                 constraint: Some(TokenAmount::new(min_usdc_out)),
+                quote_improvement_fee: None,
             },
             Operation::Withdraw {
                 asset_id: usdc_asset_id.clone(),
@@ -1551,6 +1554,7 @@ async fn test_amp_fixed_price_pool() {
                 near_in,
             ))),
             constraint: None,
+            quote_improvement_fee: None,
         }],
     )
     .await;

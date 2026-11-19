@@ -24,7 +24,7 @@ use crate::{
 use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
 use intear_dex_types::{
     AccountOrDexId, CAN_PAUSE, DexCallAfterDeploy, DexEventData, DirectWithdrawAmount,
-    IntearDexEvent, Operation, ReferralFees, UnsignedOracleResponse,
+    IntearDexEvent, Operation, QuoteImprovementFee, ReferralFees, UnsignedOracleResponse,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
@@ -456,6 +456,7 @@ impl DexEngine {
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
         constraint: Option<TokenAmount>,
+        quote_improvement_fee: Option<QuoteImprovementFee>,
     ) -> (TokenAmount, TokenAmount) {
         let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
@@ -471,6 +472,7 @@ impl DexEngine {
             referrer,
             referral_fees.unwrap_or_default(),
             constraint,
+            quote_improvement_fee,
             None,
         );
         events.emit();
@@ -677,6 +679,7 @@ impl DexEngine {
         amount: SwapRequestAmount,
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
+        quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<UnsignedOracleResponse>,
     ) -> (TokenAmount, TokenAmount) {
         self.assert_not_paused();
@@ -713,9 +716,15 @@ impl DexEngine {
             amount,
             referrer,
             referral_fees.unwrap_or_default(),
+            quote_improvement_fee,
             oracle_response.as_ref(),
         )
-        .map(|swap| (swap.total_amount_in(), swap.amount_out()))
+        .map(|swap| {
+            (
+                swap.total_amount_in(),
+                swap.amount_out_without_improvement_fee(),
+            )
+        })
         .unwrap_or_else(|err| panic!("{err}"))
     }
 
