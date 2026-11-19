@@ -48,7 +48,7 @@ impl DexEngine {
                 message.referral_fees(),
                 None,
             ) {
-                waiting_for_oracles.as_return().detach();
+                waiting_for_oracles.detach();
             }
         } else {
             self.internal_increase_assets(
@@ -132,7 +132,10 @@ impl FungibleTokenReceiver for DexEngine {
         };
 
         events.emit();
-        waiting_for_oracles.map_or(PromiseOrValue::Value(U128(0)), PromiseOrValue::Promise)
+        if let Some(waiting_for_oracles) = waiting_for_oracles {
+            waiting_for_oracles.detach();
+        }
+        PromiseOrValue::Value(U128(0))
     }
 }
 
@@ -207,7 +210,10 @@ impl NonFungibleTokenReceiver for DexEngine {
         };
 
         events.emit();
-        waiting_for_oracles.map_or(PromiseOrValue::Value(false), PromiseOrValue::Promise)
+        if let Some(waiting_for_oracles) = waiting_for_oracles {
+            waiting_for_oracles.detach();
+        }
+        PromiseOrValue::Value(false)
     }
 }
 
@@ -323,9 +329,9 @@ impl DexEngine {
         };
 
         events.emit();
-        waiting_for_oracles.map_or_else(
-            || PromiseOrValue::Value(vec![U128(0); token_ids.len()]),
-            PromiseOrValue::Promise,
-        )
+        if let Some(waiting_for_oracles) = waiting_for_oracles {
+            waiting_for_oracles.detach();
+        }
+        PromiseOrValue::Value(vec![U128(0); token_ids.len()])
     }
 }

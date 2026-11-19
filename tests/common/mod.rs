@@ -1272,6 +1272,24 @@ pub async fn set_oracle_fees(
         .unwrap()
 }
 
+/// The result of `waiting` once every receipt of its transaction ran. Awaiting a transaction
+/// only waits for its result, which receipts that don't lead to it run after, like the refund of
+/// a deposit that waited for an oracle.
+pub async fn executed(
+    sandbox: &Worker<Sandbox>,
+    waiting: TransactionStatus,
+) -> ExecutionFinalResult {
+    let query = methods::tx::RpcTransactionStatusRequest {
+        transaction_info: methods::tx::TransactionInfo::TransactionId {
+            tx_hash: near_primitives::hash::CryptoHash(waiting.hash().0),
+            sender_account_id: waiting.sender_id().clone(),
+        },
+        wait_until: TxExecutionStatus::Executed,
+    };
+    sandbox_rpc_client(sandbox).call(query).await.unwrap();
+    waiting.await.unwrap()
+}
+
 /// The operations of `transactions`, sent with `transact_async`, that wait for
 /// `request`, by the `nonce` of their `oracle_request` events, once all of them
 /// started waiting

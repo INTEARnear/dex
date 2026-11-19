@@ -14,13 +14,9 @@ use crate::{
     DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
 };
 
-pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(10);
+/// Also includes gas of the withdrawal that refunds a deposit
+pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(30);
 const GAS_FOR_FAILING_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(2);
-pub const GAS_FOR_ABSORBING_DEPOSIT_IF_REFUND_FAILED: Gas = Gas::from_tgas(10);
-
-/// More than the longest result of `after_oracle_operations`, an
-/// array of the largest amount
-const MAX_REFUND_RESULT_BYTES: usize = 64;
 
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
 pub const MAX_ORACLE_RESPONSE_BYTES: usize = 1024;
@@ -265,9 +261,10 @@ impl DexEngine {
 
     /// Pay the oracle its fee if it responded, or refund the fee if it didn't,
     /// and refund the held deposit if the operations after the oracle request
-    /// didn't run. For a deposit, returns what `*_on_transfer` returns for it,
-    /// or for NEAR, the amount refunded. For `execute_operations`, fails if the
-    /// operations didn't run, in a call of its own that keeps what this one did.
+    /// didn't run. A deposit is refunded by withdrawing it to its sender, since
+    /// its `*_on_transfer` said that it used the whole deposit, so that a
+    /// failure of this can't make the token contract refund a deposit that the
+    /// operations used.
     #[private]
     pub fn after_oracle_operations(
         &mut self,
@@ -339,20 +336,15 @@ impl DexEngine {
                     *in_custody = in_custody
                         .checked_sub(refund_amount)
                         .expect("Held asset is not in custody");
+                    self.internal_withdraw_unchecked(
+                        transfer_of,
+                        refund_amount,
+                        alleged_sender.clone(),
+                        AccountOrDexId::Account(alleged_sender),
+                    )
+                    .detach();
                 }
-                PromiseOrValue::Value(match transfer_of {
-                    AssetId::Near => {
-                        if !refund_amount.is_zero() {
-                            Promise::new(alleged_sender)
-                                .transfer(NearToken::from_yoctonear(refund_amount.get()))
-                                .detach();
-                        }
-                        json!(refund_amount)
-                    }
-                    AssetId::Nep141(_) => json!(refund_amount),
-                    AssetId::Nep171(..) => json!(!refund_amount.is_zero()),
-                    AssetId::Nep245(..) => json!([refund_amount]),
-                })
+                PromiseOrValue::Value(Value::Null)
             }
         };
         events.emit();
@@ -368,26 +360,6 @@ impl DexEngine {
         }
         panic!("Operations after the oracle request failed");
     }
-
-    /// Passes on what `after_oracle_operations` returned, or if it
-    /// failed, says that the whole deposit was used, since the token contract
-    /// would refund a deposit that the operations may have already used. What
-    /// it didn't refund stays on the engine.
-    ///
-    /// NEVER EDIT THIS FUNCTION OR `DepositStandard`. It must never fail, so it
-    /// doesn't read the state, and its arguments are small and of a fixed size.
-    #[private]
-    pub fn absorb_deposit_if_refund_failed(standard: DepositStandard) {
-        let fully_used: &[u8] = match standard {
-            DepositStandard::Near | DepositStandard::Nep141 => br#""0""#,
-            DepositStandard::Nep171 => b"false",
-            DepositStandard::Nep245 => br#"["0"]"#,
-        };
-        match near_sdk::env::promise_result_checked(0, MAX_REFUND_RESULT_BYTES) {
-            Ok(refund) => near_sdk::env::value_return(&refund),
-            Err(_) => near_sdk::env::value_return(fully_used),
-        }
-    }
 }
 
 #[near(serializers=[json])]
@@ -401,17 +373,6 @@ pub struct OracleFee {
     pub receiver_id: AccountId,
     pub asset_id: AssetId,
     pub amount: TokenAmount,
-}
-
-/// The standard of a deposit that waits for an oracle, which decides how its
-/// `*_on_transfer` says that the whole deposit was used
-#[near(serializers=[json])]
-#[derive(Clone, Copy)]
-pub enum DepositStandard {
-    Near,
-    Nep141,
-    Nep171,
-    Nep245,
 }
 
 impl DexEngine {
@@ -512,29 +473,12 @@ impl DexEngine {
             yield_id,
         )
         .expect("Operations with the same yield id already wait for an oracle");
-        let settled = waiting.then(
+        waiting.then(
             Self::ext(near_sdk::env::current_account_id())
                 .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
                 .with_unused_gas_weight(0)
-                .after_oracle_operations(trader.clone(), sandboxed_assets, oracle_fee),
-        );
-        match trader {
-            Caller::Direct(_) => settled,
-            Caller::OnTransfer { transfer_of, .. } => {
-                let standard = match transfer_of {
-                    AssetId::Near => DepositStandard::Near,
-                    AssetId::Nep141(_) => DepositStandard::Nep141,
-                    AssetId::Nep171(..) => DepositStandard::Nep171,
-                    AssetId::Nep245(..) => DepositStandard::Nep245,
-                };
-                settled.then(
-                    Self::ext(near_sdk::env::current_account_id())
-                        .with_static_gas(GAS_FOR_ABSORBING_DEPOSIT_IF_REFUND_FAILED)
-                        .with_unused_gas_weight(0)
-                        .absorb_deposit_if_refund_failed(standard),
-                )
-            }
-        }
+                .after_oracle_operations(trader, sandboxed_assets, oracle_fee),
+        )
     }
 }
 

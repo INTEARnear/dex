@@ -766,7 +766,7 @@ impl DexEngine {
     }
 
     /// Withdraws assets without reducing or checking any balances.
-    fn internal_withdraw_unchecked(
+    pub(crate) fn internal_withdraw_unchecked(
         &mut self,
         asset_id: AssetId,
         amount: TokenAmount,

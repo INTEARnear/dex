@@ -1408,7 +1408,7 @@ async fn test_amp_swaps_pay_the_oracle() {
         )
         .await;
         assert_gas_key_call_success(&outcome).unwrap();
-        waiting.await.unwrap()
+        executed(sandbox, waiting).await
     };
 
     // The swap is of the deposit after the oracle's fee, which the pool's fees are parts of

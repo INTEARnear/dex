@@ -5545,12 +5545,13 @@ async fn test_oracle() {
     )
     .await;
     assert_gas_key_call_success(&outcome).unwrap();
-    let result = waiting_near_deposit.await.unwrap();
+    // The deposits say that they used everything
+    let result = executed(&sandbox, waiting_near_deposit).await;
     assert_success(&result).unwrap();
-    // None of the NEAR was refunded
-    assert_eq!(result.json::<U128>().unwrap(), U128(0));
-    let result = waiting_ft_deposit.await.unwrap();
+    assert!(result.raw_bytes().unwrap().is_empty());
+    let result = executed(&sandbox, waiting_ft_deposit).await;
     assert_success(&result).unwrap();
+    assert_eq!(result.json::<U128>().unwrap(), U128(ft1_deposit));
     user1_ft1_wallet -= ft1_deposit;
     ft1_in_custody += ft1_deposit;
     ft2_in_custody -= (near_deposit.as_yoctonear() + ft1_deposit) * rate;
@@ -5636,12 +5637,15 @@ async fn test_oracle() {
     )
     .await;
     assert_gas_key_call_success(&outcome).unwrap();
-    // deposit_near returns the NEAR it refunded, and ft_transfer_call the tokens it used
+    // The deposits said that they used everything, and refund themselves once the operations fail
     for (waiting, returned) in [
-        (waiting_near_deposit, U128(near_deposit.as_yoctonear())),
-        (waiting_ft_deposit, U128(0)),
+        (waiting_near_deposit, Vec::new()),
+        (
+            waiting_ft_deposit,
+            json!(U128(ft1_deposit)).to_string().into_bytes(),
+        ),
     ] {
-        let result = waiting.await.unwrap();
+        let result = executed(&sandbox, waiting).await;
         assert!(format!("{result:?}").contains("Not enough input balance in anonymous assets"));
         let refund_gas = result
             .receipt_outcomes()
@@ -5656,7 +5660,7 @@ async fn test_oracle() {
             .gas_burnt;
         println!("Refunded after failed operations with {refund_gas}");
         assert!(refund_gas < GAS_FOR_AFTER_ORACLE_OPERATIONS);
-        assert_eq!(result.json::<U128>().unwrap(), returned);
+        assert_eq!(result.raw_bytes().unwrap(), returned);
     }
     // With nothing to refund, the transaction fails as the operations did
     let result = waiting_without_deposit.await.unwrap();
@@ -5691,7 +5695,7 @@ async fn test_oracle() {
     )
     .await;
     assert_gas_key_call_success(&outcome).unwrap();
-    let result = waiting.await.unwrap();
+    let result = executed(&sandbox, waiting).await;
     assert!(format!("{result:?}").contains("Contract is paused"));
     set_paused(&dex_engine_contract, &pauser, false).await;
     assert_ft_balance(&user1, ft1.clone(), U128(user1_ft1_wallet))
@@ -5772,13 +5776,9 @@ async fn test_oracle() {
         "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
     )));
     sandbox.fast_forward(250).await.unwrap();
-    for (waiting, returned) in [
-        (waiting_near_deposit, U128(near_deposit.as_yoctonear())),
-        (waiting_ft_deposit, U128(0)),
-    ] {
-        let result = waiting.await.unwrap();
+    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+        let result = executed(&sandbox, waiting).await;
         assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
-        assert_eq!(result.json::<U128>().unwrap(), returned);
     }
     let result = waiting_without_deposit.await.unwrap();
     assert!(result.is_failure());
@@ -5847,7 +5847,7 @@ async fn test_oracle() {
     // responds to them in as many calls as it needs
     let storage_usage_before = storage_usage().await;
     let wait_for_request =
-        || execute_operations(vec![oracle_request(request.clone())]).gas(Gas::from_tgas(30));
+        || execute_operations(vec![oracle_request(request.clone())]).gas(Gas::from_tgas(40));
     let mut waiting_first = Vec::new();
     let mut waiting_later = Vec::new();
     for _ in 0..10 {
@@ -6608,12 +6608,13 @@ async fn test_oracle_fees() {
     respond(waiting_operations).await;
     let result = waiting_without_deposit.await.unwrap();
     assert_success(&result).unwrap();
-    let result = waiting_near_deposit.await.unwrap();
+    // The deposits say that they used everything
+    let result = executed(&sandbox, waiting_near_deposit).await;
     assert_success(&result).unwrap();
-    // None of the NEAR was refunded
-    assert_eq!(result.json::<U128>().unwrap(), U128(0));
-    let result = waiting_ft_deposit.await.unwrap();
+    assert!(result.raw_bytes().unwrap().is_empty());
+    let result = executed(&sandbox, waiting_ft_deposit).await;
     assert_success(&result).unwrap();
+    assert_eq!(result.json::<U128>().unwrap(), U128(ft1_deposit));
     user1_ft1_on_engine -= swap_amount + ft1_fee;
     user1_ft1_wallet -= ft1_deposit;
     oracle_ft1_fees += 2 * ft1_fee;
@@ -6691,12 +6692,15 @@ async fn test_oracle_fees() {
     assert!(result.is_failure());
     assert!(format!("{result:?}").contains("Insufficient balance"));
     assert!(format!("{result:?}").contains("Operations after the oracle request failed"));
-    // deposit_near returns the NEAR it refunded, and ft_transfer_call the tokens it used
+    // The deposits said that they used everything, and refund themselves once the operations fail
     for (waiting, returned) in [
-        (waiting_near_deposit, U128(near_deposit - near_fee)),
-        (waiting_ft_deposit, U128(ft1_fee)),
+        (waiting_near_deposit, Vec::new()),
+        (
+            waiting_ft_deposit,
+            json!(U128(ft1_deposit)).to_string().into_bytes(),
+        ),
     ] {
-        let result = waiting.await.unwrap();
+        let result = executed(&sandbox, waiting).await;
         assert!(format!("{result:?}").contains("Not enough input balance in anonymous assets"));
         let settle_gas = result
             .receipt_outcomes()
@@ -6711,7 +6715,7 @@ async fn test_oracle_fees() {
             .gas_burnt;
         println!("Paid the oracle and refunded after failed operations with {settle_gas}");
         assert!(settle_gas < GAS_FOR_AFTER_ORACLE_OPERATIONS);
-        assert_eq!(result.json::<U128>().unwrap(), returned);
+        assert_eq!(result.raw_bytes().unwrap(), returned);
     }
     user1_ft1_on_engine -= ft1_fee;
     user1_ft1_wallet -= ft1_fee;
@@ -6786,13 +6790,9 @@ async fn test_oracle_fees() {
     let result = waiting_without_deposit.await.unwrap();
     assert!(result.is_failure());
     assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
-    for (waiting, returned) in [
-        (waiting_near_deposit, U128(near_deposit)),
-        (waiting_ft_deposit, U128(0)),
-    ] {
-        let result = waiting.await.unwrap();
+    for waiting in [waiting_near_deposit, waiting_ft_deposit] {
+        let result = executed(&sandbox, waiting).await;
         assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
-        assert_eq!(result.json::<U128>().unwrap(), returned);
     }
     assert_eq!(
         balance_on_engine(&user1, &ft1_asset_id).await,
