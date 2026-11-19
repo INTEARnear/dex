@@ -330,55 +330,6 @@ impl DexEngine {
         }
     }
 
-    /// Adds `oracle_fee_receivers` and `oracle_fees`. Oracle keys from before
-    /// them were created without a fee receiver, so `oracle_fee_receivers`
-    /// names the receivers of those that keep taking requests.
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate(oracle_fee_receivers: Vec<(PublicKeyHandle, AccountId)>) -> Self {
-        #[near(serializers=[borsh])]
-        struct OldState {
-            dex_balances: LookupMap<DexId, AssetBalances>,
-            dex_storage: DexStorage,
-            dex_codes: LookupMap<DexId, Vec<u8>>,
-            dex_storage_balances: StorageBalances<DexId>,
-            user_balances: LookupMap<AccountId, AssetBalances>,
-            user_storage_balances: StorageBalances<AccountId>,
-            total_in_custody: IterableMap<AssetId, TokenAmount>,
-            paused: bool,
-            trusted_code_deployer: AccountId,
-            uploaded_code: LazyOption<Vec<u8>>,
-        }
-        let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
-        let mut user_storage_balances = old_state.user_storage_balances;
-        let mut receivers_by_oracle_key = LookupMap::new(StorageKey::OracleFeeReceivers);
-        for (oracle_key, receiver_id) in oracle_fee_receivers {
-            let storage_usage_before = near_sdk::env::storage_usage();
-            receivers_by_oracle_key.insert(oracle_key, receiver_id.clone());
-            receivers_by_oracle_key.flush();
-            user_storage_balances.charge(
-                &receiver_id,
-                storage_usage_before,
-                near_sdk::env::storage_usage(),
-            );
-        }
-        Self {
-            dex_balances: old_state.dex_balances,
-            dex_storage: old_state.dex_storage,
-            dex_codes: old_state.dex_codes,
-            dex_storage_balances: old_state.dex_storage_balances,
-            user_balances: old_state.user_balances,
-            user_storage_balances,
-            total_in_custody: old_state.total_in_custody,
-            paused: old_state.paused,
-            trusted_code_deployer: old_state.trusted_code_deployer,
-            uploaded_code: old_state.uploaded_code,
-            oracle_fee_receivers: receivers_by_oracle_key,
-            oracle_fees: LookupMap::new(StorageKey::OracleFees),
-            translated_dex_codes: TranslatedDexCodes::default(),
-        }
-    }
-
     /// Upload a chunk of new engine code at `offset`, replacing everything
     /// after it. `code_hash_so_far` is the hash of the code up to the chunk's end.
     #[private]

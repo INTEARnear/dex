@@ -46,8 +46,7 @@ const MAX_STEPS: usize = 255;
 /// A pool with its assets rated at the oracle's prices, which swaps on its StableSwap curve
 /// trade at while the pool is balanced. Amounts are rated in values: units of 10^-[`Price::DECIMALS`] of a whole
 /// token of the second asset.
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct RatedPool {
     pub balances: PoolAssets<TokenAmount>,
     pub decimals: PoolAssets<u8>,
@@ -289,8 +288,7 @@ fn balance_keeping_invariant(
 fn mul_div(a: U256, b: U256, c: U256, round_up: bool) -> U256 {
     let product = a.checked_mul(b).expect("Value overflow");
     let quotient = product.checked_div(c).expect("Dividing by zero");
-    let has_remainder = product.checked_rem(c).expect("Dividing by zero") != U256::ZERO;
-    if round_up && has_remainder {
+    if round_up && quotient.checked_mul(c).expect("At most the product") != product {
         quotient.checked_add(U256::ONE).expect("Value overflow")
     } else {
         quotient

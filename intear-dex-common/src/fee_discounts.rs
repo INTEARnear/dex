@@ -4,8 +4,7 @@ use crate::{AssetId, DexId, FeeFraction, SwapRequestAmount};
 
 /// 100% = 1000000
 #[near(serializers=[borsh])]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct FeeDiscountFraction(u32);
 
 pub const FULL_FEE_DISCOUNT: FeeDiscountFraction = FeeDiscountFraction::new(1_000_000);
@@ -47,8 +46,7 @@ pub struct SignedFeeDiscount<Route> {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FeeDiscount<Route> {
     /// Where the swap goes in the dex, like its pool or routes
     pub route: Route,

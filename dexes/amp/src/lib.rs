@@ -26,8 +26,6 @@ use near_sdk::{
     store::{LookupMap, Vector},
 };
 
-mod migration;
-
 #[global_allocator]
 static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
     const MEMORY_SIZE: usize = 0x10000; // 64KB

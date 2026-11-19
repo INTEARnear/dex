@@ -6,8 +6,7 @@ use crate::{TokenAmount, mul_div};
 
 /// 100% of the requested amount = 1000000
 #[near(serializers=[borsh])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RouteFraction(u32);
 
 pub const FULL_ROUTE_FRACTION: RouteFraction = RouteFraction::new(1_000_000);

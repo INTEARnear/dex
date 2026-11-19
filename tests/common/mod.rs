@@ -143,8 +143,10 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 Some(wasm) => wasm,
                 None => compile_dex(workspace_root, &release_wasm_directory, "xyk-dex").await,
             };
-            let amp_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "amp-dex").await;
+            let amp_dex_wasm = match prebuilt_wasm("INTEAR_DEX_AMP_WASM") {
+                Some(wasm) => wasm,
+                None => compile_dex(workspace_root, &release_wasm_directory, "amp-dex").await,
+            };
 
             println!("Compilation complete");
 

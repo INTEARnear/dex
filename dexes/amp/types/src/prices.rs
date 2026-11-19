@@ -157,15 +157,13 @@ impl PricesRequest {
 
 /// What the oracle responds to a [`PricesRequest`] with, as the borsh of this
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PricesResponse {
     pub exchanges: Vec<ExchangePrices>,
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExchangePrices {
     pub exchange: String,
     /// The prices of whole tokens of the requested assets, in their order, in the exchange's quote
@@ -292,12 +290,11 @@ impl PricesResponse {
                 });
             }
         }
-        let mut prices = self
-            .exchanges
-            .iter()
-            .map(|exchange_prices| exchange_prices.price(base_index, quote_index))
-            .collect::<Result<Vec<_>, _>>()?;
-        prices.sort();
+        let mut prices = Vec::with_capacity(self.exchanges.len());
+        for exchange_prices in &self.exchanges {
+            let price = exchange_prices.price(base_index, quote_index)?;
+            prices.insert(prices.partition_point(|lower| *lower <= price), price);
+        }
         let (Some(lowest), Some(highest)) = (prices.first(), prices.last()) else {
             unreachable!("There are at least {MIN_EXCHANGES} prices");
         };

@@ -24,8 +24,7 @@ pub use pools::{
 pub use routes::{FULL_ROUTE_FRACTION, RouteFraction};
 
 /// Request for a swap operation.
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh, json])]
 pub struct SwapRequest {
     /// Custom message to be passed to the dex. For example,
@@ -48,24 +47,21 @@ pub struct SwapRequest {
 ///
 /// To mark operation as unsuccessful and refund the attached
 /// assets to the user, the dex must panic.
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh])]
 pub struct SwapResponse {
     pub amount_in: TokenAmount,
     pub amount_out: TokenAmount,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh])]
 pub struct DexCallRequest {
     pub attached_assets: HashMap<AssetId, TokenAmount>,
     pub args: Vec<u8>,
 }
 
-#[derive(Clone, Default)]
-#[derive(Debug)]
+#[derive(Clone, Default, Debug)]
 #[near(serializers=[borsh])]
 pub struct DexCallResponse {
     pub asset_withdraw_requests: Vec<AssetWithdrawRequest>,
@@ -73,8 +69,7 @@ pub struct DexCallResponse {
     pub response: Vec<u8>,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh])]
 pub struct AssetWithdrawRequest {
     pub asset_id: AssetId,
@@ -82,8 +77,7 @@ pub struct AssetWithdrawRequest {
     pub withdrawal_type: AssetWithdrawalType,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh])]
 pub enum AssetWithdrawalType {
     ToInternalUserBalance(AccountId),
@@ -183,8 +177,7 @@ impl near_sdk::schemars::JsonSchema for AssetId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[near(serializers=[borsh, json])]
 pub enum SwapRequestAmount {
     ExactIn(TokenAmount),
@@ -248,8 +241,7 @@ impl near_sdk::schemars::JsonSchema for DexId {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 #[near(serializers=[borsh, json])]
 pub enum Caller {
     /// The account called the engine directly, so the call is fully authorized
@@ -357,10 +349,10 @@ macro_rules! expect {
         }
     };
     ($(let $pat:pat = $expr:expr),+, $message:literal $(, $fmt_args:expr)* $(,)?) => {
-        let _panic_msg = ::std::format!($message $(, $fmt_args)*);
+        let panic_message = || ::std::format!($message $(, $fmt_args)*);
         $(
             let $pat = $expr else {
-                ::near_sdk::env::panic_str(&_panic_msg);
+                ::near_sdk::env::panic_str(&panic_message());
             };
         )+;
     };

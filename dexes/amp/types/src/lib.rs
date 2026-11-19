@@ -61,8 +61,7 @@ impl FromStr for PoolId {
 }
 
 /// The part of a pool's fee that the protocol takes
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ProtocolFeeShare {
     percent: u32,
 }
@@ -90,8 +89,7 @@ pub const PROTOCOL_FEE_RECEIVER_ID: &AccountIdRef = AccountIdRef::new_or_panic("
 
 /// Who takes a part of the fee of a swap
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FeeReceiver {
     /// The liquidity providers of the pool, and its liquidity
     Pool,
@@ -103,8 +101,7 @@ pub enum FeeReceiver {
 
 /// The fee of a swap, split between its receivers
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SwapFees {
     pub pool: FeeFraction,
     pub protocol: FeeFraction,
@@ -141,8 +138,7 @@ pub const INITIAL_SHARES: ProviderShares = ProviderShares::new(10u128.pow(18));
 
 /// How a liquidity provider takes its part of the pool's fee
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FeePayoutType {
     KeepBoth,
     ConvertToFirstAsset,
@@ -217,8 +213,7 @@ impl SwapArgs {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct SwapRoute {
     pub fraction: RouteFraction,
     /// Pools that the route swaps through, in order. Each pool swaps the output of the previous
@@ -248,8 +243,7 @@ pub struct CreatePoolArgs {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NewPoolRateSource {
     Oracle(PublicKeyHandle),
     Fixed(Price),
@@ -352,8 +346,7 @@ pub struct GetLiquidityPositionArgs {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LiquidityPositionView {
     pub payout_type: FeePayoutType,
     pub uncollected_fees: (TokenAmount, TokenAmount),
@@ -423,8 +416,7 @@ impl PoolView {
 /// The events of the dex, logged as borsh with the engine's `dex_event` host function and
 /// carried in its `dex_events_borsh` log
 #[near(serializers=[borsh])]
-#[derive(Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum AmpDexEvent {
     PoolUpdated {
         pool_id: PoolId,

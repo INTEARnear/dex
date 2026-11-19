@@ -11,8 +11,7 @@ pub const DEFAULT_FEE_PAYOUT_TYPE: FeePayoutType = FeePayoutType::KeepBoth;
 /// What one liquidity share earned of an asset, times [`FeeGrowthPerShare::SCALE`], as a 256-bit
 /// number stored as its high and low halves
 #[near(serializers=[borsh])]
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct FeeGrowthPerShare([u128; 2]);
 
 impl FeeGrowthPerShare {
@@ -75,8 +74,7 @@ impl FeeGrowthPerShare {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct FeeGrowth(PoolAssets<FeeGrowthPerShare>);
 
 impl FeeGrowth {
@@ -113,8 +111,7 @@ impl FeeGrowth {
 
 /// The payout group of each payout
 #[near(serializers=[borsh])]
-#[derive(Clone, Default)]
-#[derive(Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct PayoutGroups {
     pub keep_both: PayoutGroup,
     pub convert_to_first_asset: PayoutGroup,
@@ -123,8 +120,7 @@ pub struct PayoutGroups {
 
 /// The liquidity providers that take their fees with one payout
 #[near(serializers=[borsh])]
-#[derive(Clone, Default)]
-#[derive(Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct PayoutGroup {
     pub shares: PayoutGroupShares,
     pub fee_growth: FeeGrowth,
@@ -132,8 +128,7 @@ pub struct PayoutGroup {
 
 /// A registered liquidity provider of a public pool
 #[near(serializers=[borsh])]
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LiquidityPosition {
     pub payout_type: FeePayoutType,
     pub shares: ProviderShares,

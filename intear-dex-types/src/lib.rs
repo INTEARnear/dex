@@ -23,8 +23,7 @@ pub const MAX_REFERRERS: usize = 5;
 /// fee goes to the referrer's internal balance of the input asset, and a
 /// referrer who hasn't registered that asset isn't paid, so the trader keeps
 /// that fee. In a batch of operations, only the first swap pays them.
-#[derive(Clone, Default)]
-#[derive(Debug)]
+#[derive(Clone, Default, Debug)]
 #[near(serializers=[json])]
 pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
 
@@ -80,8 +79,7 @@ impl ReferralFees {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 #[near(serializers=[json])]
 pub enum AccountOrDexId {
     Account(AccountId),
@@ -97,8 +95,7 @@ impl Display for AccountOrDexId {
     }
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub enum SwapOperationAmount {
     Amount(SwapRequestAmount),
@@ -106,8 +103,7 @@ pub enum SwapOperationAmount {
     EntireBalanceIn,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[near(serializers=[json])]
 pub enum SwapAdvancedMode {
     /// Try every option and swap on the one with the best result
@@ -118,16 +114,14 @@ pub enum SwapAdvancedMode {
 }
 
 /// A dex that [`Operation::SwapAdvanced`] can swap on, with the message to pass to it
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub struct SwapOption {
     pub dex_id: DexId,
     pub message: Base64VecU8,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub enum Operation {
     /// Register storage for assets. No-op if assets are
@@ -219,8 +213,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[borsh, json])]
 pub struct DexCallAfterDeploy {
     pub method: String,
@@ -228,8 +221,7 @@ pub struct DexCallAfterDeploy {
     pub attached_assets: HashMap<AssetId, TokenAmount>,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub struct UnsignedOracleResponse {
     pub oracle_key: PublicKeyHandle,
@@ -238,8 +230,7 @@ pub struct UnsignedOracleResponse {
 }
 
 #[near(serializers=[json])]
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum WithdrawAmount {
     Full { at_least: Option<TokenAmount> },
     Exact(TokenAmount),
@@ -247,8 +238,7 @@ pub enum WithdrawAmount {
 }
 
 #[near(serializers=[json])]
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum DirectWithdrawAmount {
     Full { at_least: Option<TokenAmount> },
     Exact(TokenAmount),
@@ -294,8 +284,7 @@ impl DepositMessage {
 /// [`IntearDexEvent::DexEventsBorsh`]. `event` is the borsh of the dex's own
 /// event type.
 #[near(serializers=[borsh])]
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DexEventData {
     pub dex_id: DexId,
     pub event: Vec<u8>,
@@ -304,8 +293,7 @@ pub struct DexEventData {
 }
 
 /// Balance of an asset that an account or dex has at the end of a call
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub struct BalanceUpdate {
     pub owner: AccountOrDexId,
@@ -318,8 +306,7 @@ mod deprecation_warning_workaround {
     use super::*;
 
     #[near(event_json(standard = "inteardex"))]
-    #[derive(Deserialize)]
-    #[derive(Debug)]
+    #[derive(Deserialize, Debug)]
     pub enum IntearDexEvent {
         #[event_version("1.0.0")]
         DexDeployed {

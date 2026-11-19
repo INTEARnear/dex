@@ -41,8 +41,7 @@ pub struct RemoveLiquidityArgs {
     pub assets_to_remove: (TokenAmount, TokenAmount),
 }
 
-#[derive(PartialEq)]
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 #[near(serializers=[borsh])]
 pub struct SimplePool {
     pub assets: (AssetWithBalance, AssetWithBalance),

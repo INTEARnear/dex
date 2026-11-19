@@ -58,15 +58,13 @@ impl FromStr for PoolId {
     }
 }
 
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SwapReserves {
     pub input: TokenAmount,
     pub output: TokenAmount,
 }
 
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ProtocolFeeShare {
     percent: u32,
 }
@@ -145,8 +143,7 @@ impl BorshSerialize for SwapArgs {
 }
 
 #[near(serializers=[borsh])]
-#[derive(Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct SwapRoute {
     pub fraction: RouteFraction,
     /// Pools that the route swaps through, in order. Each pool swaps the
@@ -285,8 +282,7 @@ pub struct GetLiquidityPositionArgs {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LiquidityPositionView {
     pub payout_type: FeePayoutType,
     pub uncollected_fees: (TokenAmount, TokenAmount),
@@ -360,24 +356,21 @@ pub enum PoolView {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CurrentFees {
     pub receivers: Vec<(FeeReceiver, FeeFraction)>,
 }
 
 #[near(serializers=[borsh, json])]
 #[serde(from = "legacy_deserialization::JsonFeeConfiguration")]
-#[derive(Clone, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FeeConfigurationV2 {
     pub receivers: Vec<(FeeReceiver, FeeAmount)>,
 }
 
 /// Who can claim an account's fees to the account
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClaimMode {
     /// The account, which withdraws them to its balance on the engine with `withdraw_fees`
     OnlyOwner,
@@ -390,8 +383,7 @@ pub enum ClaimMode {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FeePayoutType {
     KeepBoth,
     ConvertToFirstAsset,
@@ -418,8 +410,7 @@ impl FeePayoutType {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FeeAmount {
     Fixed(FeeFraction),
     Scheduled {
@@ -434,8 +425,7 @@ pub enum FeeAmount {
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScheduledFeeCurve {
     Linear,
 }
@@ -466,8 +456,7 @@ pub enum FeeReceiver {
 /// carried in its `dex_events_borsh` log. They have no JSON form: the dex logged
 /// [`XykDexEventV1`] as JSON before.
 #[near(serializers=[borsh])]
-#[derive(Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum XykDexEvent {
     PoolUpdated {
         pool_id: PoolId,

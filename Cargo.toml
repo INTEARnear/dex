@@ -106,3 +106,9 @@ opt-level = 3
 
 [profile.release.package.xyk-dex]
 opt-level = 'z'
+
+[profile.release.package.amp-dex]
+opt-level = "s"
+
+[profile.release.package.amp-dex-types]
+opt-level = "s"
