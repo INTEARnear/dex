@@ -5,9 +5,10 @@ use std::{fmt, num::ParseIntError, str::FromStr};
 use intear_dex_common::AssetId;
 pub use intear_dex_common::{
     AssetIndex, AssetWithBalance, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FULL_ROUTE_FRACTION,
-    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, PayoutGroupShares, PoolAssets,
-    ProviderShares, RouteFraction, SetFeeDiscountSignerArgs, TokenAmount, TotalShares,
-    WithdrawFeesArgs,
+    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, MAX_TRADER_FEE_DISCOUNT_BLOCKS,
+    PayoutGroupShares, PoolAssets, ProviderShares, RouteFraction, SetFeeDiscountSignerArgs,
+    SignedTraderFeeDiscount, TokenAmount, TotalShares, TraderFeeDiscount,
+    TraderFeeDiscountSignaturePayload, WithdrawFeesArgs,
 };
 use near_sdk::{
     AccountId, AccountIdRef, PublicKeyHandle,
@@ -197,7 +198,7 @@ pub struct SwapArgs {
     /// rates asks the same oracle, which one `OracleRequest` asks for the prices of all their
     /// assets with [`PricesRequest::of_pools`].
     pub routes: Vec<SwapRoute>,
-    pub fee_discount: Option<SignedFeeDiscount>,
+    pub fee_discount: SwapFeeDiscount,
 }
 
 impl SwapArgs {
@@ -207,7 +208,7 @@ impl SwapArgs {
                 fraction: FULL_ROUTE_FRACTION,
                 pool_ids: vec![pool_id],
             }],
-            fee_discount: None,
+            fee_discount: SwapFeeDiscount::None,
         }
     }
 }
@@ -221,6 +222,7 @@ pub struct SwapRoute {
     pub pool_ids: Vec<PoolId>,
 }
 
+pub type SwapFeeDiscount = intear_dex_common::SwapFeeDiscount<Vec<SwapRoute>>;
 pub type SignedFeeDiscount = intear_dex_common::SignedFeeDiscount<Vec<SwapRoute>>;
 pub type FeeDiscount = intear_dex_common::FeeDiscount<Vec<SwapRoute>>;
 pub type FeeDiscountSignaturePayload =

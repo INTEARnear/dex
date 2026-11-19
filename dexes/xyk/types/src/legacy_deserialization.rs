@@ -10,7 +10,7 @@ use near_sdk::{
 use crate::{
     AssetWithBalance, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction,
     FeePayoutType, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolView, ProviderShares,
-    ShareGrowth, SignedFeeDiscount, SwapArgs, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
+    ShareGrowth, SwapArgs, SwapFeeDiscount, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
 };
 
 /// The message of a swap through a single pool without a fee discount is just its pool ID, which
@@ -25,7 +25,7 @@ impl BorshDeserialize for SwapArgs {
         }
         let mut rest = bytes.as_slice();
         let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
-        let fee_discount = Option::<SignedFeeDiscount>::deserialize(&mut rest)?;
+        let fee_discount = SwapFeeDiscount::deserialize(&mut rest)?;
         if !rest.is_empty() {
             // Referral fees of messages from before the engine took them, which are ignored
             <Vec<(AccountId, FeeFraction)> as BorshDeserialize>::deserialize(&mut rest)?;

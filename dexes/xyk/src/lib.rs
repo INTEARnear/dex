@@ -73,13 +73,11 @@ impl Dex for XykDex {
             RouteFraction::add_up_to_full(routes.iter().map(|route| route.fraction)),
             "Route fractions must add up to 100%"
         );
-        let fee_discount = fee_discount.map(|signed_fee_discount| {
-            signed_fee_discount.verify(
-                self.fee_discount_signer_public_key.as_ref(),
-                &routes,
-                &request,
-            )
-        });
+        let fee_discount = fee_discount.verify(
+            self.fee_discount_signer_public_key.as_ref(),
+            &routes,
+            &request,
+        );
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;

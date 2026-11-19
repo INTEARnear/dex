@@ -14,7 +14,8 @@ pub use fee_balances::FeeBalances;
 pub use fee_balances::{GetPendingFeesArgs, WithdrawFeesArgs};
 pub use fee_discounts::{
     FULL_FEE_DISCOUNT, FeeDiscount, FeeDiscountFraction, FeeDiscountSignaturePayload,
-    SetFeeDiscountSignerArgs, SignedFeeDiscount,
+    MAX_TRADER_FEE_DISCOUNT_BLOCKS, SetFeeDiscountSignerArgs, SignedFeeDiscount,
+    SignedTraderFeeDiscount, SwapFeeDiscount, TraderFeeDiscount, TraderFeeDiscountSignaturePayload,
 };
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use near_sdk::{AccountId, NearToken, json_types::Base64VecU8, near};

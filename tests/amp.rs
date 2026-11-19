@@ -8,7 +8,7 @@ use amp_dex_types::{
     PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
     RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, SetAmplificationArgs, SetFeeArgs,
     SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SignedFeeDiscount,
-    SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
+    SwapArgs, SwapFeeDiscount, SwapRoute, TokenAmount, WithdrawFeesArgs,
 };
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
 use intear_dex_types::{
@@ -394,7 +394,7 @@ impl AmpTest {
         prices: &PricesResponse,
         asset_in: &AssetId,
         amount: SwapRequestAmount,
-        fee_discount: Option<SignedFeeDiscount>,
+        fee_discount: SwapFeeDiscount,
     ) -> ExecutionFinalResult {
         let pool = get_pool(&self.context.dex_engine_contract, &self.dex_id, pool_id).await;
         let asset_out = if *asset_in == pool.assets.0.asset_id {
@@ -672,7 +672,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -759,7 +759,7 @@ async fn test_amp_swaps_at_oracle_price() {
                 &prices,
                 near_asset_id,
                 SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-                None,
+                SwapFeeDiscount::None,
             )
             .await;
         assert!(format!("{result:?}").contains(error), "{result:?}");
@@ -790,7 +790,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             usdc_asset_id,
             SwapRequestAmount::ExactOut(TokenAmount::new(near_out)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -812,7 +812,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert!(format!("{result:?}").contains("must start with an oracle request of the prices of"));
@@ -895,7 +895,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -911,7 +911,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert!(format!("{result:?}").contains("must start with an oracle request of the prices of"));
@@ -1024,7 +1024,7 @@ async fn test_amp_fees_and_liquidity() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -1276,7 +1276,7 @@ async fn test_amp_set_fee() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            None,
+            SwapFeeDiscount::None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -1691,7 +1691,7 @@ async fn test_amp_fee_discount() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            Some(signed(FeeDiscount {
+            SwapFeeDiscount::ForSwap(signed(FeeDiscount {
                 route: SwapArgs::single_pool(PoolId::new(pool_id.get() + 1)).routes,
                 ..full_discount.clone()
             })),
@@ -1715,7 +1715,7 @@ async fn test_amp_fee_discount() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            Some(signed(full_discount)),
+            SwapFeeDiscount::ForSwap(signed(full_discount)),
         )
         .await;
     assert_success(&result).unwrap();
@@ -1803,7 +1803,7 @@ async fn test_amp_routes() {
             user1,
             SwapArgs {
                 routes,
-                fee_discount: None,
+                fee_discount: SwapFeeDiscount::None,
             },
             &test.oracle_key,
             prices,
@@ -2154,7 +2154,7 @@ async fn test_amp_complex_route() {
             user1,
             SwapArgs {
                 routes: routes.clone(),
-                fee_discount: None,
+                fee_discount: SwapFeeDiscount::None,
             },
             &test.oracle_key,
             &route_prices,

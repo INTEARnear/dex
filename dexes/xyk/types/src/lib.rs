@@ -5,9 +5,10 @@ use std::{fmt, num::ParseIntError, str::FromStr};
 use intear_dex_common::AssetId;
 pub use intear_dex_common::{
     AssetIndex, AssetWithBalance, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FULL_ROUTE_FRACTION,
-    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, PayoutGroupShares, PoolAssets,
-    ProviderShares, RouteFraction, SetFeeDiscountSignerArgs, TokenAmount, TotalShares,
-    WithdrawFeesArgs,
+    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, MAX_TRADER_FEE_DISCOUNT_BLOCKS,
+    PayoutGroupShares, PoolAssets, ProviderShares, RouteFraction, SetFeeDiscountSignerArgs,
+    SignedTraderFeeDiscount, TokenAmount, TotalShares, TraderFeeDiscount,
+    TraderFeeDiscountSignaturePayload, WithdrawFeesArgs,
 };
 use near_sdk::{
     AccountId, AccountIdRef, Timestamp,
@@ -111,7 +112,7 @@ pub const CAN_MIGRATE: &AccountIdRef = AccountIdRef::new_or_panic("slimedragon.n
 #[derive(Debug)]
 pub struct SwapArgs {
     pub routes: Vec<SwapRoute>,
-    pub fee_discount: Option<SignedFeeDiscount>,
+    pub fee_discount: SwapFeeDiscount,
 }
 
 impl SwapArgs {
@@ -121,7 +122,7 @@ impl SwapArgs {
                 fraction: FULL_ROUTE_FRACTION,
                 pool_ids: vec![pool_id],
             }],
-            fee_discount: None,
+            fee_discount: SwapFeeDiscount::None,
         }
     }
 }
@@ -130,7 +131,7 @@ impl SwapArgs {
 /// its pool ID, which is what dex versions from before routes read
 impl BorshSerialize for SwapArgs {
     fn serialize<W: Write>(&self, writer: &mut W) -> near_sdk::borsh::io::Result<()> {
-        if let ([SwapRoute { fraction, pool_ids }], None) =
+        if let ([SwapRoute { fraction, pool_ids }], SwapFeeDiscount::None) =
             (self.routes.as_slice(), &self.fee_discount)
             && *fraction == FULL_ROUTE_FRACTION
             && let [pool_id] = pool_ids.as_slice()
@@ -152,6 +153,7 @@ pub struct SwapRoute {
     pub pool_ids: Vec<PoolId>,
 }
 
+pub type SwapFeeDiscount = intear_dex_common::SwapFeeDiscount<Vec<SwapRoute>>;
 pub type SignedFeeDiscount = intear_dex_common::SignedFeeDiscount<Vec<SwapRoute>>;
 pub type FeeDiscount = intear_dex_common::FeeDiscount<Vec<SwapRoute>>;
 pub type FeeDiscountSignaturePayload =
