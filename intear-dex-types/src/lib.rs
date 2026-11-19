@@ -373,7 +373,7 @@ mod deprecation_warning_workaround {
             asset_id: AssetId,
             balance: TokenAmount,
         },
-        #[event_version("1.0.0")]
+        #[event_version("1.1.0")]
         Swap {
             dex_id: DexId,
             request: SwapRequest,
@@ -385,6 +385,7 @@ mod deprecation_warning_workaround {
             referral_fees_paid: Vec<(AccountId, TokenAmount)>,
             /// Out of `amount_out` for ExactIn, and on top of `amount_in` and
             /// the referral fees for ExactOut
+            #[serde(default)]
             quote_improvement_fee_paid: Option<(AccountId, TokenAmount)>,
         },
         /// Operations wait for the oracle that has `oracle_key` to respond to

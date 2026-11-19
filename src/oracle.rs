@@ -7,7 +7,7 @@ use near_sdk::{
     PromiseOrValue, PublicKey, PublicKeyHandle, UserYieldId,
     json_types::{Base58CryptoHash, Base64VecU8},
     near,
-    serde_json::{Value, json},
+    serde_json::json,
 };
 
 use crate::{
@@ -272,7 +272,7 @@ impl DexEngine {
         held_assets: Option<HashMap<AssetId, TokenAmount>>,
         oracle_fee: OracleFee,
         #[callback_result] outcome: Result<OracleRequestOutcome, PromiseError>,
-    ) -> PromiseOrValue<Value> {
+    ) -> PromiseOrValue<()> {
         let mut events = CallEvents::default();
         if outcome.is_err() {
             near_sdk::env::log_str("Operations after the oracle request failed");
@@ -298,7 +298,7 @@ impl DexEngine {
                     );
                 }
                 if operations_ran {
-                    PromiseOrValue::Value(Value::Null)
+                    PromiseOrValue::Value(())
                 } else {
                     PromiseOrValue::Promise(
                         Self::ext(near_sdk::env::current_account_id())
@@ -344,7 +344,7 @@ impl DexEngine {
                     )
                     .detach();
                 }
-                PromiseOrValue::Value(Value::Null)
+                PromiseOrValue::Value(())
             }
         };
         events.emit();
