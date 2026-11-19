@@ -4559,6 +4559,7 @@ async fn test_quote_improvement_fee() {
     let add_liquidity_ft2 = 2_000_000_000u128;
     let trader_ft1 = 500_000_000u128;
     let swap_amount = 10_000_000u128;
+    let exact_out_amount = 1_000_000u128;
     let improvement = 1_000u128;
 
     let wasms = get_compiled_wasms().await;
@@ -4668,7 +4669,7 @@ async fn test_quote_improvement_fee() {
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
             "receiver_id": dex_engine_contract.id(),
-            "amount": U128(trader_ft1 - swap_amount),
+            "amount": U128(trader_ft1 - 2 * swap_amount),
             "msg": "",
         }))
         .transact()
@@ -4681,9 +4682,9 @@ async fn test_quote_improvement_fee() {
     let unregistered_receiver: AccountId = "unregistered.test.near".parse().unwrap();
     let swap_message =
         Base64VecU8(near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap());
-    let quote_improvement_fee = |quote_expected_output: u128, receiver: &AccountId| {
+    let quote_improvement_fee = |quote_expected_amount: u128, receiver: &AccountId| {
         Some(QuoteImprovementFee {
-            quote_expected_output: TokenAmount::new(quote_expected_output),
+            quote_expected_amount: TokenAmount::new(quote_expected_amount),
             quote_improvement_receiver: receiver.clone(),
         })
     };
@@ -4708,32 +4709,52 @@ async fn test_quote_improvement_fee() {
             .args_json(json!({ "operations": operations }))
             .transact()
     };
+    let simulate_swap =
+        |amount: SwapRequestAmount, quote_improvement_fee: Option<QuoteImprovementFee>| {
+            let view = dex_engine_contract
+                .view("simulate_swap_simple")
+                .args_json(json!({
+                    "dex_id": dex_id,
+                    "message": swap_message,
+                    "trader": user1.id(),
+                    "asset_in": ft1_asset_id,
+                    "asset_out": ft2_asset_id,
+                    "amount": amount,
+                    "quote_improvement_fee": quote_improvement_fee,
+                }));
+            async move {
+                let (U128(amount_in), U128(amount_out)) =
+                    view.await.unwrap().json::<(U128, U128)>().unwrap();
+                (amount_in, amount_out)
+            }
+        };
     let simulate = |quote_improvement_fee: Option<QuoteImprovementFee>| {
-        let view = dex_engine_contract
-            .view("simulate_swap_simple")
-            .args_json(json!({
-                "dex_id": dex_id,
-                "message": swap_message,
-                "trader": user1.id(),
-                "asset_in": ft1_asset_id,
-                "asset_out": ft2_asset_id,
-                "amount": SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
-                "quote_improvement_fee": quote_improvement_fee,
-            }));
-        async move { view.await.unwrap().json::<(U128, U128)>().unwrap().1.0 }
+        let simulation = simulate_swap(
+            SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount)),
+            quote_improvement_fee,
+        );
+        async move { simulation.await.1 }
     };
-    let balance = |of: &AccountId| {
+    let simulate_exact_out = |quote_improvement_fee: Option<QuoteImprovementFee>| {
+        let simulation = simulate_swap(
+            SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount)),
+            quote_improvement_fee,
+        );
+        async move { simulation.await.0 }
+    };
+    let balance_of = |of: &AccountId, asset_id: &AssetId| {
         let dex_engine_contract = dex_engine_contract.clone();
         let of = AccountOrDexId::Account(of.clone());
-        let ft2_asset_id = ft2_asset_id.clone();
+        let asset_id = asset_id.clone();
         async move {
-            get_inner_asset_balance(&dex_engine_contract, of, ft2_asset_id)
+            get_inner_asset_balance(&dex_engine_contract, of, asset_id)
                 .await
                 .unwrap()
                 .unwrap()
                 .0
         }
     };
+    let balance = |of: &AccountId| balance_of(of, &ft2_asset_id);
 
     // The output above the quote goes to the receiver, and the constraint applies to the rest
     let dex_amount_out = simulate(None).await;
@@ -4869,17 +4890,124 @@ async fn test_quote_improvement_fee() {
     assert_eq!(balance(user1.id()).await, user1_ft2);
     assert_eq!(balance(user2.id()).await, user2_ft2);
 
+    // Of an exact output, what the swap takes below the quote of the input goes to the
+    // receiver, and the constraint applies to the input with it
+    let exact_out = SwapRequestAmount::ExactOut(TokenAmount::new(exact_out_amount));
+    let dex_amount_in = simulate_exact_out(None).await;
+    let quoted_amount_in = dex_amount_in + improvement;
+    assert_eq!(
+        simulate_exact_out(quote_improvement_fee(quoted_amount_in, user2.id())).await,
+        quoted_amount_in
+    );
     let result = execute(vec![ft1_to_ft2(
-        SwapRequestAmount::ExactOut(TokenAmount::new(1_000)),
-        None,
-        quote_improvement_fee(0, user2.id()),
+        exact_out,
+        Some(quoted_amount_in - 1),
+        quote_improvement_fee(quoted_amount_in, user2.id()),
     )])
     .await
     .unwrap();
     assert!(
-        format!("{result:?}").contains("Quote improvement fee is only for exact-in swaps"),
-        "Expected exact-out to be refused, got {result:#?}"
+        format!("{result:?}").contains("Input amount is greater than constraint"),
+        "Expected the constraint to fail, got {result:#?}"
     );
+    let user1_ft1_before = balance_of(user1.id(), &ft1_asset_id).await;
+    let result = execute(vec![ft1_to_ft2(
+        exact_out,
+        Some(quoted_amount_in),
+        quote_improvement_fee(quoted_amount_in, user2.id()),
+    )])
+    .await
+    .unwrap();
+    assert_success(&result).unwrap();
+    let mut user1_ft1 = user1_ft1_before - quoted_amount_in;
+    let mut user2_ft1 = improvement;
+    user1_ft2 += exact_out_amount;
+    assert_eq!(balance_of(user1.id(), &ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance_of(user2.id(), &ft1_asset_id).await, user2_ft1);
+    assert_eq!(balance(user1.id()).await, user1_ft2);
+
+    // An input that doesn't beat the quote, or a receiver who didn't register the input asset,
+    // leaves the trader paying only what the swap takes
+    for unpaid_fee in [
+        quote_improvement_fee(0, user2.id()),
+        quote_improvement_fee(u128::MAX, &unregistered_receiver),
+    ] {
+        let dex_amount_in = simulate_exact_out(None).await;
+        assert_eq!(simulate_exact_out(unpaid_fee.clone()).await, dex_amount_in);
+        let result = execute(vec![ft1_to_ft2(exact_out, None, unpaid_fee)])
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        user1_ft1 -= dex_amount_in;
+        user1_ft2 += exact_out_amount;
+        assert_eq!(balance_of(user1.id(), &ft1_asset_id).await, user1_ft1);
+        assert_eq!(balance_of(user2.id(), &ft1_asset_id).await, user2_ft1);
+        assert_eq!(balance(user1.id()).await, user1_ft2);
+    }
+
+    // A deposit's exact-out swap pays it out of the deposit, which the trader withdraws the
+    // rest of
+    let quoted_amount_in = simulate_exact_out(None).await + improvement;
+    let user1_ft1_in_wallet = || {
+        let ft1 = ft1.clone();
+        let user1_id = user1.id().clone();
+        async move {
+            ft1.view("ft_balance_of")
+                .args_json(json!({ "account_id": user1_id }))
+                .await
+                .unwrap()
+                .json::<U128>()
+                .unwrap()
+                .0
+        }
+    };
+    let user1_ft1_in_wallet_before = user1_ft1_in_wallet().await;
+    let user1_ft2_in_wallet_before = user1_ft2_in_wallet().await;
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(swap_amount),
+            "msg": json!({
+                "operations": [
+                    ft1_to_ft2(
+                        exact_out,
+                        Some(quoted_amount_in),
+                        quote_improvement_fee(quoted_amount_in, user2.id()),
+                    ),
+                    Operation::Withdraw {
+                        asset_id: ft2_asset_id.clone(),
+                        amount: WithdrawAmount::PreviousSwapOutput,
+                        to: None,
+                        rescue_address: None,
+                    },
+                    Operation::Withdraw {
+                        asset_id: ft1_asset_id.clone(),
+                        amount: WithdrawAmount::Full { at_least: None },
+                        to: None,
+                        rescue_address: None,
+                    },
+                ],
+            })
+            .to_string(),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    user2_ft1 += improvement;
+    assert_eq!(
+        user1_ft1_in_wallet().await,
+        user1_ft1_in_wallet_before - quoted_amount_in
+    );
+    assert_eq!(
+        user1_ft2_in_wallet().await,
+        user1_ft2_in_wallet_before + exact_out_amount
+    );
+    assert_eq!(balance_of(user1.id(), &ft1_asset_id).await, user1_ft1);
+    assert_eq!(balance_of(user2.id(), &ft1_asset_id).await, user2_ft1);
 }
 
 #[tokio::test]

@@ -721,7 +721,7 @@ impl DexEngine {
         )
         .map(|swap| {
             (
-                swap.total_amount_in(),
+                swap.total_amount_in_with_improvement_fee(),
                 swap.amount_out_without_improvement_fee(),
             )
         })

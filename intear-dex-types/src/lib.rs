@@ -27,13 +27,14 @@ pub const MAX_REFERRERS: usize = 5;
 #[near(serializers=[json])]
 pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
 
-/// Takes the output of an exact-in swap above `quote_expected_output` into
-/// `quote_improvement_receiver`'s internal balance of the output asset, so the
-/// trader gets at most what the quote expected.
+/// Takes the output of an exact-in swap above `quote_expected_amount`, or what
+/// an exact-out swap takes with its referral fees below it of the input, into
+/// `quote_improvement_receiver`'s internal balance of that asset, so the trader
+/// gets at most, or pays at least, what the quote expected.
 #[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub struct QuoteImprovementFee {
-    pub quote_expected_output: TokenAmount,
+    pub quote_expected_amount: TokenAmount,
     pub quote_improvement_receiver: AccountId,
 }
 
@@ -168,7 +169,6 @@ pub enum Operation {
         amount: SwapOperationAmount,
         /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
         constraint: Option<TokenAmount>,
-        /// Only for ExactIn
         quote_improvement_fee: Option<QuoteImprovementFee>,
     },
     /// Simulate the swap on `options` and swap on the one that `mode` picks:
@@ -182,7 +182,6 @@ pub enum Operation {
         amount: SwapOperationAmount,
         /// Either minimum amount out (for ExactIn) or maximum amount in (for ExactOut)
         constraint: Option<TokenAmount>,
-        /// Only for ExactIn
         quote_improvement_fee: Option<QuoteImprovementFee>,
         options: Vec<SwapOption>,
         mode: SwapAdvancedMode,
@@ -384,7 +383,8 @@ mod deprecation_warning_workaround {
             referrer: Option<AccountId>,
             #[serde(default)]
             referral_fees_paid: Vec<(AccountId, TokenAmount)>,
-            /// Out of `amount_out`, so the trader got `amount_out` without it
+            /// Out of `amount_out` for ExactIn, and on top of `amount_in` and
+            /// the referral fees for ExactOut
             quote_improvement_fee_paid: Option<(AccountId, TokenAmount)>,
         },
         /// Operations wait for the oracle that has `oracle_key` to respond to

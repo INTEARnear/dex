@@ -343,13 +343,21 @@ fn operation_step(
      -> color_eyre::eyre::Result<String> {
         let quote_improvement = match quote_improvement_fee {
             Some(QuoteImprovementFee {
-                quote_expected_output,
+                quote_expected_amount,
                 quote_improvement_receiver,
-            }) => format!(
-                ", and what it gives above {} goes to {quote_improvement_receiver} if it registered {} on {ENGINE_ACCOUNT_ID}",
-                amount_label(asset_out, *quote_expected_output)?,
-                asset_label(asset_out)?
-            ),
+            }) => {
+                let (improvement, improved_asset) = match amount {
+                    SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(_)) => {
+                        ("it takes below", asset_in)
+                    }
+                    _ => ("it gives above", asset_out),
+                };
+                format!(
+                    ", and what {improvement} {} goes to {quote_improvement_receiver} if it registered {} on {ENGINE_ACCOUNT_ID}",
+                    amount_label(improved_asset, *quote_expected_amount)?,
+                    asset_label(improved_asset)?
+                )
+            }
             None => String::new(),
         };
         let swap = match amount {

@@ -54,14 +54,23 @@ impl SimulatedSwap {
         amount_in_with_fees(self.response.amount_in, &self.referral_fees_paid)
     }
 
+    pub(crate) fn total_amount_in_with_improvement_fee(&self) -> TokenAmount {
+        match (&self.quote_improvement_fee_paid, self.request.amount) {
+            (Some((_, fee)), SwapRequestAmount::ExactOut(_)) => {
+                self.total_amount_in().checked_add(*fee).expect("Overflow")
+            }
+            _ => self.total_amount_in(),
+        }
+    }
+
     pub(crate) fn amount_out_without_improvement_fee(&self) -> TokenAmount {
-        match &self.quote_improvement_fee_paid {
-            Some((_, fee)) => self
+        match (&self.quote_improvement_fee_paid, self.request.amount) {
+            (Some((_, fee)), SwapRequestAmount::ExactIn(_)) => self
                 .response
                 .amount_out
                 .checked_sub(*fee)
                 .expect("Quote improvement fee exceeds the amount out"),
-            None => self.response.amount_out,
+            _ => self.response.amount_out,
         }
     }
 
@@ -77,7 +86,9 @@ impl SimulatedSwap {
             {
                 Some("Output amount is less than constraint")
             }
-            SwapRequestAmount::ExactOut(_) if self.total_amount_in() > constraint => {
+            SwapRequestAmount::ExactOut(_)
+                if self.total_amount_in_with_improvement_fee() > constraint =>
+            {
                 Some("Input amount is greater than constraint")
             }
             _ => None,
@@ -196,7 +207,7 @@ impl DexEngine {
         if let Some(violation_message) = swap.constraint_violation_message(constraint) {
             panic!("{violation_message}");
         }
-        let total_amount_in = swap.total_amount_in();
+        let total_amount_in = swap.total_amount_in_with_improvement_fee();
         let amount_out = swap.amount_out_without_improvement_fee();
         let SimulatedSwap {
             dex_id,
@@ -224,6 +235,11 @@ impl DexEngine {
             .charge(&dex_id, storage_usage_before, storage_usage_after);
         events.extend_dex_events(dex_events);
 
+        let (quote_improvement_fee_of_input, quote_improvement_fee_of_output) =
+            match swap_request.amount {
+                SwapRequestAmount::ExactIn(_) => (None, quote_improvement_fee_paid.as_ref()),
+                SwapRequestAmount::ExactOut(_) => (quote_improvement_fee_paid.as_ref(), None),
+            };
         let dex_trader = trader.caller();
         match trader {
             TradeAccount::User(user_trader) => {
@@ -235,11 +251,14 @@ impl DexEngine {
                     swap_request.asset_in.clone(),
                     response.amount_in,
                 );
-                for (referrer_id, fee) in &referral_fees_paid {
+                for (receiver_id, fee) in referral_fees_paid
+                    .iter()
+                    .chain(quote_improvement_fee_of_input)
+                {
                     self.internal_transfer_asset(
                         events,
                         AccountOrDexId::Account(user_trader.clone()),
-                        AccountOrDexId::Account(referrer_id.clone()),
+                        AccountOrDexId::Account(receiver_id.clone()),
                         swap_request.asset_in.clone(),
                         *fee,
                     );
@@ -252,7 +271,7 @@ impl DexEngine {
                     swap_request.asset_out.clone(),
                     amount_out,
                 );
-                if let Some((receiver_id, fee)) = &quote_improvement_fee_paid {
+                if let Some((receiver_id, fee)) = quote_improvement_fee_of_output {
                     self.internal_transfer_asset(
                         events,
                         AccountOrDexId::Dex(dex_id.clone()),
@@ -276,11 +295,14 @@ impl DexEngine {
                     swap_request.asset_in.clone(),
                     response.amount_in,
                 );
-                for (referrer_id, fee) in &referral_fees_paid {
+                for (receiver_id, fee) in referral_fees_paid
+                    .iter()
+                    .chain(quote_improvement_fee_of_input)
+                {
                     // already decreased sandboxed balance by subtracting total_amount_in
                     self.internal_increase_assets(
                         events,
-                        AccountOrDexId::Account(referrer_id.clone()),
+                        AccountOrDexId::Account(receiver_id.clone()),
                         swap_request.asset_in.clone(),
                         *fee,
                     );
@@ -292,7 +314,7 @@ impl DexEngine {
                     swap_request.asset_out.clone(),
                     response.amount_out,
                 );
-                if let Some((receiver_id, fee)) = &quote_improvement_fee_paid {
+                if let Some((receiver_id, fee)) = quote_improvement_fee_of_output {
                     self.internal_increase_assets(
                         events,
                         AccountOrDexId::Account(receiver_id.clone()),
@@ -626,10 +648,6 @@ impl DexEngine {
         quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<&OracleResponse>,
     ) -> Result<SimulatedSwap, String> {
-        expect!(
-            quote_improvement_fee.is_none() || matches!(amount, SwapRequestAmount::ExactIn(_)),
-            "Quote improvement fee is only for exact-in swaps"
-        );
         let referral_fees = self.payable_referral_fees(referral_fees, &asset_in);
         let swap_request = SwapRequest {
             message,
@@ -671,28 +689,42 @@ impl DexEngine {
             }
             _ => (),
         }
-        let quote_improvement_fee_paid = quote_improvement_fee
-            .filter(|fee| {
-                self.asset_is_registered(
-                    AccountOrDexId::Account(fee.quote_improvement_receiver.clone()),
-                    swap_request.asset_out.clone(),
-                )
-            })
-            .and_then(|fee| {
-                let improvement = response.amount_out.checked_sub(fee.quote_expected_output)?;
-                (!improvement.is_zero()).then_some((fee.quote_improvement_receiver, improvement))
-            });
+        let referral_fees_paid: Vec<_> = match amount {
+            SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
+            SwapRequestAmount::ExactOut(_) => referral_fees.amounts_on_top_of(response.amount_in),
+        }
+        .into_iter()
+        .filter(|(_, fee)| !fee.is_zero())
+        .collect();
+        let quote_improvement_fee_paid = quote_improvement_fee.and_then(
+            |QuoteImprovementFee {
+                 quote_expected_amount,
+                 quote_improvement_receiver,
+             }| {
+                let (improved_asset, improvement) = match swap_request.amount {
+                    SwapRequestAmount::ExactIn(_) => (
+                        &swap_request.asset_out,
+                        response.amount_out.checked_sub(quote_expected_amount)?,
+                    ),
+                    SwapRequestAmount::ExactOut(_) => (
+                        &swap_request.asset_in,
+                        quote_expected_amount.checked_sub(amount_in_with_fees(
+                            response.amount_in,
+                            &referral_fees_paid,
+                        ))?,
+                    ),
+                };
+                let receiver_registered = self.asset_is_registered(
+                    AccountOrDexId::Account(quote_improvement_receiver.clone()),
+                    improved_asset.clone(),
+                );
+                (receiver_registered && !improvement.is_zero())
+                    .then_some((quote_improvement_receiver, improvement))
+            },
+        );
 
         Ok(SimulatedSwap {
-            referral_fees_paid: match amount {
-                SwapRequestAmount::ExactIn(amount_in) => referral_fees.amounts_out_of(amount_in),
-                SwapRequestAmount::ExactOut(_) => {
-                    referral_fees.amounts_on_top_of(response.amount_in)
-                }
-            }
-            .into_iter()
-            .filter(|(_, fee)| !fee.is_zero())
-            .collect(),
+            referral_fees_paid,
             quote_improvement_fee_paid,
             dex_id,
             request: swap_request,
