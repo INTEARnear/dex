@@ -103,11 +103,22 @@ impl RatedPool {
         let out_index = in_index.other();
         let values = self.values();
         let invariant = invariant(values, self.amplification);
+        let value_in = self.value_of(in_index, amount_in_after_fees, false);
         let input_after_swap = values[in_index]
-            .checked_add(self.value_of(in_index, amount_in_after_fees, false))
+            .checked_add(value_in)
             .expect("Value overflow");
-        let output_after_swap =
-            balance_keeping_invariant(input_after_swap, invariant, self.amplification);
+        // A swap at the oracle's price would take `value_in` out of the output. At most half of
+        // the output, since the step from a guess far below the balance could overflow.
+        let output_after_swap_at_oracle_price = values[out_index]
+            .checked_div(COINS)
+            .and_then(|half_of_output| values[out_index].checked_sub(value_in.min(half_of_output)))
+            .expect("At most half of the output");
+        let output_after_swap = balance_keeping_invariant(
+            input_after_swap,
+            invariant,
+            self.amplification,
+            output_after_swap_at_oracle_price,
+        );
         // Less 1 for the rounding of the invariant, as in Curve
         let value_out = values[out_index]
             .saturating_sub(output_after_swap)
@@ -127,12 +138,21 @@ impl RatedPool {
         let out_index = in_index.other();
         let values = self.values();
         let invariant = invariant(values, self.amplification);
+        let value_out = self.value_of(out_index, amount_out, true);
         let output_after_swap = values[out_index]
-            .checked_sub(self.value_of(out_index, amount_out, true))
+            .checked_sub(value_out)
             .filter(|output_after_swap| *output_after_swap != U256::ZERO)
             .expect("Amount must be less than out balance");
-        let input_after_swap =
-            balance_keeping_invariant(output_after_swap, invariant, self.amplification);
+        // A swap at the oracle's price would put `value_out` into the input
+        let input_after_swap_at_oracle_price = values[in_index]
+            .checked_add(value_out)
+            .expect("Value overflow");
+        let input_after_swap = balance_keeping_invariant(
+            output_after_swap,
+            invariant,
+            self.amplification,
+            input_after_swap_at_oracle_price,
+        );
         // More by 1 for the rounding of the invariant, as in Curve
         let value_in = input_after_swap
             .saturating_sub(values[in_index])
@@ -242,11 +262,13 @@ fn invariant(values: PoolAssets<U256>, amplification: Amplification) -> U256 {
 }
 
 /// The value of one balance that keeps `invariant` with the other balance at `other_value`,
-/// found with Newton's method as Curve's `get_y` does
+/// found with Newton's method as Curve's `get_y` does, but from `first_guess` instead of the
+/// invariant: a guess near the balance gets to it in about half as many steps
 fn balance_keeping_invariant(
     other_value: U256,
     invariant: U256,
     amplification: Amplification,
+    first_guess: U256,
 ) -> U256 {
     let ann = U256::from(amplification.get())
         .checked_mul(COINS)
@@ -261,7 +283,7 @@ fn balance_keeping_invariant(
         .checked_div(ann)
         .and_then(|invariant_over_ann| other_value.checked_add(invariant_over_ann))
         .expect("Value overflow");
-    let mut balance = invariant;
+    let mut balance = first_guess;
     for _ in 0..MAX_STEPS {
         let previous_balance = balance;
         let numerator = balance
