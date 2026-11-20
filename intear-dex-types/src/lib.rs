@@ -22,7 +22,8 @@ pub const MAX_REFERRERS: usize = 5;
 /// Fees a swap pays referrers out of its input, before the dex gets it. Each
 /// fee goes to the referrer's internal balance of the input asset, and a
 /// referrer who hasn't registered that asset isn't paid, so the trader keeps
-/// that fee. In a batch of operations, only the first swap pays them.
+/// that fee. In a batch of operations, only the first swap pays them, not
+/// counting the [`OracleFeeSwap`].
 #[derive(Clone, Default, Debug)]
 #[near(serializers=[json])]
 pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
@@ -132,6 +133,19 @@ pub struct SwapOption {
     pub message: Base64VecU8,
 }
 
+/// A swap that buys exactly the fee of an [`Operation::OracleRequest`] with
+/// `asset_in` before the request is made, for traders who don't have an asset
+/// that the oracle takes fees in. It pays no referral fees.
+#[derive(Clone, Debug)]
+#[near(serializers=[json])]
+pub struct OracleFeeSwap {
+    pub dex_id: DexId,
+    pub message: Base64VecU8,
+    pub asset_in: AssetId,
+    /// Maximum amount in
+    pub constraint: Option<TokenAmount>,
+}
+
 #[derive(Clone, Debug)]
 #[near(serializers=[json])]
 pub enum Operation {
@@ -214,15 +228,17 @@ pub enum Operation {
     ///
     /// `fee` is the asset that the oracle is paid in and what it takes for a
     /// request in it, exactly as the oracle set it, or the request fails. It's
-    /// taken from the deposit, which must be of that asset, or from the
-    /// balance of the account that called `execute_operations`. The oracle
-    /// keeps it once it responds, even if the operations after the request
-    /// fail, and it's refunded if the oracle doesn't respond in time.
+    /// taken from the deposit, which must be of that asset unless `swap` buys
+    /// it with the deposited asset, or from the balance of the account that
+    /// called `execute_operations`, or bought with them by `swap`. The oracle
+    /// keeps it once it responds, even if the operations after the request fail,
+    /// and it's refunded in the fee asset if the oracle doesn't respond in time.
     OracleRequest {
         oracle_key: PublicKeyHandle,
         dex_id: DexId,
         request: Base64VecU8,
         fee: (AssetId, TokenAmount),
+        swap: Option<OracleFeeSwap>,
     },
 }
 

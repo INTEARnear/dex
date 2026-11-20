@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use intear_dex_common::{AssetId, Caller, DexId, TokenAmount, expect};
-use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation, ReferralFees};
+use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
+use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation, OracleFeeSwap, ReferralFees};
 use near_sdk::{
     AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
     PromiseOrValue, PublicKey, PublicKeyHandle, UserYieldId,
@@ -12,10 +12,12 @@ use near_sdk::{
 
 use crate::{
     DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
+    internal_operations::TradeAccount,
 };
 
 /// Also includes gas of the withdrawal that refunds a deposit
 pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(30);
+const GAS_FOR_REFUND_OF_SWAPPED_FEE: Gas = Gas::from_tgas(15);
 const GAS_FOR_FAILING_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(2);
 
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
@@ -312,35 +314,39 @@ impl DexEngine {
                 alleged_sender,
                 transfer_of,
             } => {
-                let mut refund_amount = if operations_ran {
-                    TokenAmount::ZERO
+                let mut refunds = if operations_ran {
+                    HashMap::new()
                 } else {
                     let held_assets = held_assets.expect("A deposit is held");
                     expect!(
                         held_assets.keys().all(|asset_id| *asset_id == transfer_of),
                         "Only the deposited {transfer_of} can be held"
                     );
-                    held_assets.get(&transfer_of).copied().unwrap_or_default()
+                    held_assets
                 };
                 if oracle_timed_out {
-                    // The fee was taken from the deposit
-                    refund_amount = refund_amount
+                    // The fee was taken from the deposit, or bought with it
+                    let refund = refunds.entry(oracle_fee.asset_id).or_default();
+                    *refund = refund
                         .checked_add(oracle_fee.amount)
                         .expect("Refund overflow");
                 }
-                if !refund_amount.is_zero() {
+                for (asset_id, refund_amount) in refunds {
+                    if refund_amount.is_zero() {
+                        continue;
+                    }
                     let in_custody = self
                         .total_in_custody
-                        .get_mut(&transfer_of)
-                        .expect("Held asset is not in custody");
+                        .get_mut(&asset_id)
+                        .expect("Refunded asset is not in custody");
                     *in_custody = in_custody
                         .checked_sub(refund_amount)
-                        .expect("Held asset is not in custody");
+                        .expect("Refunded asset is not in custody");
                     self.internal_withdraw_unchecked(
-                        transfer_of,
+                        asset_id,
                         refund_amount,
                         alleged_sender.clone(),
-                        AccountOrDexId::Account(alleged_sender),
+                        AccountOrDexId::Account(alleged_sender.clone()),
                     )
                     .detach();
                 }
@@ -377,7 +383,8 @@ pub struct OracleFee {
 
 impl DexEngine {
     /// Make the operations after the oracle request wait for the oracle to
-    /// respond, holding the oracle's fee and the sandboxed assets until then
+    /// respond, holding the oracle's fee and the sandboxed assets until then,
+    /// after the fee swap buys the fee if the request has one
     pub(crate) fn internal_wait_for_oracle(
         &mut self,
         events: &mut CallEvents,
@@ -392,6 +399,7 @@ impl DexEngine {
             dex_id,
             request,
             fee: (fee_asset, fee),
+            swap,
         } = operations.remove(0)
         else {
             unreachable!("Operations that wait for an oracle start with an oracle request");
@@ -426,6 +434,39 @@ impl DexEngine {
             asset_id: fee_asset.clone(),
             amount: fee,
         };
+        let fee_is_swapped = swap.is_some();
+        if let Some(OracleFeeSwap {
+            dex_id: swap_dex_id,
+            message,
+            asset_in,
+            constraint,
+        }) = swap
+        {
+            expect!(
+                asset_in != fee_asset,
+                "The oracle fee swap must be from another asset than the fee's {fee_asset}"
+            );
+            self.internal_swap_simple(
+                events,
+                swap_dex_id,
+                message,
+                asset_in,
+                fee_asset.clone(),
+                SwapRequestAmount::ExactOut(fee),
+                match &mut sandboxed_assets {
+                    Some(assets) => TradeAccount::Sandboxed {
+                        assets,
+                        trader: trader.clone(),
+                    },
+                    None => TradeAccount::User(trader.alleged_account_id().clone()),
+                },
+                referrer.clone(),
+                ReferralFees::default(),
+                constraint,
+                None,
+                None,
+            );
+        }
         match &mut sandboxed_assets {
             Some(sandboxed_assets) => {
                 let Some(deposit) = sandboxed_assets.get_mut(&fee_asset) else {
@@ -436,6 +477,10 @@ impl DexEngine {
                         "Deposit of {deposit} {fee_asset} is less than the oracle's fee of {fee}"
                     )
                 });
+                if fee_is_swapped {
+                    // The swap bought exactly the fee, so only the deposited asset is held
+                    sandboxed_assets.remove(&fee_asset);
+                }
             }
             None => self.internal_decrease_assets(
                 events,
@@ -473,9 +518,14 @@ impl DexEngine {
             yield_id,
         )
         .expect("Operations with the same yield id already wait for an oracle");
+        let gas_for_after_oracle_operations = if fee_is_swapped && sandboxed_assets.is_some() {
+            GAS_FOR_AFTER_ORACLE_OPERATIONS.saturating_add(GAS_FOR_REFUND_OF_SWAPPED_FEE)
+        } else {
+            GAS_FOR_AFTER_ORACLE_OPERATIONS
+        };
         waiting.then(
             Self::ext(near_sdk::env::current_account_id())
-                .with_static_gas(GAS_FOR_AFTER_ORACLE_OPERATIONS)
+                .with_static_gas(gas_for_after_oracle_operations)
                 .with_unused_gas_weight(0)
                 .after_oracle_operations(trader, sandboxed_assets, oracle_fee),
         )

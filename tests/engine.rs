@@ -5,8 +5,8 @@ use intear_dex::oracle::{
 };
 use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, DexCallAfterDeploy, Operation, QuoteImprovementFee, SwapAdvancedMode,
-    SwapOperationAmount, SwapOption, WithdrawAmount,
+    AccountOrDexId, DexCallAfterDeploy, Operation, OracleFeeSwap, QuoteImprovementFee,
+    SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
@@ -5809,6 +5809,7 @@ async fn test_oracle() {
         dex_id: dex_id.clone(),
         request: Base64VecU8(request),
         fee: (fee_asset, TokenAmount::ZERO),
+        swap: None,
     };
     let oracle_request = |request: Vec<u8>| oracle_request_paid_in(ft1_asset_id.clone(), request);
     let oracle_rate_swap =
@@ -6590,6 +6591,7 @@ async fn test_oracle_key_types() {
                     dex_id: dex_id.clone(),
                     request: Base64VecU8(request.clone()),
                     fee: (AssetId::Near, TokenAmount::ZERO),
+                    swap: None,
                 }],
             }))
             .transact_async()
@@ -6775,6 +6777,7 @@ async fn test_oracle_fees() {
             dex_id: dex_id.clone(),
             request: Base64VecU8(request.clone()),
             fee: (fee_asset.clone(), TokenAmount::new(fee)),
+            swap: None,
         };
     let oracle_rate_swap = |asset_in: &AssetId, amount: u128| Operation::SwapSimple {
         dex_id: dex_id.clone(),
@@ -7335,4 +7338,343 @@ async fn test_oracle_fees() {
         balance_on_engine(&user3, &ft1_asset_id).await,
         oracle_ft1_fees
     );
+}
+
+#[tokio::test]
+async fn test_oracle_fee_swap() {
+    let request = b"request paid with a swap".to_vec();
+    let pool_creation_near = NearToken::from_near(1).as_yoctonear();
+    let mut pool_near = NearToken::from_near(10).as_yoctonear();
+    let mut pool_ft1 = 1_000_000_000_000u128;
+    let ft1_fee = 1_000_000u128;
+    let user1_near_on_engine = NearToken::from_near(5).as_yoctonear();
+    let near_deposit = NearToken::from_near(1).as_yoctonear();
+    let max_gas_cost = NearToken::from_millinear(100);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user3,
+        deployer,
+        ft1,
+        ..
+    } = setup_test_environment_on_own_sandbox(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: get_compiled_wasms().await.test_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+
+    // The dex has a pool of NEAR and ft1, which the swaps buy the oracle's fee in ft1 on, and
+    // user1 has NEAR on the engine
+    let result = deployer
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(pool_ft1),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = deployer
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(pool_creation_near + pool_near))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = deployer
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": [
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "create_pool".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&CreatePoolArgs {
+                            assets: (AssetId::Near, ft1_asset_id.clone()),
+                        })
+                        .unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([(
+                        AssetId::Near,
+                        TokenAmount::new(pool_creation_near),
+                    )]),
+                },
+                Operation::DexCall {
+                    dex_id: dex_id.clone(),
+                    method: "add_liquidity".to_string(),
+                    args: Base64VecU8(
+                        near_sdk::borsh::to_vec(&AddLiquidityArgs { pool_id: 0 }).unwrap(),
+                    ),
+                    attached_assets: HashMap::from_iter([
+                        (AssetId::Near, TokenAmount::new(pool_near)),
+                        (ft1_asset_id.clone(), TokenAmount::new(pool_ft1)),
+                    ]),
+                },
+            ],
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let result = user1
+        .call(dex_engine_contract.id(), "deposit_near")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(user1_near_on_engine))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let mut user1_near_on_engine = user1_near_on_engine;
+
+    // user3 takes the fees of the oracle, only in ft1
+    let oracle_key = create_oracle_key(
+        &dex_engine_contract,
+        &user3,
+        KeyType::ED25519,
+        NearToken::from_near(2),
+    )
+    .await;
+    let result = set_oracle_fees(
+        &dex_engine_contract,
+        &user3,
+        &oracle_key,
+        &[(ft1_asset_id.clone(), ft1_fee)],
+    )
+    .await;
+    assert_success(&result).unwrap();
+    let mut oracle_ft1_fees = 0u128;
+
+    let oracle_request_paid_with_swap =
+        |asset_in: &AssetId, maximum_in: Option<u128>| Operation::OracleRequest {
+            oracle_key: oracle_key_handle(&oracle_key),
+            dex_id: dex_id.clone(),
+            request: Base64VecU8(request.clone()),
+            fee: (ft1_asset_id.clone(), TokenAmount::new(ft1_fee)),
+            swap: Some(OracleFeeSwap {
+                dex_id: dex_id.clone(),
+                message: Base64VecU8(
+                    near_sdk::borsh::to_vec(&SwapMessage::Pool { pool_id: 0 }).unwrap(),
+                ),
+                asset_in: asset_in.clone(),
+                constraint: maximum_in.map(TokenAmount::new),
+            }),
+        };
+    let oracle_request_paid_with_near = |maximum_near_in: Option<u128>| {
+        oracle_request_paid_with_swap(&AssetId::Near, maximum_near_in)
+    };
+    let withdraw_rest_of_deposit = Operation::Withdraw {
+        asset_id: AssetId::Near,
+        amount: WithdrawAmount::Full { at_least: None },
+        to: None,
+        rescue_address: None,
+    };
+    // What the pool takes for the fee, as the test dex rounds it
+    let mut buy_fee_on_pool = || {
+        let near_in = pool_near * ft1_fee / (pool_ft1 - ft1_fee) + 1;
+        pool_near += near_in;
+        pool_ft1 -= ft1_fee;
+        near_in
+    };
+    let execute_operations = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": operations,
+            }))
+    };
+    let deposit_near = |operations: Vec<Operation>| {
+        user1
+            .call(dex_engine_contract.id(), "deposit_near")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(near_deposit))
+            .args_json(json!({
+                "operations": operations,
+            }))
+    };
+    let respond = async |nonces: Vec<Base64VecU8>| {
+        let outcome = oracle_respond(
+            &sandbox,
+            &dex_engine_contract,
+            &oracle_key,
+            &request,
+            Vec::new(),
+            nonces,
+        )
+        .await;
+        assert_gas_key_call_success(&outcome).unwrap();
+    };
+    let balance_on_engine = async |account: &near_workspaces::Account, asset_id: &AssetId| {
+        get_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(account.id().clone()),
+            asset_id.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+    };
+    let total_in_custody = async |asset_id: &AssetId| {
+        dex_engine_contract
+            .view("total_in_custody")
+            .args_json(json!({ "asset_id": asset_id }))
+            .await
+            .unwrap()
+            .json::<Option<U128>>()
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    let near_in_custody = total_in_custody(&AssetId::Near).await;
+    let ft1_in_custody = total_in_custody(&ft1_asset_id).await;
+
+    // A swap that takes more than its constraint fails the request before the oracle is asked
+    let result = execute_operations(vec![oracle_request_paid_with_near(Some(1))])
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("Input amount is greater than constraint"),
+        "{result:?}"
+    );
+    let result = deposit_near(vec![oracle_request_paid_with_swap(&ft1_asset_id, None)])
+        .transact()
+        .await
+        .unwrap();
+    assert!(
+        format!("{result:?}").contains("The oracle fee swap must be from another asset"),
+        "{result:?}"
+    );
+
+    // The swap buys the fee with the balance of the account that called execute_operations, and
+    // with a deposit, whose rest the operations after the request withdraw
+    let waiting_without_deposit = execute_operations(vec![oracle_request_paid_with_near(None)])
+        .transact_async()
+        .await
+        .unwrap();
+    let nonces = waiting_for_oracle_request(&sandbox, &[&waiting_without_deposit], &request).await;
+    let near_in_without_deposit = buy_fee_on_pool();
+    user1_near_on_engine -= near_in_without_deposit;
+    // While the operations wait, the fee is neither the trader's nor the oracle's
+    assert_eq!(
+        balance_on_engine(&user1, &AssetId::Near).await,
+        user1_near_on_engine
+    );
+    assert_eq!(balance_on_engine(&user1, &ft1_asset_id).await, 0);
+    assert_eq!(balance_on_engine(&user3, &ft1_asset_id).await, 0);
+    respond(nonces).await;
+    let result = waiting_without_deposit.await.unwrap();
+    assert_success(&result).unwrap();
+    oracle_ft1_fees += ft1_fee;
+
+    let user1_near_before = near_balance_after_refunds(&sandbox, &user1).await;
+    let waiting_near_deposit = deposit_near(vec![
+        oracle_request_paid_with_near(Some(near_deposit)),
+        withdraw_rest_of_deposit.clone(),
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    let nonces = waiting_for_oracle_request(&sandbox, &[&waiting_near_deposit], &request).await;
+    let near_in_deposit = buy_fee_on_pool();
+    respond(nonces).await;
+    let result = executed(&sandbox, waiting_near_deposit).await;
+    assert_success(&result).unwrap();
+    oracle_ft1_fees += ft1_fee;
+    let user1_near_paid =
+        user1_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user1).await);
+    assert!(user1_near_paid >= NearToken::from_yoctonear(near_in_deposit));
+    assert!(
+        user1_near_paid < NearToken::from_yoctonear(near_in_deposit).saturating_add(max_gas_cost)
+    );
+    assert_eq!(
+        balance_on_engine(&user1, &AssetId::Near).await,
+        user1_near_on_engine
+    );
+    assert_eq!(balance_on_engine(&user1, &ft1_asset_id).await, 0);
+    assert_eq!(
+        balance_on_engine(&user3, &ft1_asset_id).await,
+        oracle_ft1_fees
+    );
+    let near_in_custody = near_in_custody + near_in_deposit;
+    assert_eq!(total_in_custody(&AssetId::Near).await, near_in_custody);
+    assert_eq!(total_in_custody(&ft1_asset_id).await, ft1_in_custody);
+
+    // If the oracle doesn't respond in time, the swap stays made and the fee is refunded in the
+    // fee asset: to the balance of the account that called execute_operations, and to the wallet
+    // of the sender of a deposit, with the rest of the deposit
+    let user1_near_before = near_balance_after_refunds(&sandbox, &user1).await;
+    let waiting_without_deposit = execute_operations(vec![oracle_request_paid_with_near(None)])
+        .transact_async()
+        .await
+        .unwrap();
+    waiting_for_oracle_request(&sandbox, &[&waiting_without_deposit], &request).await;
+    let near_in_without_deposit = buy_fee_on_pool();
+    user1_near_on_engine -= near_in_without_deposit;
+    let waiting_near_deposit = deposit_near(vec![
+        oracle_request_paid_with_near(None),
+        withdraw_rest_of_deposit,
+    ])
+    .transact_async()
+    .await
+    .unwrap();
+    waiting_for_oracle_request(&sandbox, &[&waiting_near_deposit], &request).await;
+    let near_in_deposit = buy_fee_on_pool();
+    sandbox.fast_forward(250).await.unwrap();
+    let result = waiting_without_deposit.await.unwrap();
+    assert!(result.is_failure());
+    assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
+    let result = executed(&sandbox, waiting_near_deposit).await;
+    assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
+    assert_eq!(
+        balance_on_engine(&user1, &AssetId::Near).await,
+        user1_near_on_engine
+    );
+    assert_eq!(balance_on_engine(&user1, &ft1_asset_id).await, ft1_fee);
+    assert_ft_balance(&user1, ft1.clone(), U128(ft1_fee))
+        .await
+        .unwrap();
+    assert_eq!(
+        balance_on_engine(&user3, &ft1_asset_id).await,
+        oracle_ft1_fees
+    );
+    let user1_near_paid =
+        user1_near_before.saturating_sub(near_balance_after_refunds(&sandbox, &user1).await);
+    assert!(user1_near_paid >= NearToken::from_yoctonear(near_in_deposit));
+    assert!(
+        user1_near_paid < NearToken::from_yoctonear(near_in_deposit).saturating_add(max_gas_cost)
+    );
+    assert_eq!(
+        total_in_custody(&AssetId::Near).await,
+        near_in_custody + near_in_deposit
+    );
+    assert_eq!(
+        total_in_custody(&ft1_asset_id).await,
+        ft1_in_custody - ft1_fee
+    );
+    wait_for_blocks(&sandbox, 3).await;
+    assert_untracked_near(&dex_engine_contract).await.unwrap();
 }

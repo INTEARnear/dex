@@ -485,6 +485,7 @@ async fn swap_on_routes(
                     dex_id: dex_id.clone(),
                     request: Base64VecU8(request.clone()),
                     fee: (asset_in.clone(), TokenAmount::new(oracle_fee)),
+                    swap: None,
                 },
                 Operation::SwapSimple {
                     dex_id: dex_id.clone(),
@@ -1369,6 +1370,7 @@ async fn test_amp_swaps_pay_the_oracle() {
                 dex_id: dex_id.clone(),
                 request: Base64VecU8(request.clone()),
                 fee: (near_asset_id.clone(), TokenAmount::new(oracle_near_fee)),
+                swap: None,
             },
             Operation::SwapSimple {
                 dex_id: dex_id.clone(),

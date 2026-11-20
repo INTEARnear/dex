@@ -4,7 +4,7 @@ use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, Operation, QuoteImprovementFee, ReferralFees, SwapAdvancedMode,
+    AccountOrDexId, Operation, OracleFeeSwap, QuoteImprovementFee, ReferralFees, SwapAdvancedMode,
     SwapOperationAmount, WithdrawAmount,
 };
 use near_cli_rs::commands::ActionContext;
@@ -179,8 +179,11 @@ impl RunContext {
                         | Operation::TransferAsset {
                             to: AccountOrDexId::Dex(dex_id),
                             ..
+                        } => referenced_dexes.push(dex_id),
+                        Operation::OracleRequest { dex_id, swap, .. } => {
+                            referenced_dexes.push(dex_id);
+                            referenced_dexes.extend(swap.iter().map(|swap| &swap.dex_id));
                         }
-                        | Operation::OracleRequest { dex_id, .. } => referenced_dexes.push(dex_id),
                         Operation::SwapSimple {
                             dex_id,
                             quote_improvement_fee,
@@ -527,10 +530,32 @@ fn operation_step(
             dex_id,
             request,
             fee: (fee_asset, fee),
-        } => format!(
-            "Wait for oracle {oracle_key} to respond to {} bytes of request for {dex_id}, paying its fee of {}",
-            request.0.len(),
-            amount_label(fee_asset, *fee)?
-        ),
+            swap,
+        } => {
+            let wait_for = format!(
+                "for oracle {oracle_key} to respond to {} bytes of request for {dex_id}, paying its fee of {}",
+                request.0.len(),
+                amount_label(fee_asset, *fee)?
+            );
+            match swap {
+                Some(OracleFeeSwap {
+                    dex_id: swap_dex_id,
+                    message: _,
+                    asset_in,
+                    constraint,
+                }) => format!(
+                    "{}, then wait {wait_for}",
+                    swap_label(
+                        &format!("on {swap_dex_id}"),
+                        asset_in,
+                        fee_asset,
+                        &SwapOperationAmount::Amount(SwapRequestAmount::ExactOut(*fee)),
+                        constraint,
+                        &None,
+                    )?
+                ),
+                None => format!("Wait {wait_for}"),
+            }
+        }
     })
 }
