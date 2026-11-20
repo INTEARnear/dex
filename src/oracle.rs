@@ -17,7 +17,7 @@ use crate::{
 
 /// Also includes gas of the withdrawal that refunds a deposit
 pub const GAS_FOR_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(30);
-const GAS_FOR_REFUND_OF_SWAPPED_FEE: Gas = Gas::from_tgas(15);
+const GAS_FOR_REFUND_OF_SWAPPED_FEE: Gas = Gas::from_tgas(20);
 const GAS_FOR_FAILING_AFTER_ORACLE_OPERATIONS: Gas = Gas::from_tgas(2);
 
 // https://github.com/near/nearcore/blob/2.14.0/core/parameters/res/runtime_configs/parameters.yaml#L321
