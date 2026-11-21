@@ -93,11 +93,6 @@ pub enum AmpAction {
     /// Fees an account collected: pending or withdraw
     Fees(crate::commands::xyk::fees::FeesCommands),
     #[strum_discriminants(strum(
-        message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"
-    ))]
-    /// Who signs fee discounts: show, set-signer, disable
-    FeeDiscounts(crate::commands::xyk::fee_discounts::FeeDiscountsCommands),
-    #[strum_discriminants(strum(
         message = "create-pool     - Create a pool rated at an oracle's prices or a fixed price, as the owner of the dex"
     ))]
     /// Create a pool rated at an oracle's prices or a fixed price, as the owner of the dex

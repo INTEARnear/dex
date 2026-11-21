@@ -1,5 +1,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
+mod migration;
+
 use core::panic;
 use std::collections::HashMap;
 
@@ -8,22 +10,22 @@ use intear_dex_common::{
     SwapRequest, SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PublicKey,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
 };
 use xyk_dex_types::{
-    AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, CAN_MIGRATE,
-    ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse,
-    DEFAULT_FEE_PAYOUT_TYPE, EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeePayoutType,
-    FeeReceiver, GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
+    AddLiquidityArgs, AddLiquidityResponse, AssetIndex, AssetWithBalance, ClaimFeesArgs, ClaimMode,
+    CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse, DEFAULT_FEE_PAYOUT_TYPE,
+    EditFeesArgs, FeeConfigurationV2, FeeDiscountFraction, FeePayoutType, FeeReceiver,
+    GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
     GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES, LAST_CREATED_POOL_ID_MARKER,
     LiquidityPosition, LiquidityPositionView, LockPoolArgs, PRIVATE_POOL_TOTAL_SHARES,
     PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets, PoolId, PoolType,
     PoolView, ProviderShares, RegisterFeeAssetsArgs, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, RouteFraction, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
-    SwapArgs, SwapReserves, TokenAmount, TotalShares, WithdrawFeesArgs, XykDexEvent,
+    RemoveLiquidityResponse, RouteFraction, SetLiquidityFeePayoutArgs, SwapArgs, SwapReserves,
+    TokenAmount, TotalShares, WithdrawFeesArgs, XykDexEvent,
     math::{self, exact_in_amount_out, exact_out_amount_in},
 };
 
@@ -53,7 +55,6 @@ pub struct XykDex {
     pools: Vector<Pool>,
     fees_collected_by_users: FeeBalances,
     fees_claimable_by_anyone: FeeBalances,
-    fee_discount_signer_public_key: Option<PublicKey>,
 }
 
 #[near]
@@ -61,11 +62,7 @@ impl Dex for XykDex {
     #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        let Ok(SwapArgs {
-            routes,
-            fee_discount,
-        }) = near_sdk::borsh::from_slice(&request.message.0)
-        else {
+        let Ok(SwapArgs { routes }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
         expect!(!routes.is_empty(), "No routes");
@@ -73,11 +70,7 @@ impl Dex for XykDex {
             RouteFraction::add_up_to_full(routes.iter().map(|route| route.fraction)),
             "Route fractions must add up to 100%"
         );
-        let fee_discount = fee_discount.verify(
-            self.fee_discount_signer_public_key.as_ref(),
-            &routes,
-            &request,
-        );
+        let fee_discount = env::fee_discount();
 
         let (SwapRequestAmount::ExactIn(requested_amount)
         | SwapRequestAmount::ExactOut(requested_amount)) = request.amount;
@@ -548,35 +541,8 @@ impl XykDex {
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: FeeBalances::new(StorageKey::FeesCollectedByUsers),
-            fee_discount_signer_public_key: None,
             fees_claimable_by_anyone: FeeBalances::new(StorageKey::FeesClaimableByAnyone),
         }
-    }
-
-    #[payable]
-    #[result_serializer(borsh)]
-    pub fn set_fee_discount_signer(
-        &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
-        #[serializer(borsh)] args: Vec<u8>,
-    ) -> DexCallResponse {
-        expect!(
-            let Caller::Direct(caller_id) = env::caller(),
-            "This method can only be called directly, not in a transfer call"
-        );
-        expect!(
-            caller_id == CAN_MIGRATE,
-            "Only owner can set the fee discount signer"
-        );
-        let Ok(SetFeeDiscountSignerArgs {
-            fee_discount_signer_public_key,
-        }) = near_sdk::borsh::from_slice(&args)
-        else {
-            near_sdk::env::panic_str("Invalid args");
-        };
-        expect!(attached_assets.is_empty(), "No assets should be attached");
-        self.fee_discount_signer_public_key = fee_discount_signer_public_key;
-        DexCallResponse::default()
     }
 
     #[payable]
@@ -1943,11 +1909,6 @@ impl XykDex {
         } = args;
         self.fees_claimable_by_anyone
             .balances(&account_id, asset_ids)
-    }
-
-    #[result_serializer(borsh)]
-    pub fn get_fee_discount_signer(&self) -> Option<PublicKey> {
-        self.fee_discount_signer_public_key.clone()
     }
 
     #[result_serializer(borsh)]

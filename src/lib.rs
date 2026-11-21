@@ -21,14 +21,19 @@ use crate::{
     oracle::{MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES},
     storage_management::StorageBalances,
 };
-use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
+use intear_dex_common::{
+    AssetId, Caller, DexId, FULL_FEE_DISCOUNT, FeeDiscountFraction, SwapRequestAmount, TokenAmount,
+    expect,
+};
 use intear_dex_types::{
-    AccountOrDexId, CAN_PAUSE, DexCallAfterDeploy, DexEventData, DirectWithdrawAmount,
-    IntearDexEvent, Operation, QuoteImprovementFee, ReferralFees, UnsignedOracleResponse,
+    AccountOrDexId, CAN_PAUSE, DexCallAfterDeploy, DexEventData, DirectWithdrawAmount, FeeDiscount,
+    FeeDiscountSignaturePayload, IntearDexEvent, MAX_TRADER_FEE_DISCOUNT_BLOCKS, Operation,
+    OperationsFeeDiscount, QuoteImprovementFee, ReferralFees, SignedFeeDiscount,
+    SwapOperationAmount, TraderFeeDiscount, UnsignedOracleResponse,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, IntoStorageKey, NearToken,
-    PanicOnDefault, Promise, PromiseOrValue, PublicKeyHandle,
+    AccountId, BorshStorageKey, CryptoHash, CurveType, Gas, GasWeight, IntoStorageKey, NearToken,
+    PanicOnDefault, Promise, PromiseOrValue, PublicKey, PublicKeyHandle,
     json_types::Base64VecU8,
     near,
     store::{IterableMap, LazyOption, LookupMap},
@@ -82,6 +87,8 @@ pub struct DexEngine {
     /// What each oracle takes for a request, in each asset that it takes
     /// fees in
     oracle_fees: LookupMap<PublicKeyHandle, HashMap<AssetId, TokenAmount>>,
+    /// The key that signs the fee discounts that dexes read
+    fee_discount_signer: Option<PublicKey>,
     /// The translation of each dex's code
     #[borsh(skip)]
     translated_dex_codes: TranslatedDexCodes,
@@ -307,6 +314,7 @@ pub struct RunnerData<'a> {
     referrer: Option<AccountId>,
     dex_events: Vec<DexEventData>,
     oracle_response: Option<&'a OracleResponse>,
+    fee_discount: Option<FeeDiscountFraction>,
 }
 
 #[near]
@@ -326,6 +334,44 @@ impl DexEngine {
             uploaded_code: LazyOption::new(StorageKey::UploadedCode, None),
             oracle_fee_receivers: LookupMap::new(StorageKey::OracleFeeReceivers),
             oracle_fees: LookupMap::new(StorageKey::OracleFees),
+            fee_discount_signer: None,
+            translated_dex_codes: TranslatedDexCodes::default(),
+        }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate(fee_discount_signer: Option<PublicKey>) -> Self {
+        #[near(serializers=[borsh])]
+        struct OldState {
+            dex_balances: LookupMap<DexId, AssetBalances>,
+            dex_storage: DexStorage,
+            dex_codes: LookupMap<DexId, Vec<u8>>,
+            dex_storage_balances: StorageBalances<DexId>,
+            user_balances: LookupMap<AccountId, AssetBalances>,
+            user_storage_balances: StorageBalances<AccountId>,
+            total_in_custody: IterableMap<AssetId, TokenAmount>,
+            paused: bool,
+            trusted_code_deployer: AccountId,
+            uploaded_code: LazyOption<Vec<u8>>,
+            oracle_fee_receivers: LookupMap<PublicKeyHandle, AccountId>,
+            oracle_fees: LookupMap<PublicKeyHandle, HashMap<AssetId, TokenAmount>>,
+        }
+        let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
+        Self {
+            dex_balances: old_state.dex_balances,
+            dex_storage: old_state.dex_storage,
+            dex_codes: old_state.dex_codes,
+            dex_storage_balances: old_state.dex_storage_balances,
+            user_balances: old_state.user_balances,
+            user_storage_balances: old_state.user_storage_balances,
+            total_in_custody: old_state.total_in_custody,
+            paused: old_state.paused,
+            trusted_code_deployer: old_state.trusted_code_deployer,
+            uploaded_code: old_state.uploaded_code,
+            oracle_fee_receivers: old_state.oracle_fee_receivers,
+            oracle_fees: old_state.oracle_fees,
+            fee_discount_signer,
             translated_dex_codes: TranslatedDexCodes::default(),
         }
     }
@@ -457,10 +503,28 @@ impl DexEngine {
         referral_fees: Option<ReferralFees>,
         constraint: Option<TokenAmount>,
         quote_improvement_fee: Option<QuoteImprovementFee>,
+        fee_discount: Option<SignedFeeDiscount>,
     ) -> (TokenAmount, TokenAmount) {
         let mut events = CallEvents::default();
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
+        let trader_id = near_sdk::env::predecessor_account_id();
+        let fee_discount = fee_discount.map(|fee_discount| {
+            let swap_operation = Operation::SwapSimple {
+                dex_id: dex_id.clone(),
+                message: message.clone(),
+                asset_in: asset_in.clone(),
+                asset_out: asset_out.clone(),
+                amount: SwapOperationAmount::Amount(amount),
+                constraint,
+                quote_improvement_fee: quote_improvement_fee.clone(),
+            };
+            self.verify_fee_discount(
+                fee_discount,
+                &[swap_operation],
+                &Caller::Direct(trader_id.clone()),
+            )
+        });
         let amounts = self.internal_swap_simple(
             &mut events,
             dex_id,
@@ -468,12 +532,13 @@ impl DexEngine {
             asset_in,
             asset_out,
             amount,
-            TradeAccount::User(near_sdk::env::predecessor_account_id()),
+            TradeAccount::User(trader_id),
             referrer,
             referral_fees.unwrap_or_default(),
             constraint,
             quote_improvement_fee,
             None,
+            fee_discount,
         );
         events.emit();
         amounts
@@ -504,6 +569,7 @@ impl DexEngine {
             Caller::Direct(near_sdk::env::predecessor_account_id()),
             None,
             referrer,
+            None,
             None,
         );
         events.emit();
@@ -570,6 +636,7 @@ impl DexEngine {
         operations: Vec<Operation>,
         referrer: Option<AccountId>,
         referral_fees: Option<ReferralFees>,
+        fee_discount: Option<SignedFeeDiscount>,
     ) {
         let mut events = CallEvents::default();
         expect!(
@@ -603,18 +670,33 @@ impl DexEngine {
                     )
                 });
         }
+        let trader = Caller::Direct(near_sdk::env::predecessor_account_id());
+        let fee_discount = fee_discount
+            .map(|fee_discount| self.verify_fee_discount(fee_discount, &operations, &trader));
         if let Some(waiting_for_oracles) = self.internal_execute_operations(
             &mut events,
             operations,
-            Caller::Direct(near_sdk::env::predecessor_account_id()),
+            trader,
             None,
             referrer,
             referral_fees.unwrap_or_default(),
             None,
+            fee_discount,
         ) {
             waiting_for_oracles.as_return().detach();
         }
         events.emit();
+    }
+
+    #[payable]
+    #[private]
+    pub fn set_fee_discount_signer(&mut self, fee_discount_signer: Option<PublicKey>) {
+        near_sdk::assert_one_yocto();
+        self.fee_discount_signer = fee_discount_signer;
+    }
+
+    pub fn get_fee_discount_signer(&self) -> Option<PublicKey> {
+        self.fee_discount_signer.clone()
     }
 
     pub fn asset_balance_of(&self, of: AccountOrDexId, asset_id: AssetId) -> Option<TokenAmount> {
@@ -665,10 +747,6 @@ impl DexEngine {
     /// Simulate a swap without executing it. Returns the expected
     /// (amount_in, amount_out) that would result from the swap.
     /// This is a view method and does not modify any state.
-    ///
-    /// A dex that needs an oracle reads `oracle_response` as if the swap's
-    /// operations started with an `OracleRequest` of it that the oracle
-    /// responded to.
     pub fn simulate_swap_simple(
         &self,
         dex_id: DexId,
@@ -681,6 +759,7 @@ impl DexEngine {
         referral_fees: Option<ReferralFees>,
         quote_improvement_fee: Option<QuoteImprovementFee>,
         oracle_response: Option<UnsignedOracleResponse>,
+        fee_discount: Option<FeeDiscountFraction>,
     ) -> (TokenAmount, TokenAmount) {
         self.assert_not_paused();
         let oracle_response = oracle_response.map(
@@ -718,6 +797,7 @@ impl DexEngine {
             referral_fees.unwrap_or_default(),
             quote_improvement_fee,
             oracle_response.as_ref(),
+            fee_discount,
         )
         .map(|swap| {
             (
@@ -741,5 +821,117 @@ impl DexEngine {
 impl DexEngine {
     pub fn assert_not_paused(&self) {
         expect!(!self.paused, "Contract is paused");
+    }
+
+    fn verify_fee_discount(
+        &self,
+        signed_fee_discount: SignedFeeDiscount,
+        operations: &[Operation],
+        caller: &Caller,
+    ) -> FeeDiscountFraction {
+        let SignedFeeDiscount {
+            discount,
+            signature,
+        } = signed_fee_discount;
+        let Some(signer_public_key) = &self.fee_discount_signer else {
+            near_sdk::env::panic_str("Fee discounts are disabled");
+        };
+        let signature_payload = FeeDiscountSignaturePayload {
+            chain_id: near_sdk::env::chain_id(),
+            engine_contract_id: near_sdk::env::current_account_id(),
+            discount,
+        };
+
+        let public_key_bytes = &signer_public_key.as_bytes()[1..];
+        let hash =
+            near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
+        let is_verified = match signer_public_key.curve_type() {
+            CurveType::ED25519 => near_sdk::env::ed25519_verify(
+                signature
+                    .0
+                    .as_slice()
+                    .try_into()
+                    .expect("Invalid signature"),
+                hash,
+                public_key_bytes.try_into().unwrap(),
+            ),
+            CurveType::SECP256K1 => {
+                let Some((recovery_id, signature)) = signature.0.split_last() else {
+                    near_sdk::env::panic_str("Invalid signature");
+                };
+                near_sdk::env::ecrecover(&hash, signature, *recovery_id, true)
+                    .is_some_and(|recovered| recovered.as_slice() == public_key_bytes)
+            }
+            CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
+                signature
+                    .0
+                    .as_slice()
+                    .try_into()
+                    .expect("Invalid signature"),
+                hash,
+                public_key_bytes.try_into().unwrap(),
+            ),
+        };
+        expect!(is_verified, "Fee discount signature verification failed");
+        let block_height = near_sdk::env::block_height();
+        let fee_discount = match signature_payload.discount {
+            FeeDiscount::ForOperations(OperationsFeeDiscount {
+                operations_hash,
+                trader_id,
+                fee_discount,
+                expiration_block_height,
+            }) => {
+                expect!(
+                    CryptoHash::from(operations_hash)
+                        == near_sdk::env::sha256_array(
+                            near_sdk::borsh::to_vec(operations).unwrap()
+                        ),
+                    "Fee discount is for other operations"
+                );
+                if let Some(trader_id) = trader_id {
+                    expect!(
+                        *caller.alleged_account_id() == trader_id,
+                        "Fee discount is for another trader"
+                    );
+                }
+                expect!(
+                    block_height <= expiration_block_height,
+                    "Fee discount expired"
+                );
+                fee_discount
+            }
+            FeeDiscount::ForTrader(TraderFeeDiscount {
+                trader_id,
+                fee_discount,
+                expiration_block_height,
+            }) => {
+                let Caller::Direct(caller_id) = caller else {
+                    near_sdk::env::panic_str(
+                        "Trader fee discounts can only be used in direct calls, not in transfer calls",
+                    );
+                };
+                expect!(
+                    *caller_id == trader_id,
+                    "Fee discount is for another trader"
+                );
+                expect!(
+                    block_height <= expiration_block_height,
+                    "Fee discount expired"
+                );
+                expect!(
+                    expiration_block_height
+                        <= block_height
+                            .checked_add(MAX_TRADER_FEE_DISCOUNT_BLOCKS)
+                            .expect("Overflow"),
+                    "Trader fee discount expires more than {MAX_TRADER_FEE_DISCOUNT_BLOCKS} blocks from now"
+                );
+                fee_discount
+            }
+        };
+        expect!(
+            fee_discount <= FULL_FEE_DISCOUNT,
+            "Fee discount can't exceed 100%"
+        );
+        fee_discount
     }
 }

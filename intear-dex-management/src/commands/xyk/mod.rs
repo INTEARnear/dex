@@ -6,8 +6,7 @@ use near_sdk::NearToken;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use xyk_dex_types::{
-    AssetIndex, CAN_MIGRATE, ClaimMode, FeeConfigurationV2, FeeReceiver, PoolAssets, PoolId,
-    PoolView,
+    AssetIndex, ClaimMode, FeeConfigurationV2, FeeReceiver, PoolAssets, PoolId, PoolView,
 };
 
 use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
@@ -22,7 +21,6 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near
 pub mod community_fees;
 pub mod create_pool;
 pub mod deploy;
-pub mod fee_discounts;
 pub mod fees;
 pub mod init;
 pub mod liquidity;
@@ -105,16 +103,6 @@ impl FeesDex {
     }
 }
 
-impl FeesContext {
-    /// The only account that can change who signs fee discounts
-    pub fn fee_discount_signer_setter(&self) -> AccountId {
-        match self.dex {
-            FeesDex::Xyk => CAN_MIGRATE.to_owned(),
-            FeesDex::Amp => self.dex_id.deployer.clone(),
-        }
-    }
-}
-
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(context = XykContext)]
 #[strum_discriminants(derive(EnumMessage, EnumIter))]
@@ -141,11 +129,6 @@ pub enum XykAction {
     ))]
     /// Fees that anyone can claim for community accounts
     CommunityFees(self::community_fees::CommunityFeesCommands),
-    #[strum_discriminants(strum(
-        message = "fee-discounts   - Who signs fee discounts: show, set-signer, disable"
-    ))]
-    /// Who signs fee discounts: show, set-signer, disable
-    FeeDiscounts(self::fee_discounts::FeeDiscountsCommands),
     #[strum_discriminants(strum(
         message = "create-pool     - Create a private, public or launch pool"
     ))]

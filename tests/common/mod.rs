@@ -2,9 +2,12 @@
 
 use intear_dex::storage_management::TotalStorageBalances;
 use intear_dex_common::{AssetId, DexId};
-use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation};
+use intear_dex_types::{
+    AccountOrDexId, FeeDiscount, FeeDiscountSignaturePayload, IntearDexEvent, Operation,
+    SignedFeeDiscount,
+};
 use near_contract_standards::storage_management::StorageBalance;
-use near_crypto::{KeyType, SecretKey};
+use near_crypto::{KeyType, SecretKey, Signature};
 use near_jsonrpc_client::{JsonRpcClient, methods};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::action::{Action, FunctionCallAction};
@@ -954,6 +957,23 @@ pub async fn import_mainnet_engine(
     (dex_engine_contract, mainnet_state)
 }
 
+/// An account of mainnet in the sandbox, with NEAR and a key of the test's
+pub async fn mainnet_account(sandbox: &Worker<Sandbox>, account_id: &AccountId) -> Account {
+    let key =
+        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    sandbox
+        .patch(account_id)
+        .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000)))
+        .access_key(
+            key.public_key(),
+            near_workspaces::types::AccessKey::full_access(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    Account::from_secret_key(account_id.clone(), key, sandbox)
+}
+
 /// Create `pause.slimedragon.near`, which is allowed to pause the dex engine.
 pub async fn create_pauser(sandbox: &Worker<Sandbox>) -> Account {
     let account_id: AccountId = "pause.slimedragon.near".parse().unwrap();
@@ -1140,6 +1160,51 @@ pub async fn assert_untracked_near(
 /// another test on the shared sandbox can be waiting on.
 pub fn sandbox_rpc_client(sandbox: &Worker<Sandbox>) -> JsonRpcClient {
     JsonRpcClient::new_client().connect(sandbox.rpc_addr())
+}
+
+/// The fee discount signed by `signer` for the engine `engine_contract_id` on `chain_id`
+pub fn sign_fee_discount(
+    discount: FeeDiscount,
+    signer: &SecretKey,
+    chain_id: &str,
+    engine_contract_id: &AccountId,
+) -> SignedFeeDiscount {
+    let signature_payload = FeeDiscountSignaturePayload {
+        chain_id: chain_id.to_string(),
+        engine_contract_id: engine_contract_id.clone(),
+        discount: discount.clone(),
+    };
+    let signature = match signer.sign(&near_sdk::env::sha256_array(
+        near_sdk::borsh::to_vec(&signature_payload).unwrap(),
+    )) {
+        Signature::ED25519(signature) => signature.to_bytes().to_vec(),
+        Signature::SECP256K1(signature) => <[u8; 65]>::from(signature).to_vec(),
+        Signature::MLDSA65(signature) => signature.0.to_vec(),
+    };
+    SignedFeeDiscount {
+        discount,
+        signature: Base64VecU8(signature),
+    }
+}
+
+pub fn operations_hash(operations: &[Operation]) -> Base58CryptoHash {
+    near_sdk::env::sha256_array(near_sdk::borsh::to_vec(operations).unwrap()).into()
+}
+
+pub async fn set_fee_discount_signer(
+    dex_engine_contract: &Contract,
+    signer: Option<&SecretKey>,
+) -> ExecutionFinalResult {
+    dex_engine_contract
+        .call("set_fee_discount_signer")
+        .max_gas()
+        .args_json(json!({
+            "fee_discount_signer": signer.map(|signer| signer.public_key().to_string()),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await
+        .unwrap()
 }
 
 pub fn oracle_key_handle(oracle_key: &SecretKey) -> PublicKeyHandle {

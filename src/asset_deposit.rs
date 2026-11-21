@@ -36,17 +36,23 @@ impl DexEngine {
             });
 
         if let Some(message) = operations {
+            let operations = message.operations();
+            let trader = Caller::OnTransfer {
+                alleged_sender: near_sdk::env::predecessor_account_id(),
+                transfer_of: AssetId::Near,
+            };
+            let fee_discount = message
+                .fee_discount()
+                .map(|fee_discount| self.verify_fee_discount(fee_discount, &operations, &trader));
             if let Some(waiting_for_oracles) = self.internal_execute_operations(
                 &mut events,
-                message.operations(),
-                Caller::OnTransfer {
-                    alleged_sender: near_sdk::env::predecessor_account_id(),
-                    transfer_of: AssetId::Near,
-                },
+                operations,
+                trader,
                 Some(HashMap::from_iter([(AssetId::Near, deposit)])),
                 message.referrer(),
                 message.referral_fees(),
                 None,
+                fee_discount,
             ) {
                 waiting_for_oracles.detach();
             }
@@ -103,17 +109,23 @@ impl FungibleTokenReceiver for DexEngine {
             });
 
         let waiting_for_oracles = if let Some(message) = operations {
+            let operations = message.operations();
+            let trader = Caller::OnTransfer {
+                alleged_sender: sender_id,
+                transfer_of: AssetId::Nep141(contract_id.clone()),
+            };
+            let fee_discount = message
+                .fee_discount()
+                .map(|fee_discount| self.verify_fee_discount(fee_discount, &operations, &trader));
             self.internal_execute_operations(
                 &mut events,
-                message.operations(),
-                Caller::OnTransfer {
-                    alleged_sender: sender_id,
-                    transfer_of: AssetId::Nep141(contract_id.clone()),
-                },
+                operations,
+                trader,
                 Some(HashMap::from_iter([(AssetId::Nep141(contract_id), amount)])),
                 message.referrer(),
                 message.referral_fees(),
                 None,
+                fee_discount,
             )
         } else {
             self.internal_increase_assets(
@@ -178,13 +190,18 @@ impl NonFungibleTokenReceiver for DexEngine {
             });
 
         let waiting_for_oracles = if let Some(message) = message {
+            let operations = message.operations();
+            let trader = Caller::OnTransfer {
+                alleged_sender: previous_owner_id,
+                transfer_of: AssetId::Nep171(contract_id.clone(), token_id.clone()),
+            };
+            let fee_discount = message
+                .fee_discount()
+                .map(|fee_discount| self.verify_fee_discount(fee_discount, &operations, &trader));
             self.internal_execute_operations(
                 &mut events,
-                message.operations(),
-                Caller::OnTransfer {
-                    alleged_sender: previous_owner_id,
-                    transfer_of: AssetId::Nep171(contract_id.clone(), token_id.clone()),
-                },
+                operations,
+                trader,
                 Some(HashMap::from_iter([(
                     AssetId::Nep171(contract_id, token_id),
                     TokenAmount::new(1),
@@ -192,6 +209,7 @@ impl NonFungibleTokenReceiver for DexEngine {
                 message.referrer(),
                 message.referral_fees(),
                 None,
+                fee_discount,
             )
         } else {
             self.internal_increase_assets(
@@ -294,17 +312,23 @@ impl DexEngine {
                 let [token_id] = token_ids.as_slice(),
                 "Operations can only follow a transfer of one token"
             );
+            let operations = message.operations();
+            let trader = Caller::OnTransfer {
+                alleged_sender: sender_id,
+                transfer_of: AssetId::Nep245(contract_id.clone(), token_id.clone()),
+            };
+            let fee_discount = message
+                .fee_discount()
+                .map(|fee_discount| self.verify_fee_discount(fee_discount, &operations, &trader));
             self.internal_execute_operations(
                 &mut events,
-                message.operations(),
-                Caller::OnTransfer {
-                    alleged_sender: sender_id,
-                    transfer_of: AssetId::Nep245(contract_id.clone(), token_id.clone()),
-                },
+                operations,
+                trader,
                 Some(attached_assets),
                 message.referrer(),
                 message.referral_fees(),
                 None,
+                fee_discount,
             )
         } else {
             for ((token_id, previous_owner_id), amount) in token_ids

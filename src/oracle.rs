@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use intear_dex_common::{AssetId, Caller, DexId, SwapRequestAmount, TokenAmount, expect};
+use intear_dex_common::{
+    AssetId, Caller, DexId, FeeDiscountFraction, SwapRequestAmount, TokenAmount, expect,
+};
 use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation, OracleFeeSwap, ReferralFees};
 use near_sdk::{
     AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
@@ -229,6 +231,7 @@ impl DexEngine {
         held_assets: Option<HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
+        fee_discount: Option<FeeDiscountFraction>,
     ) -> OracleRequestOutcome {
         let Ok(response) = near_sdk::env::promise_result_checked(0, MAX_ORACLE_RESPONSE_BYTES)
         else {
@@ -252,6 +255,7 @@ impl DexEngine {
                 referrer,
                 referral_fees,
                 Some(&oracle_response),
+                fee_discount,
             )
             .is_some()
         {
@@ -393,6 +397,7 @@ impl DexEngine {
         mut sandboxed_assets: Option<HashMap<AssetId, TokenAmount>>,
         referrer: Option<AccountId>,
         referral_fees: ReferralFees,
+        fee_discount: Option<FeeDiscountFraction>,
     ) -> Promise {
         let Operation::OracleRequest {
             oracle_key,
@@ -465,6 +470,7 @@ impl DexEngine {
                 constraint,
                 None,
                 None,
+                fee_discount,
             );
         }
         match &mut sandboxed_assets {
@@ -510,6 +516,7 @@ impl DexEngine {
                 "held_assets": sandboxed_assets,
                 "referrer": referrer,
                 "referral_fees": referral_fees,
+                "fee_discount": fee_discount,
             })
             .to_string(),
             NearToken::ZERO,

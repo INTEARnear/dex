@@ -3,10 +3,14 @@ use crate::common::*;
 use intear_dex::oracle::{
     GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
 };
-use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
+use intear_dex_common::{
+    AssetId, DexId, FULL_FEE_DISCOUNT, FeeDiscountFraction, FeeFraction, SwapRequestAmount,
+    TokenAmount,
+};
 use intear_dex_types::{
-    AccountOrDexId, DexCallAfterDeploy, Operation, OracleFeeSwap, QuoteImprovementFee,
-    SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
+    AccountOrDexId, DexCallAfterDeploy, FeeDiscount, Operation, OperationsFeeDiscount,
+    OracleFeeSwap, QuoteImprovementFee, SignedFeeDiscount, SwapAdvancedMode, SwapOperationAmount,
+    SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
@@ -7677,4 +7681,510 @@ async fn test_oracle_fee_swap() {
     );
     wait_for_blocks(&sandbox, 3).await;
     assert_untracked_near(&dex_engine_contract).await.unwrap();
+}
+
+async fn get_fee_discount_signer(dex_engine_contract: &Contract) -> Option<near_sdk::PublicKey> {
+    dex_engine_contract
+        .view("get_fee_discount_signer")
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_set_fee_discount_signer() {
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user1,
+        ..
+    } = setup_test_environment().await;
+    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
+    let other_fee_discount_signer =
+        SecretKey::from_seed(KeyType::SECP256K1, "other-fee-discount-signer");
+    let public_key = |signer: &SecretKey| -> near_sdk::PublicKey {
+        signer.public_key().to_string().parse().unwrap()
+    };
+
+    // A new engine has no signer, so fee discounts are disabled
+    assert_eq!(get_fee_discount_signer(&dex_engine_contract).await, None);
+
+    // Only the engine's own account sets it, not even the trusted code deployer
+    for account in [&user1, &deployer] {
+        let result = account
+            .call(dex_engine_contract.id(), "set_fee_discount_signer")
+            .max_gas()
+            .args_json(json!({ "fee_discount_signer": public_key(&fee_discount_signer) }))
+            .deposit(NearToken::from_yoctonear(1))
+            .transact()
+            .await
+            .unwrap();
+        assert!(
+            format!("{result:?}").contains("Method set_fee_discount_signer is private"),
+            "{result:#?}"
+        );
+    }
+    assert_eq!(get_fee_discount_signer(&dex_engine_contract).await, None);
+
+    for signer in [&fee_discount_signer, &other_fee_discount_signer] {
+        let result = set_fee_discount_signer(&dex_engine_contract, Some(signer)).await;
+        assert_success(&result).unwrap();
+        assert_eq!(
+            get_fee_discount_signer(&dex_engine_contract).await,
+            Some(public_key(signer))
+        );
+    }
+
+    // `None` disables fee discounts again
+    let result = set_fee_discount_signer(&dex_engine_contract, None).await;
+    assert_success(&result).unwrap();
+    assert_eq!(get_fee_discount_signer(&dex_engine_contract).await, None);
+}
+
+#[tokio::test]
+async fn test_fee_discount_signer_migration() {
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        deployer,
+        ..
+    } = setup_test_environment().await;
+    let state = || async {
+        dex_engine_contract
+            .view_state()
+            .prefix(b"STATE")
+            .await
+            .unwrap()
+            .remove(b"STATE".as_slice())
+            .unwrap()
+    };
+
+    // The state from before the fee discount signer, which is the last field that's stored, and
+    // which a new engine doesn't have
+    let state_with_signer = state().await;
+    let (no_signer, state_before_migration) = state_with_signer.split_last().unwrap();
+    assert_eq!(*no_signer, 0);
+    sandbox
+        .patch(dex_engine_contract.id())
+        .state(b"STATE", state_before_migration)
+        .transact()
+        .await
+        .unwrap();
+    // The new code can't read the state like that
+    is_paused(&dex_engine_contract).await.unwrap_err();
+
+    // The migrate that `engine upgrade deploy` calls on the new code in the receipt that deploys
+    // it, so that the engine can store the code chunks with the old code that reads the old state
+    let fee_discount_signer: near_sdk::PublicKey =
+        SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer")
+            .public_key()
+            .to_string()
+            .parse()
+            .unwrap();
+    let result = dex_engine_contract
+        .call("migrate")
+        .max_gas()
+        .args_json(json!({ "fee_discount_signer": fee_discount_signer }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    assert_eq!(
+        get_fee_discount_signer(&dex_engine_contract).await,
+        Some(fee_discount_signer.clone())
+    );
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+    assert_eq!(
+        dex_engine_contract
+            .view("get_trusted_code_deployer")
+            .await
+            .unwrap()
+            .json::<AccountId>()
+            .unwrap(),
+        *deployer.id()
+    );
+    assert_eq!(
+        state().await,
+        [
+            state_before_migration.to_vec(),
+            near_sdk::borsh::to_vec(&Some(fee_discount_signer)).unwrap(),
+        ]
+        .concat()
+    );
+}
+
+/// The borsh of what a view of `dex_id` returns
+async fn dex_view_bytes(
+    dex_engine_contract: &Contract,
+    dex_id: &DexId,
+    method: &str,
+    args: Vec<u8>,
+) -> Vec<u8> {
+    dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": method,
+            "args": Base64VecU8(args),
+        }))
+        .await
+        .unwrap()
+        .json::<Base64VecU8>()
+        .unwrap()
+        .0
+}
+
+/// The borsh of every pool of an xyk or amp dex, which both view by pool ID
+async fn pool_views(dex_engine_contract: &Contract, dex_id: &DexId) -> Vec<Vec<u8>> {
+    let pool_count: u32 = near_sdk::borsh::from_slice(
+        &dex_view_bytes(dex_engine_contract, dex_id, "get_pool_count", vec![]).await,
+    )
+    .unwrap();
+    assert!(pool_count > 0, "{dex_id} has no pools");
+    let mut pools = Vec::new();
+    for pool_id in 0..pool_count {
+        pools.push(
+            dex_view_bytes(
+                dex_engine_contract,
+                dex_id,
+                "get_pool",
+                near_sdk::borsh::to_vec(&pool_id).unwrap(),
+            )
+            .await,
+        );
+    }
+    pools
+}
+
+/// The pools of xyk `views`, without the fees of a swap at the time of the view, which fee
+/// schedules change, and without the share growth of reinvested fees, which the views of the
+/// mainnet code don't have
+fn xyk_pools(views: &[Vec<u8>]) -> Vec<Option<xyk_dex_types::PoolView>> {
+    views
+        .iter()
+        .map(|view| {
+            let mut pool: Option<xyk_dex_types::PoolView> =
+                near_sdk::borsh::from_slice(view).unwrap();
+            match &mut pool {
+                Some(
+                    xyk_dex_types::PoolView::Private { fees, .. }
+                    | xyk_dex_types::PoolView::Launch { fees, .. },
+                ) => fees.receivers.clear(),
+                Some(xyk_dex_types::PoolView::Public {
+                    fees,
+                    reinvest_share_growth,
+                    ..
+                }) => {
+                    fees.receivers.clear();
+                    *reinvest_share_growth = None;
+                }
+                None => {}
+            }
+            pool
+        })
+        .collect()
+}
+
+fn amp_pools(views: &[Vec<u8>]) -> Vec<Option<amp_dex_types::PoolView>> {
+    views
+        .iter()
+        .map(|view| near_sdk::borsh::from_slice(view).unwrap())
+        .collect()
+}
+
+fn assert_same_pools<Pool: PartialEq + std::fmt::Debug>(pools: Vec<Pool>, expected: Vec<Pool>) {
+    assert_eq!(pools.len(), expected.len());
+    for (pool_id, (pool, expected)) in pools.iter().zip(&expected).enumerate() {
+        assert_eq!(pool, expected, "Pool {pool_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_fee_discount_migration_of_mainnet_state() {
+    let sandbox = near_workspaces::sandbox().await.unwrap();
+    let (dex_engine_contract, _) = import_mainnet_engine(&sandbox).await;
+    // The owner of the dexes, which is the trusted code deployer of the engine
+    let owner = mainnet_account(&sandbox, &"slimedragon.near".parse().unwrap()).await;
+    let xyk_dex_id = DexId {
+        deployer: owner.id().clone(),
+        id: "xyk".to_string(),
+    };
+    let amp_dex_id = DexId {
+        deployer: owner.id().clone(),
+        id: "amp".to_string(),
+    };
+    let xyk_pools_before_migration = pool_views(&dex_engine_contract, &xyk_dex_id).await;
+    let amp_pools_before_migration = pool_views(&dex_engine_contract, &amp_dex_id).await;
+    let total_storage_balances = async || {
+        near_sdk::serde_json::to_value(
+            get_total_storage_balances(&dex_engine_contract)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    };
+
+    // A trader who swaps NEAR on a pool of the xyk dex that has NEAR and fees
+    let (pool_id, asset_out) = xyk_pools_before_migration
+        .iter()
+        .enumerate()
+        .find_map(|(pool_id, pool)| {
+            let pool: Option<xyk_dex_types::PoolView> = near_sdk::borsh::from_slice(pool).unwrap();
+            let (assets, fees) = match pool? {
+                xyk_dex_types::PoolView::Private { assets, fees, .. }
+                | xyk_dex_types::PoolView::Public { assets, fees, .. } => (assets, fees),
+                xyk_dex_types::PoolView::Launch {
+                    quote_asset,
+                    launched_asset,
+                    fees,
+                    ..
+                } => ((quote_asset, launched_asset), fees),
+            };
+            let has_near_liquidity = [&assets.0, &assets.1]
+                .iter()
+                .all(|asset| asset.balance.get() > 10u128.pow(24));
+            let asset_out = match (&assets.0.asset_id, &assets.1.asset_id) {
+                (AssetId::Near, asset_out) | (asset_out, AssetId::Near) => asset_out.clone(),
+                _ => return None,
+            };
+            (has_near_liquidity && !fees.receivers.is_empty()).then(|| {
+                (
+                    xyk_dex_types::PoolId::new(u32::try_from(pool_id).unwrap()),
+                    asset_out,
+                )
+            })
+        })
+        .expect("No pool of NEAR with liquidity and fees");
+    let trader = sandbox.dev_create_account().await.unwrap();
+    for (method, args, deposit) in [
+        ("storage_deposit", json!({}), NearToken::from_near(1)),
+        (
+            "register_assets",
+            json!({ "asset_ids": [AssetId::Near, asset_out.clone()] }),
+            NearToken::from_yoctonear(1),
+        ),
+        ("deposit_near", json!({}), NearToken::from_near(10)),
+    ] {
+        let result = trader
+            .call(dex_engine_contract.id(), method)
+            .max_gas()
+            .deposit(deposit)
+            .args_json(args)
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+    let near_in = SwapRequestAmount::ExactIn(TokenAmount::new(10u128.pow(22)));
+    let single_pool_message =
+        near_sdk::borsh::to_vec(&xyk_dex_types::SwapArgs::single_pool(pool_id)).unwrap();
+    let swap_operations = |message: Vec<u8>| {
+        vec![Operation::SwapSimple {
+            dex_id: xyk_dex_id.clone(),
+            message: Base64VecU8(message),
+            asset_in: AssetId::Near,
+            asset_out: asset_out.clone(),
+            amount: SwapOperationAmount::Amount(near_in),
+            constraint: None,
+            quote_improvement_fee: None,
+        }]
+    };
+    let simulate = async |fee_discount: Option<FeeDiscountFraction>| {
+        dex_engine_contract
+            .view("simulate_swap_simple")
+            .args_json(json!({
+                "dex_id": xyk_dex_id,
+                "message": Base64VecU8(single_pool_message.clone()),
+                "trader": trader.id(),
+                "asset_in": AssetId::Near,
+                "asset_out": asset_out,
+                "amount": near_in,
+                "fee_discount": fee_discount,
+            }))
+            .await
+            .unwrap()
+            .json::<(U128, U128)>()
+            .unwrap()
+            .1
+            .0
+    };
+    let balance_out = async || {
+        get_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(trader.id().clone()),
+            asset_out.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+    };
+    let swap = async |message: Vec<u8>, fee_discount: Option<SignedFeeDiscount>| {
+        let balance_before = balance_out().await;
+        let result = trader
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": swap_operations(message),
+                "fee_discount": fee_discount,
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        balance_out().await - balance_before
+    };
+
+    let total_storage_balances_before_migration = total_storage_balances().await;
+
+    // The engine of this checkout, as `engine upgrade deploy` deploys it: the old code stores the
+    // chunks, and migrate runs on the new code in the receipt that deploys it
+    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
+    let fee_discount_signer_public_key: near_sdk::PublicKey = fee_discount_signer
+        .public_key()
+        .to_string()
+        .parse()
+        .unwrap();
+    let result = deploy_code_in_chunks(
+        &dex_engine_contract,
+        &get_compiled_wasms().await.contract_wasm,
+        700_000,
+        "migrate",
+        json!({ "fee_discount_signer": fee_discount_signer_public_key })
+            .to_string()
+            .as_bytes(),
+    )
+    .await;
+    assert_success(&result).unwrap();
+    println!(
+        "GAS {:<40} {:>8.3} TGas",
+        "deploy the engine and migrate",
+        result.total_gas_burnt.as_gas() as f64 / 1e12
+    );
+    create_translator(&dex_engine_contract).await;
+    // The engine reads the state that it had, with the signer, and the old dexes still read theirs
+    assert_eq!(
+        get_fee_discount_signer(&dex_engine_contract).await,
+        Some(fee_discount_signer_public_key)
+    );
+    assert_eq!(
+        dex_engine_contract
+            .view("get_trusted_code_deployer")
+            .await
+            .unwrap()
+            .json::<AccountId>()
+            .unwrap(),
+        *owner.id()
+    );
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
+    assert_eq!(
+        total_storage_balances().await,
+        total_storage_balances_before_migration
+    );
+    assert_same_pools(
+        xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
+        xyk_pools(&xyk_pools_before_migration),
+    );
+    // The old code of the dexes swaps on the new engine until they're deployed too
+    let expected_out = simulate(None).await;
+    assert_eq!(swap(single_pool_message.clone(), None).await, expected_out);
+    let xyk_pools_before_dex_migration = pool_views(&dex_engine_contract, &xyk_dex_id).await;
+
+    // What `xyk deploy` and `amp deploy` send: a top-up of the dex's storage balance for the code,
+    // and the code with the migration, which runs once the code is stored
+    for (dex_id, code) in [
+        (&xyk_dex_id, &get_compiled_wasms().await.xyk_dex_wasm),
+        (&amp_dex_id, &get_compiled_wasms().await.amp_dex_wasm),
+    ] {
+        let result = owner
+            .batch(dex_engine_contract.id())
+            .call(
+                Function::new("dex_storage_deposit")
+                    .args_json(json!({ "dex_id": dex_id }))
+                    .deposit(NearToken::from_near(5))
+                    .gas(Gas::from_tgas(10)),
+            )
+            .call(
+                Function::new("deploy_dex_code")
+                    .args_json(json!({
+                        "last_part_of_id": dex_id.id,
+                        "code_base64": BASE64_STANDARD.encode(code),
+                        "call_after_deploy": DexCallAfterDeploy {
+                            method: "migrate".to_string(),
+                            args: Base64VecU8(Vec::new()),
+                            attached_assets: HashMap::new(),
+                        },
+                    }))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(980)),
+            )
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        println!(
+            "GAS {:<40} {:>8.3} TGas",
+            format!("top up, deploy {} and migrate", dex_id.id),
+            result.total_gas_burnt.as_gas() as f64 / 1e12
+        );
+    }
+    // Every pool is as it was, which the new code views in the layout of its version
+    assert_same_pools(
+        xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
+        xyk_pools(&xyk_pools_before_dex_migration),
+    );
+    assert_same_pools(
+        amp_pools(&pool_views(&dex_engine_contract, &amp_dex_id).await),
+        amp_pools(&amp_pools_before_migration),
+    );
+
+    // On the migrated xyk dex, the trader swaps without a fee discount, with one for the
+    // operations, and with a message from before the engine took fee discounts
+    let expected_out = simulate(None).await;
+    assert_eq!(swap(single_pool_message.clone(), None).await, expected_out);
+
+    let expected_out = simulate(Some(FULL_FEE_DISCOUNT)).await;
+    assert!(expected_out > simulate(None).await);
+    let chain_id = sandbox.status().await.unwrap().chain_id;
+    let fee_discount = sign_fee_discount(
+        FeeDiscount::ForOperations(OperationsFeeDiscount {
+            operations_hash: operations_hash(&swap_operations(single_pool_message.clone())),
+            trader_id: Some(trader.id().clone()),
+            fee_discount: FULL_FEE_DISCOUNT,
+            expiration_block_height: sandbox.view_block().await.unwrap().height() + 1_000,
+        }),
+        &fee_discount_signer,
+        &chain_id,
+        dex_engine_contract.id(),
+    );
+    assert_eq!(
+        swap(single_pool_message.clone(), Some(fee_discount)).await,
+        expected_out
+    );
+
+    // The discount that the message carries is ignored
+    let routes = xyk_dex_types::SwapArgs::single_pool(pool_id).routes;
+    let message_with_old_fee_discount = [
+        near_sdk::borsh::to_vec(&routes).unwrap(),
+        near_sdk::borsh::to_vec(&(
+            1u8,
+            &routes,
+            AssetId::Near,
+            &asset_out,
+            Some(trader.id()),
+            near_in,
+            FULL_FEE_DISCOUNT,
+            u64::MAX,
+            vec![0u8; 64],
+        ))
+        .unwrap(),
+    ]
+    .concat();
+    let expected_out = simulate(None).await;
+    assert_eq!(
+        swap(message_with_old_fee_discount, None).await,
+        expected_out
+    );
 }

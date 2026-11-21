@@ -85,6 +85,7 @@ macro_rules! impl_supported_host_functions {
         $crate::impl_host_function!($var, ml_dsa_verify);
         $crate::impl_host_function!($var, dex_event);
         $crate::impl_host_function!($var, oracle_request);
+        $crate::impl_host_function!($var, fee_discount);
     };
 }
 
@@ -845,6 +846,13 @@ pub fn oracle_request(
     let response = oracle_response.response.clone();
     caller.data_mut().registers.insert(register_id, response);
     Ok(1)
+}
+
+pub fn fee_discount(caller: Caller<'_, RunnerData>) -> Result<u32, wasmi::Error> {
+    Ok(caller
+        .data()
+        .fee_discount
+        .map_or(0, |fee_discount| fee_discount.get()))
 }
 
 fn alleged_event_user(data: &RunnerData) -> Option<AccountId> {

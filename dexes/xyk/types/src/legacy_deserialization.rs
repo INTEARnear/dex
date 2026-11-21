@@ -1,4 +1,4 @@
-use intear_dex_common::{AssetId, SwapRequest};
+use intear_dex_common::{AssetId, FeeDiscountInSwapMessage, SwapRequest};
 use near_sdk::{
     AccountId,
     borsh::{BorshDeserialize, io::Read},
@@ -10,12 +10,9 @@ use near_sdk::{
 use crate::{
     AssetWithBalance, ClaimMode, CurrentFees, FeeAmount, FeeConfigurationV2, FeeFraction,
     FeePayoutType, FeeReceiver, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolView, ProviderShares,
-    ShareGrowth, SwapArgs, SwapFeeDiscount, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
+    ShareGrowth, SwapArgs, SwapRoute, TokenAmount, TotalShares, XykDexEvent,
 };
 
-/// The message of a swap through a single pool without a fee discount is just its pool ID, which
-/// is what dex versions from before routes read, and messages from before the engine took
-/// referral fees end with them
 impl BorshDeserialize for SwapArgs {
     fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
         let mut bytes = Vec::new();
@@ -25,7 +22,9 @@ impl BorshDeserialize for SwapArgs {
         }
         let mut rest = bytes.as_slice();
         let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
-        let fee_discount = SwapFeeDiscount::deserialize(&mut rest)?;
+        if !rest.is_empty() {
+            FeeDiscountInSwapMessage::<Vec<SwapRoute>>::deserialize(&mut rest)?;
+        }
         if !rest.is_empty() {
             // Referral fees of messages from before the engine took them, which are ignored
             <Vec<(AccountId, FeeFraction)> as BorshDeserialize>::deserialize(&mut rest)?;
@@ -36,10 +35,7 @@ impl BorshDeserialize for SwapArgs {
                 "Unexpected bytes after swap args",
             ));
         }
-        Ok(Self {
-            routes,
-            fee_discount,
-        })
+        Ok(Self { routes })
     }
 }
 

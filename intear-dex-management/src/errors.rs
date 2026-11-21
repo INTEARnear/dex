@@ -167,16 +167,8 @@ pub enum PreflightError {
         "{ENGINE_ACCOUNT_ID} runs code from before call_after_deploy, which would deploy the code without calling {method} on it"
     )]
     EngineWithoutCallAfterDeploy { method: String },
-    #[error("{signer_id} can't change who signs fee discounts; only {setter_id} can")]
-    NotAllowedToSetFeeDiscountSigner {
-        signer_id: AccountId,
-        setter_id: AccountId,
-    },
-    #[error("{dex_id} already has {fee_discounts}")]
-    FeeDiscountSignerUnchanged {
-        dex_id: DexId,
-        fee_discounts: String,
-    },
+    #[error("{ENGINE_ACCOUNT_ID} already has {fee_discounts}")]
+    FeeDiscountSignerUnchanged { fee_discounts: String },
     #[error("These fees aren't allowed: {problem}")]
     FeesNotAllowed { problem: String },
     #[error("A pool needs two different assets, not {asset_id} twice")]
@@ -311,9 +303,6 @@ impl PreflightError {
             } => Some(format!(
                 "Rescue to an account that has storage on {token_id}, or pay for {receiver_id}'s storage there with its storage_deposit first"
             )),
-            Self::NotAllowedToSetFeeDiscountSigner { setter_id, .. } => {
-                Some(format!("Sign with {setter_id}"))
-            }
             Self::NotPoolOwner { owner_id, .. } => Some(format!("Sign with {owner_id}")),
             Self::NotDexOwner { dex_id, .. } => Some(format!("Sign with {}", dex_id.deployer)),
             Self::NoOtcBalance { .. } => {

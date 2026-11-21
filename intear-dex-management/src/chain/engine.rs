@@ -11,8 +11,8 @@ use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::types::{AccountId, BlockId, BlockReference, StoreKey};
 use near_primitives::views::{AccessKeyPermissionView, BlockView, QueryRequest, ViewStateResult};
-use near_sdk::NearToken;
 use near_sdk::json_types::{Base64VecU8, U128};
+use near_sdk::{NearToken, PublicKey};
 use serde_json::json;
 
 use crate::deployment::ENGINE_ACCOUNT_ID;
@@ -121,6 +121,20 @@ pub fn trusted_code_deployer(
         block_reference,
         &ENGINE_ACCOUNT_ID.to_owned(),
         "get_trusted_code_deployer",
+        json!({}),
+    )
+}
+
+/// The key that signs fee discounts on the engine, if any
+pub fn fee_discount_signer(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<Option<PublicKey>> {
+    super::view_json(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "get_fee_discount_signer",
         json!({}),
     )
 }

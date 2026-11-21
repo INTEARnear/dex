@@ -5,10 +5,8 @@ use std::{fmt, num::ParseIntError, str::FromStr};
 use intear_dex_common::AssetId;
 pub use intear_dex_common::{
     AssetIndex, AssetWithBalance, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FULL_ROUTE_FRACTION,
-    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, MAX_TRADER_FEE_DISCOUNT_BLOCKS,
-    PayoutGroupShares, PoolAssets, ProviderShares, RouteFraction, SetFeeDiscountSignerArgs,
-    SignedTraderFeeDiscount, TokenAmount, TotalShares, TraderFeeDiscount,
-    TraderFeeDiscountSignaturePayload, WithdrawFeesArgs,
+    FeeDiscountFraction, FeeFraction, GetPendingFeesArgs, PayoutGroupShares, PoolAssets,
+    ProviderShares, RouteFraction, TokenAmount, TotalShares, WithdrawFeesArgs,
 };
 use near_sdk::{
     AccountId, AccountIdRef, PublicKeyHandle,
@@ -191,14 +189,13 @@ impl fmt::Display for Amplification {
 /// The most decimals an asset can have, so that a whole token fits in u128
 pub const MAX_DECIMALS: u8 = 38;
 
-#[near(serializers=[borsh])]
-#[derive(Debug)]
+#[derive(BorshSerialize, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct SwapArgs {
     /// The parts of the swap's amount and the pools they swap through. Every pool that an oracle
     /// rates asks the same oracle, which one `OracleRequest` asks for the prices of all their
     /// assets with [`PricesRequest::of_pools`].
     pub routes: Vec<SwapRoute>,
-    pub fee_discount: SwapFeeDiscount,
 }
 
 impl SwapArgs {
@@ -208,7 +205,6 @@ impl SwapArgs {
                 fraction: FULL_ROUTE_FRACTION,
                 pool_ids: vec![pool_id],
             }],
-            fee_discount: SwapFeeDiscount::None,
         }
     }
 }
@@ -221,12 +217,6 @@ pub struct SwapRoute {
     /// one into its other asset, and the last one outputs the swap's asset out.
     pub pool_ids: Vec<PoolId>,
 }
-
-pub type SwapFeeDiscount = intear_dex_common::SwapFeeDiscount<Vec<SwapRoute>>;
-pub type SignedFeeDiscount = intear_dex_common::SignedFeeDiscount<Vec<SwapRoute>>;
-pub type FeeDiscount = intear_dex_common::FeeDiscount<Vec<SwapRoute>>;
-pub type FeeDiscountSignaturePayload =
-    intear_dex_common::FeeDiscountSignaturePayload<Vec<SwapRoute>>;
 
 /// Only the owner of the dex, the account that deployed it, can create pools
 #[near(serializers=[borsh])]

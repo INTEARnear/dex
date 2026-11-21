@@ -1,36 +1,31 @@
-use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
 use near_primitives::gas::Gas;
-use near_primitives::types::AccountId;
-use near_sdk::PublicKey;
-use near_sdk::json_types::Base64VecU8;
+use near_sdk::{NearToken, PublicKey};
 use serde_json::json;
 use std::str::FromStr;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
-use xyk_dex_types::SetFeeDiscountSignerArgs;
 
-use super::FeesContext;
-use crate::chain::{engine, xyk};
+use crate::chain::engine;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
-use crate::outcome::ExpectedOutcome;
-use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan};
+use crate::outcome::{DexEvents, ExpectedOutcome};
+use crate::planning::{self, FunctionCall, TransactionPlan};
 
-const SET_FEE_DISCOUNT_SIGNER_GAS: Gas = Gas::from_teragas(50);
+const SET_FEE_DISCOUNT_SIGNER_GAS: Gas = Gas::from_teragas(10);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = FeesContext)]
+#[interactive_clap(context = crate::GlobalContext)]
 pub struct FeeDiscountsCommands {
     #[interactive_clap(subcommand)]
     action: FeeDiscountsAction,
 }
 
 #[derive(Debug, EnumDiscriminants, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(context = FeesContext)]
+#[interactive_clap(context = crate::GlobalContext)]
 #[strum_discriminants(derive(EnumMessage, EnumIter))]
 /// What do you want to do with fee discounts?
 pub enum FeeDiscountsAction {
@@ -43,14 +38,14 @@ pub enum FeeDiscountsAction {
     /// Set the key that signs fee discounts
     SetSigner(SetSigner),
     #[strum_discriminants(strum(
-        message = "disable     - Remove the signer, so that the dex accepts no fee discount"
+        message = "disable     - Remove the signer, so that the engine accepts no fee discount"
     ))]
-    /// Remove the signer, so that the dex accepts no fee discount
+    /// Remove the signer, so that the engine accepts no fee discount
     Disable(Disable),
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = FeesContext)]
+#[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = ShowContext)]
 pub struct Show {
     #[interactive_clap(named_arg)]
@@ -63,41 +58,36 @@ pub struct ShowContext(ArgsForViewContext);
 
 impl ShowContext {
     pub fn from_previous_context(
-        previous_context: FeesContext,
+        previous_context: crate::GlobalContext,
         _scope: &<Show as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
-        let dex_id = previous_context.dex_id;
-        let output_format = previous_context.global_context.output_format;
+        let output_format = previous_context.output_format;
         let on_after_getting_block_reference_callback: OnAfterGettingBlockReferenceCallback =
             std::sync::Arc::new(move |network_config, block_reference| {
                 let block_reference = engine::engine_view_block(network_config, block_reference)?;
                 let fee_discount_signer =
-                    xyk::fee_discount_signer(network_config, &block_reference, &dex_id)?;
+                    engine::fee_discount_signer(network_config, &block_reference)?;
                 match output_format {
                     OutputFormat::Table => {
                         print!(
                             "{}",
-                            display::key_value_table(vec![
-                                ("Dex", dex_id.to_string()),
-                                (
-                                    "Fee discount signer",
-                                    match &fee_discount_signer {
-                                        Some(public_key) => public_key.to_string(),
-                                        None => "none, so fee discounts are disabled".to_string(),
-                                    },
-                                ),
-                            ])
+                            display::key_value_table(vec![(
+                                "Fee discount signer",
+                                match &fee_discount_signer {
+                                    Some(public_key) => public_key.to_string(),
+                                    None => "none, so fee discounts are disabled".to_string(),
+                                },
+                            ),])
                         );
                     }
                     OutputFormat::Json => display::print_json(&json!({
-                        "dex_id": dex_id,
                         "fee_discount_signer": fee_discount_signer,
                     }))?,
                 }
                 Ok(())
             });
         Ok(Self(ArgsForViewContext {
-            config: previous_context.global_context.config,
+            config: previous_context.config,
             interacting_with_account_ids: vec![ENGINE_ACCOUNT_ID.to_owned()],
             on_after_getting_block_reference_callback,
         }))
@@ -111,12 +101,9 @@ impl From<ShowContext> for ArgsForViewContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = FeesContext)]
+#[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = SetSignerContext)]
 pub struct SetSigner {
-    #[interactive_clap(skip_default_input_arg)]
-    /// Which account sets the signer? Only slimedragon.near can on xyk dexes, and the deployer on amp dexes
-    signer_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(skip_default_input_arg)]
     /// The key that signs fee discounts from now on, e.g. 'ed25519:…'
     fee_discount_signer: near_cli_rs::types::public_key::PublicKey,
@@ -126,14 +113,8 @@ pub struct SetSigner {
 }
 
 impl SetSigner {
-    fn input_signer_account_id(
-        context: &FeesContext,
-    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-        input_signer_account_id(context)
-    }
-
     fn input_fee_discount_signer(
-        _context: &FeesContext,
+        _context: &crate::GlobalContext,
     ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::public_key::PublicKey>> {
         match inquire::CustomType::new("Which key signs fee discounts from now on? e.g. ed25519:…")
             .with_error_message("That isn't a public key like ed25519:…")
@@ -154,7 +135,7 @@ pub struct SetSignerContext(ActionContext);
 
 impl SetSignerContext {
     pub fn from_previous_context(
-        previous_context: FeesContext,
+        previous_context: crate::GlobalContext,
         scope: &<SetSigner as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let fee_discount_signer = PublicKey::from_str(&scope.fee_discount_signer.to_string())
@@ -166,7 +147,6 @@ impl SetSignerContext {
             })?;
         Ok(Self(change_fee_discount_signer_action_context(
             &previous_context,
-            scope.signer_account_id.clone().into(),
             Some(fee_discount_signer),
         )))
     }
@@ -179,23 +159,12 @@ impl From<SetSignerContext> for ActionContext {
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
-#[interactive_clap(input_context = FeesContext)]
+#[interactive_clap(input_context = crate::GlobalContext)]
 #[interactive_clap(output_context = DisableContext)]
 pub struct Disable {
-    #[interactive_clap(skip_default_input_arg)]
-    /// Which account disables fee discounts? Only slimedragon.near can on xyk dexes, and the deployer on amp dexes
-    signer_account_id: near_cli_rs::types::account_id::AccountId,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
-}
-
-impl Disable {
-    fn input_signer_account_id(
-        context: &FeesContext,
-    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-        input_signer_account_id(context)
-    }
 }
 
 #[derive(Clone)]
@@ -203,12 +172,11 @@ pub struct DisableContext(ActionContext);
 
 impl DisableContext {
     pub fn from_previous_context(
-        previous_context: FeesContext,
-        scope: &<Disable as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+        previous_context: crate::GlobalContext,
+        _scope: &<Disable as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         Ok(Self(change_fee_discount_signer_action_context(
             &previous_context,
-            scope.signer_account_id.clone().into(),
             None,
         )))
     }
@@ -220,18 +188,6 @@ impl From<DisableContext> for ActionContext {
     }
 }
 
-fn input_signer_account_id(
-    context: &FeesContext,
-) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
-    near_cli_rs::common::input_signer_account_id_from_used_account_list(
-        &context.global_context.config.credentials_home_dir,
-        &format!(
-            "Which account signs? It has to be {}",
-            context.fee_discount_signer_setter()
-        ),
-    )
-}
-
 /// What `fee_discount_signer` makes of fee discounts: who signs them, or that there are none
 fn fee_discounts_label(fee_discount_signer: Option<&PublicKey>) -> String {
     match fee_discount_signer {
@@ -240,73 +196,52 @@ fn fee_discounts_label(fee_discount_signer: Option<&PublicKey>) -> String {
     }
 }
 
-/// The transaction that sets the key signing fee discounts on the dex to
+/// The transaction of the engine's own account that sets the key signing fee discounts on it to
 /// `new_fee_discount_signer`, or removes it with `None`
 fn change_fee_discount_signer_action_context(
-    context: &FeesContext,
-    signer_id: AccountId,
+    global_context: &crate::GlobalContext,
     new_fee_discount_signer: Option<PublicKey>,
 ) -> ActionContext {
-    let dex_id: DexId = context.dex_id.clone();
-    let setter_id = context.fee_discount_signer_setter();
-    let dex = context.dex;
-    planning::write_action_context(&context.global_context, signer_id, move |preflight| {
-        preflight.ensure_engine_not_paused()?;
-        if preflight.signer_id != setter_id {
-            return Err(PreflightError::NotAllowedToSetFeeDiscountSigner {
-                signer_id: preflight.signer_id.clone(),
-                setter_id: setter_id.clone(),
+    planning::write_action_context(
+        global_context,
+        ENGINE_ACCOUNT_ID.to_owned(),
+        move |preflight| {
+            let current_fee_discount_signer =
+                engine::fee_discount_signer(&preflight.network_config, &preflight.block_reference)?;
+            if current_fee_discount_signer == new_fee_discount_signer {
+                return Err(PreflightError::FeeDiscountSignerUnchanged {
+                    fee_discounts: fee_discounts_label(current_fee_discount_signer.as_ref()),
+                }
+                .into_report());
             }
-            .into_report());
-        }
-        let current_fee_discount_signer = xyk::fee_discount_signer(
-            &preflight.network_config,
-            &preflight.block_reference,
-            &dex_id,
-        )?;
-        if current_fee_discount_signer == new_fee_discount_signer {
-            return Err(PreflightError::FeeDiscountSignerUnchanged {
-                dex_id: dex_id.clone(),
-                fee_discounts: fee_discounts_label(current_fee_discount_signer.as_ref()),
-            }
-            .into_report());
-        }
-        let step = format!(
-            "Change {dex_id} from {} to {}",
-            fee_discounts_label(current_fee_discount_signer.as_ref()),
-            fee_discounts_label(new_fee_discount_signer.as_ref())
-        );
-        let function_calls = vec![FunctionCall {
-            method_name: "dex_call",
-            args: json!({
-                "dex_id": dex_id,
-                "method": "set_fee_discount_signer",
-                "args": Base64VecU8(near_sdk::borsh::to_vec(&SetFeeDiscountSignerArgs {
-                    fee_discount_signer_public_key: new_fee_discount_signer.clone(),
-                })?),
-                "attached_assets": {},
-                "referrer": null,
+            let step = format!(
+                "Change {ENGINE_ACCOUNT_ID} from {} to {}",
+                fee_discounts_label(current_fee_discount_signer.as_ref()),
+                fee_discounts_label(new_fee_discount_signer.as_ref())
+            );
+            let function_calls = vec![FunctionCall {
+                method_name: "set_fee_discount_signer",
+                args: json!({ "fee_discount_signer": new_fee_discount_signer }).into(),
+                deposit: NearToken::from_yoctonear(1),
+                gas: SET_FEE_DISCOUNT_SIGNER_GAS,
+            }];
+            Ok(TransactionPlan {
+                receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                steps: vec![step],
+                function_calls,
+                expected_outcome: ExpectedOutcome {
+                    action_name: "fee discount signer change",
+                    success_message: format!(
+                        "{ENGINE_ACCOUNT_ID} now has {}",
+                        fee_discounts_label(new_fee_discount_signer.as_ref())
+                    ),
+                    transfer_call: None,
+                    dex_id: None,
+                    dex_events: DexEvents::NotRead,
+                    deployment: None,
+                },
+                deploy_code: None,
             })
-            .into(),
-            deposit: ONE_YOCTO_NEAR,
-            gas: SET_FEE_DISCOUNT_SIGNER_GAS,
-        }];
-        Ok(TransactionPlan {
-            receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
-            steps: vec![step],
-            function_calls,
-            expected_outcome: ExpectedOutcome {
-                action_name: "fee discount signer change",
-                success_message: format!(
-                    "{dex_id} now has {}",
-                    fee_discounts_label(new_fee_discount_signer.as_ref())
-                ),
-                transfer_call: None,
-                dex_id: Some(dex_id.clone()),
-                dex_events: dex.events(),
-                deployment: None,
-            },
-            deploy_code: None,
-        })
-    })
+        },
+    )
 }

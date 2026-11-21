@@ -1,5 +1,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
+mod migration;
+
 use std::collections::HashMap;
 
 use amp_dex_types::{
@@ -11,8 +13,8 @@ use amp_dex_types::{
     NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets,
     PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
     RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction,
-    SetAmplificationArgs, SetFeeArgs, SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs,
-    SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
+    SetAmplificationArgs, SetFeeArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs,
+    SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
     math::{RatedPool, SwapAmounts},
 };
 use intear_dex_common::{
@@ -20,7 +22,7 @@ use intear_dex_common::{
     SwapRequest, SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PublicKey,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -50,7 +52,6 @@ enum StorageKey {
 pub struct AmpDex {
     pools: Vector<Pool>,
     fees_collected_by_users: FeeBalances,
-    fee_discount_signer_public_key: Option<PublicKey>,
 }
 
 #[near]
@@ -58,11 +59,7 @@ impl Dex for AmpDex {
     #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        let Ok(SwapArgs {
-            routes,
-            fee_discount,
-        }) = near_sdk::borsh::from_slice(&request.message.0)
-        else {
+        let Ok(SwapArgs { routes }) = near_sdk::borsh::from_slice(&request.message.0) else {
             panic!("Invalid message");
         };
         expect!(!routes.is_empty(), "No routes");
@@ -74,11 +71,7 @@ impl Dex for AmpDex {
             RouteFraction::add_up_to_full(routes.iter().map(|route| route.fraction)),
             "Route fractions must add up to 100%"
         );
-        let fee_discount = fee_discount.verify(
-            self.fee_discount_signer_public_key.as_ref(),
-            &routes,
-            &request,
-        );
+        let fee_discount = env::fee_discount();
         let oracle_prices = OraclePrices::of_routes(&self.pools, &routes);
 
         let (SwapRequestAmount::ExactIn(requested_amount)
@@ -463,34 +456,7 @@ impl AmpDex {
         Self {
             pools: Vector::new(StorageKey::Pools),
             fees_collected_by_users: FeeBalances::new(StorageKey::FeesCollectedByUsers),
-            fee_discount_signer_public_key: None,
         }
-    }
-
-    #[payable]
-    #[result_serializer(borsh)]
-    pub fn set_fee_discount_signer(
-        &mut self,
-        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
-        #[serializer(borsh)] args: Vec<u8>,
-    ) -> DexCallResponse {
-        expect!(
-            let Caller::Direct(caller_id) = env::caller(),
-            "This method can only be called directly, not in a transfer call"
-        );
-        expect!(
-            caller_id == env::dex_id().deployer,
-            "Only the owner of the dex can set the fee discount signer"
-        );
-        let Ok(SetFeeDiscountSignerArgs {
-            fee_discount_signer_public_key,
-        }) = near_sdk::borsh::from_slice(&args)
-        else {
-            near_sdk::env::panic_str("Invalid args");
-        };
-        expect!(attached_assets.is_empty(), "No assets should be attached");
-        self.fee_discount_signer_public_key = fee_discount_signer_public_key;
-        DexCallResponse::default()
     }
 
     #[payable]
@@ -1444,11 +1410,6 @@ impl AmpDex {
         } = args;
         self.fees_collected_by_users
             .balances(&account_id, asset_ids)
-    }
-
-    #[result_serializer(borsh)]
-    pub fn get_fee_discount_signer(&self) -> Option<PublicKey> {
-        self.fee_discount_signer_public_key.clone()
     }
 
     #[result_serializer(borsh)]

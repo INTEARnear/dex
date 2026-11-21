@@ -3,11 +3,11 @@
 use std::{collections::HashMap, fmt::Display};
 
 use intear_dex_common::{
-    AssetId, DexId, FULL_FEE_FRACTION, FeeFraction, SwapRequest, SwapRequestAmount, TokenAmount,
-    expect, fraction_of,
+    AssetId, DexId, FULL_FEE_FRACTION, FeeDiscountFraction, FeeFraction, SwapRequest,
+    SwapRequestAmount, TokenAmount, expect, fraction_of,
 };
 use near_sdk::{
-    AccountId, PublicKeyHandle,
+    AccountId, BlockHeight, PublicKeyHandle,
     json_types::{Base58CryptoHash, Base64VecU8},
     near,
     serde::Deserialize,
@@ -33,7 +33,7 @@ pub struct ReferralFees(pub Vec<(AccountId, FeeFraction)>);
 /// `quote_improvement_receiver`'s internal balance of that asset, so the trader
 /// gets at most, or pays at least, what the quote expected.
 #[derive(Clone, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub struct QuoteImprovementFee {
     pub quote_expected_amount: TokenAmount,
     pub quote_improvement_receiver: AccountId,
@@ -92,7 +92,7 @@ impl ReferralFees {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub enum AccountOrDexId {
     Account(AccountId),
     Dex(DexId),
@@ -108,7 +108,7 @@ impl Display for AccountOrDexId {
 }
 
 #[derive(Clone, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub enum SwapOperationAmount {
     Amount(SwapRequestAmount),
     OutputOfLastIn,
@@ -116,7 +116,7 @@ pub enum SwapOperationAmount {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub enum SwapAdvancedMode {
     /// Try every option and swap on the one with the best result
     FindBest,
@@ -127,7 +127,7 @@ pub enum SwapAdvancedMode {
 
 /// A dex that [`Operation::SwapAdvanced`] can swap on, with the message to pass to it
 #[derive(Clone, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub struct SwapOption {
     pub dex_id: DexId,
     pub message: Base64VecU8,
@@ -137,7 +137,7 @@ pub struct SwapOption {
 /// `asset_in` before the request is made, for traders who don't have an asset
 /// that the oracle takes fees in. It pays no referral fees.
 #[derive(Clone, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub struct OracleFeeSwap {
     pub dex_id: DexId,
     pub message: Base64VecU8,
@@ -147,7 +147,7 @@ pub struct OracleFeeSwap {
 }
 
 #[derive(Clone, Debug)]
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 pub enum Operation {
     /// Register storage for assets. No-op if assets are
     /// already registered for the given account or dex.
@@ -242,6 +242,64 @@ pub enum Operation {
     },
 }
 
+/// The most blocks before a [`TraderFeeDiscount`] expires, about 7 days
+pub const MAX_TRADER_FEE_DISCOUNT_BLOCKS: BlockHeight = 1_008_000;
+
+/// A discount on the pool and protocol fees of every swap of the operations it comes with, signed
+/// by the engine's fee discount signer, which dexes read with the `fee_discount` host function.
+/// It doesn't reduce referral fees, and can be unused by third-party DEXes not affiliated with TEAR
+/// token that don't respect the discount.
+#[derive(Clone, Debug)]
+#[near(serializers=[json])]
+pub struct SignedFeeDiscount {
+    pub discount: FeeDiscount,
+    /// Signature of sha256(borsh([`FeeDiscountSignaturePayload`])) by the engine's fee discount
+    /// signer
+    pub signature: Base64VecU8,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+#[near(serializers=[borsh, json])]
+pub enum FeeDiscount {
+    ForOperations(OperationsFeeDiscount),
+    ForTrader(TraderFeeDiscount),
+}
+
+/// A discount on the swaps of one batch of operations
+#[derive(Clone, PartialEq, Debug)]
+#[near(serializers=[borsh, json])]
+pub struct OperationsFeeDiscount {
+    /// sha256 of the borsh of the operations, where a `swap_simple` is the one
+    /// [`Operation::SwapSimple`] of its arguments
+    pub operations_hash: Base58CryptoHash,
+    /// The only alleged trader who can use the discount, anyone can if `None`
+    pub trader_id: Option<AccountId>,
+    /// [`FULL_FEE_DISCOUNT`](intear_dex_common::FULL_FEE_DISCOUNT) waives pool and protocol fees
+    /// entirely
+    pub fee_discount: FeeDiscountFraction,
+    pub expiration_block_height: BlockHeight,
+}
+
+/// A discount on every swap of the trader until it expires, only in calls that the trader makes
+/// directly, not in transfer calls
+#[derive(Clone, PartialEq, Debug)]
+#[near(serializers=[borsh, json])]
+pub struct TraderFeeDiscount {
+    pub trader_id: AccountId,
+    pub fee_discount: FeeDiscountFraction,
+    /// At most [`MAX_TRADER_FEE_DISCOUNT_BLOCKS`] after the block of the swap
+    pub expiration_block_height: BlockHeight,
+}
+
+/// What the fee discount signer signs for [`SignedFeeDiscount`]
+#[derive(Debug)]
+#[near(serializers=[borsh])]
+pub struct FeeDiscountSignaturePayload {
+    pub chain_id: String,
+    pub engine_contract_id: AccountId,
+    pub discount: FeeDiscount,
+}
+
 #[derive(Clone, Debug)]
 #[near(serializers=[borsh, json])]
 pub struct DexCallAfterDeploy {
@@ -258,7 +316,7 @@ pub struct UnsignedOracleResponse {
     pub response: Base64VecU8,
 }
 
-#[near(serializers=[json])]
+#[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, Debug)]
 pub enum WithdrawAmount {
     Full { at_least: Option<TokenAmount> },
@@ -282,6 +340,8 @@ pub enum DepositMessage {
         referrer: Option<AccountId>,
         #[serde(default)]
         referral_fees: ReferralFees,
+        #[serde(default)]
+        fee_discount: Option<SignedFeeDiscount>,
     },
 }
 
@@ -304,6 +364,13 @@ impl DepositMessage {
         match self {
             Self::Advanced { referral_fees, .. } => referral_fees.clone(),
             _ => ReferralFees::default(),
+        }
+    }
+
+    pub fn fee_discount(&self) -> Option<SignedFeeDiscount> {
+        match self {
+            Self::Advanced { fee_discount, .. } => fee_discount.clone(),
+            _ => None,
         }
     }
 }

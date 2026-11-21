@@ -2,20 +2,19 @@ use crate::common::*;
 
 use amp_dex_types::{
     AddLiquidityArgs, AmpDexEvent, Amplification, AssetIndex, AssetWithBalance, CreatePoolArgs,
-    ExchangePrices, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FeeDiscount, FeeDiscountSignaturePayload,
-    FeeFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs, GetPendingFeesArgs,
-    GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES, NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID,
-    PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, SetAmplificationArgs, SetFeeArgs,
-    SetFeeDiscountSignerArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SignedFeeDiscount,
-    SwapArgs, SwapFeeDiscount, SwapRoute, TokenAmount, WithdrawFeesArgs,
+    ExchangePrices, FULL_FEE_DISCOUNT, FULL_FEE_FRACTION, FeeFraction, FeePayoutType, FeeReceiver,
+    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES,
+    NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolRateSource, PoolView, Price,
+    PricesRequest, PricesResponse, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RouteFraction, SetAmplificationArgs, SetFeeArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs,
+    SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
 };
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
 use intear_dex_types::{
-    AccountOrDexId, DexEventData, Operation, SwapOperationAmount, UnsignedOracleResponse,
-    WithdrawAmount,
+    AccountOrDexId, DexEventData, FeeDiscount, Operation, OperationsFeeDiscount, SignedFeeDiscount,
+    SwapOperationAmount, TraderFeeDiscount, UnsignedOracleResponse, WithdrawAmount,
 };
-use near_crypto::{KeyType, SecretKey, Signature};
+use near_crypto::{KeyType, SecretKey};
 use near_sdk::serde_json::json;
 use near_sdk::{
     AccountId, NearToken,
@@ -394,7 +393,7 @@ impl AmpTest {
         prices: &PricesResponse,
         asset_in: &AssetId,
         amount: SwapRequestAmount,
-        fee_discount: SwapFeeDiscount,
+        fee_discount: Option<SignedFeeDiscount>,
     ) -> ExecutionFinalResult {
         let pool = get_pool(&self.context.dex_engine_contract, &self.dex_id, pool_id).await;
         let asset_out = if *asset_in == pool.assets.0.asset_id {
@@ -404,15 +403,13 @@ impl AmpTest {
         };
         self.swap_on_routes(
             trader,
-            SwapArgs {
-                fee_discount,
-                ..SwapArgs::single_pool(pool_id)
-            },
+            SwapArgs::single_pool(pool_id),
             oracle_key,
             prices,
             asset_in,
             asset_out,
             amount,
+            fee_discount,
         )
         .await
     }
@@ -429,6 +426,7 @@ impl AmpTest {
         asset_in: &AssetId,
         asset_out: &AssetId,
         amount: SwapRequestAmount,
+        fee_discount: Option<SignedFeeDiscount>,
     ) -> ExecutionFinalResult {
         swap_on_routes(
             &self.context.sandbox,
@@ -442,6 +440,7 @@ impl AmpTest {
             asset_in,
             asset_out,
             amount,
+            fee_discount,
         )
         .await
     }
@@ -449,7 +448,7 @@ impl AmpTest {
 
 /// Swap on `swap_args.routes` of `dex_id`, with operations that ask `oracle_key` for the prices of
 /// their pools first, for its fee of `oracle_fee` of the asset in, which it responds to
-/// with `prices`
+/// with `prices`, and `fee_discount` for the operations
 #[allow(clippy::too_many_arguments)]
 async fn swap_on_routes(
     sandbox: &Worker<Sandbox>,
@@ -463,6 +462,7 @@ async fn swap_on_routes(
     asset_in: &AssetId,
     asset_out: &AssetId,
     amount: SwapRequestAmount,
+    fee_discount: Option<SignedFeeDiscount>,
 ) -> ExecutionFinalResult {
     let mut route_pools = Vec::new();
     for pool_id in swap_args.routes.iter().flat_map(|route| &route.pool_ids) {
@@ -497,6 +497,7 @@ async fn swap_on_routes(
                     quote_improvement_fee: None,
                 },
             ],
+            "fee_discount": fee_discount,
         }))
         .transact_async()
         .await
@@ -673,7 +674,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -760,7 +761,7 @@ async fn test_amp_swaps_at_oracle_price() {
                 &prices,
                 near_asset_id,
                 SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-                SwapFeeDiscount::None,
+                None,
             )
             .await;
         assert!(format!("{result:?}").contains(error), "{result:?}");
@@ -791,7 +792,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             usdc_asset_id,
             SwapRequestAmount::ExactOut(TokenAmount::new(near_out)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -813,7 +814,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert!(format!("{result:?}").contains("must start with an oracle request of the prices of"));
@@ -896,7 +897,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -912,7 +913,7 @@ async fn test_amp_swaps_at_oracle_price() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert!(format!("{result:?}").contains("must start with an oracle request of the prices of"));
@@ -1025,7 +1026,7 @@ async fn test_amp_fees_and_liquidity() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -1277,7 +1278,7 @@ async fn test_amp_set_fee() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::None,
+            None,
         )
         .await;
     assert_success(&result).unwrap();
@@ -1572,6 +1573,55 @@ async fn test_amp_fixed_price_pool() {
         PoolRateSource::Fixed(fixed_price)
     );
 
+    // A message from while dexes took fee discounts has one after the routes, which is ignored, so
+    // the swap pays the fees
+    deposit_ft(dex_engine_contract, deployer, ft1, user1, near_in).await;
+    let protocol_fees = async || {
+        get_pending_fees(
+            dex_engine_contract,
+            dex_id,
+            &PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+            near_asset_id,
+        )
+        .await
+    };
+    let protocol_fees_before = protocol_fees().await;
+    let routes = SwapArgs::single_pool(pool_id).routes;
+    let message = [
+        near_sdk::borsh::to_vec(&routes).unwrap(),
+        near_sdk::borsh::to_vec(&(
+            1u8,
+            &routes,
+            near_asset_id,
+            usdc_asset_id,
+            Some(user1.id()),
+            SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
+            FULL_FEE_DISCOUNT,
+            u64::MAX,
+            vec![0u8; 64],
+        ))
+        .unwrap(),
+    ]
+    .concat();
+    let result = execute_operations(
+        user1,
+        dex_engine_contract,
+        vec![Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: Base64VecU8(message),
+            asset_in: near_asset_id.clone(),
+            asset_out: usdc_asset_id.clone(),
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                near_in,
+            ))),
+            constraint: None,
+            quote_improvement_fee: None,
+        }],
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert!(protocol_fees().await > protocol_fees_before);
+
     // A pool with a fixed price has no oracle to change
     let result = execute_operations(
         deployer,
@@ -1589,30 +1639,6 @@ async fn test_amp_fixed_price_pool() {
     )
     .await;
     assert!(format!("{result:?}").contains("The pool has a fixed price, not an oracle"));
-}
-
-fn sign_fee_discount(
-    discount: FeeDiscount,
-    signer: &SecretKey,
-    chain_id: &str,
-    engine_contract_id: &AccountId,
-    dex_id: &DexId,
-) -> SignedFeeDiscount {
-    let signature_payload = FeeDiscountSignaturePayload {
-        chain_id: chain_id.to_string(),
-        engine_contract_id: engine_contract_id.clone(),
-        dex_id: dex_id.clone(),
-        discount: discount.clone(),
-    };
-    let Signature::ED25519(signature) = signer.sign(&near_sdk::env::sha256_array(
-        near_sdk::borsh::to_vec(&signature_payload).unwrap(),
-    )) else {
-        panic!("Fee discounts are signed with ed25519 keys in this test");
-    };
-    SignedFeeDiscount {
-        discount,
-        signature: signature.to_bytes().to_vec(),
-    }
 }
 
 #[tokio::test]
@@ -1633,75 +1659,50 @@ async fn test_amp_fee_discount() {
         .create_pool(test.create_pool_args(FeeFraction::new(10_000), liquidity))
         .await;
     let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
-    let set_fee_discount_signer = async |account: &Account| {
-        execute_operations(
-            account,
-            dex_engine_contract,
-            vec![dex_call(
-                dex_id,
-                "set_fee_discount_signer",
-                near_sdk::borsh::to_vec(&SetFeeDiscountSignerArgs {
-                    fee_discount_signer_public_key: Some(
-                        fee_discount_signer
-                            .public_key()
-                            .to_string()
-                            .parse()
-                            .unwrap(),
-                    ),
-                })
-                .unwrap(),
-                &[],
-            )],
-        )
-        .await
-    };
-    let result = set_fee_discount_signer(user1).await;
-    assert!(
-        format!("{result:?}").contains("Only the owner of the dex can set the fee discount signer")
-    );
-    let result = set_fee_discount_signer(deployer).await;
+    let result = set_fee_discount_signer(dex_engine_contract, Some(&fee_discount_signer)).await;
     assert_success(&result).unwrap();
 
     let near_in = near(100);
     deposit_ft(dex_engine_contract, deployer, ft1, user1, near_in * 3).await;
     let chain_id = sandbox.status().await.unwrap().chain_id;
-    let full_discount = FeeDiscount {
-        route: SwapArgs::single_pool(pool_id).routes,
-        asset_in: near_asset_id.clone(),
-        asset_out: usdc_asset_id.clone(),
-        trader_id: Some(user1.id().clone()),
-        amount: SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-        fee_discount: FULL_FEE_DISCOUNT,
-        expiration_block_height: sandbox.view_block().await.unwrap().height() + 1_000,
-    };
     let signed = |discount: FeeDiscount| {
         sign_fee_discount(
             discount,
             &fee_discount_signer,
             &chain_id,
             dex_engine_contract.id(),
-            dex_id,
         )
     };
+    let expiration_block_height = sandbox.view_block().await.unwrap().height() + 1_000;
 
-    // A discount for another pool doesn't work
-    let result = test
-        .swap_with_prices(
-            user1,
-            pool_id,
-            &test.oracle_key,
-            &agreeing_prices(),
-            near_asset_id,
-            SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::ForSwap(signed(FeeDiscount {
-                route: SwapArgs::single_pool(PoolId::new(pool_id.get() + 1)).routes,
-                ..full_discount.clone()
+    // A discount for other operations doesn't work, which the engine checks before the oracle
+    // request
+    let result = user1
+        .call(dex_engine_contract.id(), "execute_operations")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "operations": [Operation::OracleRequest {
+                oracle_key: oracle_key_handle(&test.oracle_key),
+                dex_id: dex_id.clone(),
+                request: Base64VecU8(b"prices".to_vec()),
+                fee: (near_asset_id.clone(), TokenAmount::new(0)),
+                swap: None,
+            }],
+            "fee_discount": signed(FeeDiscount::ForOperations(OperationsFeeDiscount {
+                operations_hash: operations_hash(&[]),
+                trader_id: None,
+                fee_discount: FULL_FEE_DISCOUNT,
+                expiration_block_height,
             })),
-        )
-        .await;
-    assert!(format!("{result:?}").contains("Fee discount is for another route"));
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert!(format!("{result:?}").contains("Fee discount is for other operations"));
 
-    // The full discount waives the pool and protocol fees
+    // The full discount waives the pool and protocol fees of the swap that runs once the oracle
+    // responds
     let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
     let usdc_before = inner_balance(
         dex_engine_contract,
@@ -1717,7 +1718,11 @@ async fn test_amp_fee_discount() {
             &agreeing_prices(),
             near_asset_id,
             SwapRequestAmount::ExactIn(TokenAmount::new(near_in)),
-            SwapFeeDiscount::ForSwap(signed(full_discount)),
+            Some(signed(FeeDiscount::ForTrader(TraderFeeDiscount {
+                trader_id: user1.id().clone(),
+                fee_discount: FULL_FEE_DISCOUNT,
+                expiration_block_height,
+            }))),
         )
         .await;
     assert_success(&result).unwrap();
@@ -1748,6 +1753,85 @@ async fn test_amp_fee_discount() {
         .await,
         0
     );
+}
+
+#[tokio::test]
+async fn test_amp_fee_discount_signer_migration() {
+    let test = setup_amp().await;
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        deployer,
+        user1,
+        ..
+    } = &test.context;
+    let dex_id = &test.dex_id;
+    let pool_id = test
+        .create_pool(test.create_pool_args(FeeFraction::new(10_000), (near(1_000), usdc(3_750))))
+        .await;
+    let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
+
+    // The state of the dex while it had a fee discount signer after its other fields: the pool
+    // vector, the length and prefix of which is StorageKey::Pools, and the fee balances of
+    // StorageKey::FeesCollectedByUsers. The engine stores the records of dexes in
+    // StorageKey::DexStorage by dex and key.
+    let signer_public_key: near_sdk::PublicKey = SecretKey::from_seed(KeyType::ED25519, "signer")
+        .public_key()
+        .to_string()
+        .parse()
+        .unwrap();
+    let state_before_migration = near_sdk::borsh::to_vec(&(
+        pool_id.get() + 1,
+        vec![0u8],
+        vec![2u8],
+        Some(signer_public_key),
+    ))
+    .unwrap();
+    let state_record_key = [
+        vec![1],
+        near_sdk::borsh::to_vec(&(dex_id, b"STATE".to_vec())).unwrap(),
+    ]
+    .concat();
+    sandbox
+        .patch(dex_engine_contract.id())
+        .state(
+            &state_record_key,
+            &near_sdk::borsh::to_vec(&state_before_migration).unwrap(),
+        )
+        .transact()
+        .await
+        .unwrap();
+    // The new code can't read the state like that
+    dex_engine_contract
+        .view("dex_view")
+        .args_json(json!({
+            "dex_id": dex_id,
+            "method": "get_pool_count",
+            "args": "",
+        }))
+        .await
+        .unwrap_err();
+
+    let result = execute_operations(
+        user1,
+        dex_engine_contract,
+        vec![dex_call(dex_id, "migrate", vec![], &[])],
+    )
+    .await;
+    assert!(
+        format!("{result:?}").contains("Only the owner of the dex can migrate"),
+        "{result:?}"
+    );
+    let result = execute_operations(
+        deployer,
+        dex_engine_contract,
+        vec![dex_call(dex_id, "migrate", vec![], &[])],
+    )
+    .await;
+    assert_success(&result).unwrap();
+
+    // The dex reads the state it had without the signer
+    assert_eq!(get_pool(dex_engine_contract, dex_id, pool_id).await, pool);
 }
 
 #[tokio::test]
@@ -1803,15 +1887,13 @@ async fn test_amp_routes() {
                       amount: SwapRequestAmount| {
         test.swap_on_routes(
             user1,
-            SwapArgs {
-                routes,
-                fee_discount: SwapFeeDiscount::None,
-            },
+            SwapArgs { routes },
             &test.oracle_key,
             prices,
             near_asset_id,
             asset_out,
             amount,
+            None,
         )
         .await
     };
@@ -2156,13 +2238,13 @@ async fn test_amp_complex_route() {
             user1,
             SwapArgs {
                 routes: routes.clone(),
-                fee_discount: SwapFeeDiscount::None,
             },
             &test.oracle_key,
             &route_prices,
             near_asset_id,
             xaut_asset_id,
             amount,
+            None,
         )
         .await
     };

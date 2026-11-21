@@ -23,8 +23,8 @@ const PAYOUT_GROUPS_BYTES: usize = (U128_BYTES + FEE_GROWTH_BYTES) * 3;
 // A provider's payout, shares, and the fee growth it last collected at
 const LIQUIDITY_POSITION_BYTES: usize = ENUM_TAG_BYTES + U128_BYTES + FEE_GROWTH_BYTES;
 
-/// The state that initializing an amp dex stores: the pool vector, the map
-/// of collected fees, and no fee discount signer
+/// The state that initializing an amp dex stores: the pool vector and the map
+/// of collected fees
 pub fn initial_state_bytes(
     dex_id: &DexId,
     extra_bytes_per_record: u64,
@@ -32,7 +32,7 @@ pub fn initial_state_bytes(
     dex_storage_record_bytes(
         dex_id,
         STATE_KEY_BYTES,
-        sum_bytes(&[VECTOR_BYTES, MAP_BYTES, ENUM_TAG_BYTES])?,
+        sum_bytes(&[VECTOR_BYTES, MAP_BYTES])?,
         extra_bytes_per_record,
     )
 }

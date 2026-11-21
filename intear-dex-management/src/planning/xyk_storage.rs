@@ -40,8 +40,8 @@ pub(super) const MAP_BYTES: usize = U32_BYTES + COLLECTION_PREFIX_BYTES;
 pub(super) const VECTOR_BYTES: usize = U32_BYTES + MAP_BYTES;
 
 /// The state that initializing an xyk dex stores: the pool vector, the maps
-/// of collected fees, unused referral settings and community fees, no fee
-/// discount signer, and the map of fees that anyone can claim
+/// of collected fees, unused referral settings and community fees, and the
+/// map of fees that anyone can claim
 pub fn initial_state_bytes(
     dex_id: &DexId,
     extra_bytes_per_record: u64,
@@ -49,14 +49,7 @@ pub fn initial_state_bytes(
     dex_storage_record_bytes(
         dex_id,
         STATE_KEY_BYTES,
-        sum_bytes(&[
-            VECTOR_BYTES,
-            MAP_BYTES,
-            MAP_BYTES,
-            MAP_BYTES,
-            ENUM_TAG_BYTES,
-            MAP_BYTES,
-        ])?,
+        sum_bytes(&[VECTOR_BYTES, MAP_BYTES, MAP_BYTES, MAP_BYTES, MAP_BYTES])?,
         extra_bytes_per_record,
     )
 }

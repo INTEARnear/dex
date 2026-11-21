@@ -1,3 +1,4 @@
+use intear_dex_common::FeeDiscountInSwapMessage;
 use near_sdk::{
     AccountId, PublicKeyHandle,
     borsh::{BorshDeserialize, io::Read},
@@ -5,9 +6,28 @@ use near_sdk::{
 };
 
 use crate::{
-    Amplification, AssetWithBalance, FeeFraction, PoolRateSource, PoolView, Price, TokenAmount,
-    TotalShares,
+    Amplification, AssetWithBalance, FeeFraction, PoolRateSource, PoolView, Price, SwapArgs,
+    SwapRoute, TokenAmount, TotalShares,
 };
+
+impl BorshDeserialize for SwapArgs {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let mut rest = bytes.as_slice();
+        let routes = Vec::<SwapRoute>::deserialize(&mut rest)?;
+        if !rest.is_empty() {
+            FeeDiscountInSwapMessage::<Vec<SwapRoute>>::deserialize(&mut rest)?;
+        }
+        if !rest.is_empty() {
+            return Err(near_sdk::borsh::io::Error::new(
+                near_sdk::borsh::io::ErrorKind::InvalidData,
+                "Unexpected bytes after swap args",
+            ));
+        }
+        Ok(Self { routes })
+    }
+}
 
 /// The fees of a pool while swaps paid a fixed fee to its oracle, before the engine took the fees
 /// of oracles

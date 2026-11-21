@@ -4,6 +4,7 @@ pub mod admin;
 pub mod assets;
 pub mod balance;
 pub mod deposit;
+pub mod fee_discounts;
 pub mod info;
 pub mod operations;
 pub mod oracle;
@@ -66,6 +67,11 @@ pub enum EngineAction {
     ))]
     /// Keys that oracles respond to the requests of swaps with
     Oracle(self::oracle::OracleCommands),
+    #[strum_discriminants(strum(
+        message = "fee-discounts - Who signs the fee discounts of swaps: show, set-signer, disable"
+    ))]
+    /// Who signs the fee discounts of swaps: show, set-signer, disable
+    FeeDiscounts(self::fee_discounts::FeeDiscountsCommands),
     #[strum_discriminants(strum(
         message = "pause     - Stop deposits, withdrawals, swaps and dex calls"
     ))]

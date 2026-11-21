@@ -12,11 +12,7 @@ pub use amounts::{FULL_FEE_FRACTION, FeeFraction, TokenAmount, fraction_of, mul_
 #[cfg(feature = "dex")]
 pub use fee_balances::FeeBalances;
 pub use fee_balances::{GetPendingFeesArgs, WithdrawFeesArgs};
-pub use fee_discounts::{
-    FULL_FEE_DISCOUNT, FeeDiscount, FeeDiscountFraction, FeeDiscountSignaturePayload,
-    MAX_TRADER_FEE_DISCOUNT_BLOCKS, SetFeeDiscountSignerArgs, SignedFeeDiscount,
-    SignedTraderFeeDiscount, SwapFeeDiscount, TraderFeeDiscount, TraderFeeDiscountSignaturePayload,
-};
+pub use fee_discounts::{FULL_FEE_DISCOUNT, FeeDiscountFraction, FeeDiscountInSwapMessage};
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use near_sdk::{AccountId, NearToken, json_types::Base64VecU8, near};
 pub use pools::{
@@ -270,7 +266,7 @@ impl Caller {
 pub mod env {
     use near_sdk::{AccountId, PublicKeyHandle, borsh::BorshSerialize};
 
-    use crate::{Caller, DexId};
+    use crate::{Caller, DexId, FeeDiscountFraction};
 
     mod sys {
         #[cfg_attr(target_arch = "wasm32", link(wasm_import_module = "env"))]
@@ -279,6 +275,7 @@ pub mod env {
             pub fn dex_event(len: u64, ptr: u64);
             pub fn dex_id(register_id: u64);
             pub fn engine_contract_id(register_id: u64);
+            pub fn fee_discount() -> u32;
             pub fn oracle_request(
                 oracle_key_len: u64,
                 oracle_key_ptr: u64,
@@ -316,6 +313,11 @@ pub mod env {
             .ok()
             .and_then(|engine_contract_id| engine_contract_id.parse().ok())
             .expect("Invalid engine contract ID")
+    }
+
+    pub fn fee_discount() -> Option<FeeDiscountFraction> {
+        let millionths = unsafe { sys::fee_discount() };
+        (millionths != 0).then(|| FeeDiscountFraction::new(millionths))
     }
 
     /// The response of the oracle that has `oracle_key` to `request` for this
