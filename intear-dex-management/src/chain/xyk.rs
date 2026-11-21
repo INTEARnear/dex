@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use intear_dex_common::AssetId;
 use near_primitives::types::AccountId;
+use near_sdk::PublicKey;
 use near_sdk::json_types::U128;
 use xyk_dex_types::{
     GetClaimableFeesArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, PoolId,
@@ -140,5 +141,22 @@ pub fn claimable_fees(
             account_id: account_id.clone(),
             asset_ids,
         },
+    )
+}
+
+/// The key that signs the fee discounts of a dex whose code is from while dexes checked fee
+/// discounts themselves, if any. Code from after that, which reads them from the engine, doesn't
+/// have this view.
+pub fn fee_discount_signer(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<PublicKey>> {
+    dex_view(
+        network_config,
+        block_reference,
+        dex_id,
+        "get_fee_discount_signer",
+        &(),
     )
 }

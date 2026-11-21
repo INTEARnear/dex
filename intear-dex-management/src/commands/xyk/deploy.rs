@@ -156,6 +156,8 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
     let signer_id: AccountId = dex_id.deployer.clone();
     planning::write_action_context(&global_context, signer_id, move |preflight| {
         preflight.ensure_engine_not_paused()?;
+        let migration = dex_code::fee_discount_signer_removal(preflight, &dex_id)?;
+        let migrates = migration.is_some();
         // Initializing tops up for the state itself, and an upgrade tops up for
         // all of the new code while the old code's storage gets freed
         let dex_code::CodeDeployment {
@@ -164,8 +166,8 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             code_label,
             mut steps,
             function_calls,
-        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0, None)?;
-        if is_upgrade {
+        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0, migration)?;
+        if is_upgrade && !migrates {
             steps.push("Keep the state as it is".to_string());
         }
         let init_command = shell_words::join([
@@ -185,7 +187,13 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             function_calls,
             expected_outcome: ExpectedOutcome {
                 action_name: "deploy",
-                success_message: format!("Deployed {code_label} to {dex_id}"),
+                success_message: if migrates {
+                    format!(
+                        "Deployed {code_label} to {dex_id} and took the key that signed its fee discounts out of its state"
+                    )
+                } else {
+                    format!("Deployed {code_label} to {dex_id}")
+                },
                 transfer_call: None,
                 dex_id: Some(dex_id.clone()),
                 dex_events: DexEvents::Xyk,

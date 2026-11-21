@@ -13,7 +13,7 @@ use near_sdk::NearToken;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use serde_json::json;
 
-use crate::chain::{account, engine};
+use crate::chain::{self, PoolDexState, account, engine};
 use crate::commands::engine::deposit::DEPOSIT_NEAR_GAS;
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
@@ -23,6 +23,11 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near
 const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(300);
 const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
 const CALL_AFTER_DEPLOY_ARG: &[u8] = b"call_after_deploy";
+/// The host function that dex code reads fee discounts from the engine with
+const FEE_DISCOUNT_HOST_FUNCTION: &str = "fee_discount";
+/// The view of dex code from while dexes checked fee discounts themselves, which stored the key
+/// that signed them in their state
+const DEX_FEE_DISCOUNT_SIGNER_VIEW: &str = "get_fee_discount_signer";
 
 /// The dex that deploy creates or replaces: <signer>/<name>
 pub fn deployed_dex_id(
@@ -159,6 +164,43 @@ pub struct CallAfterDeploy {
     pub step: String,
 }
 
+/// The migration that takes the key that signed fee discounts out of the state of an xyk or amp
+/// dex whose code is from while dexes checked fee discounts themselves, which the new code can't
+/// read with it, right after the new code is stored
+pub fn fee_discount_signer_removal(
+    preflight: &Preflight,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<CallAfterDeploy>> {
+    let Preflight {
+        network_config,
+        block_reference,
+        ..
+    } = preflight;
+    let Some(deployed_code) = engine::dex_code(network_config, block_reference, dex_id)? else {
+        return Ok(None);
+    };
+    if let PoolDexState::Missing = chain::pool_dex_state(network_config, block_reference, dex_id)? {
+        return Ok(None);
+    }
+    let deployed_module = wasmi::Module::new(&wasmi::Engine::default(), &deployed_code)
+        .map_err(|err| eyre!("The deployed code of {dex_id} doesn't compile: {err}"))?;
+    if !deployed_module
+        .exports()
+        .any(|export| export.name() == DEX_FEE_DISCOUNT_SIGNER_VIEW)
+    {
+        return Ok(None);
+    }
+    Ok(Some(CallAfterDeploy {
+        method: "migrate".to_string(),
+        args: Vec::new(),
+        // The state takes less storage without the key
+        attached_near: NearToken::ZERO,
+        step: format!(
+            "Migrate the state of {dex_id}, stored with the key that signs its fee discounts, which the new code can't read, to state without it, since {ENGINE_ACCOUNT_ID} checks fee discounts now; swap messages with a discount of the old kind pay full fees from then on"
+        ),
+    }))
+}
+
 /// What deploying code to a dex takes: the storage for the code, and the
 /// deploy itself
 pub struct CodeDeployment {
@@ -186,6 +228,18 @@ pub fn plan_code_deployment(
         return Err(PreflightError::NotTrustedCodeDeployer {
             signer_id: preflight.signer_id.clone(),
             trusted_code_deployer,
+        }
+        .into_report());
+    }
+    let module = wasmi::Module::new(&wasmi::Engine::default(), code)
+        .map_err(|err| eyre!("The translator rejects {} bytes of code: {err}", code.len()))?;
+    if module
+        .imports()
+        .any(|import| import.name() == FEE_DISCOUNT_HOST_FUNCTION)
+        && engine::is_before_fee_discounts(&preflight.network_config, &preflight.block_reference)?
+    {
+        return Err(PreflightError::EngineBeforeFeeDiscounts {
+            dex_id: dex_id.clone(),
         }
         .into_report());
     }

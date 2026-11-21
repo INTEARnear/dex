@@ -96,20 +96,21 @@ pub fn is_paused(
     )
 }
 
-/// Whether the engine's code is from before oracle fees, so its state is without them, which
-/// `migrate` of the code with them adds
-pub fn is_before_oracle_fees(
+/// Whether the engine's code is from before it took fee discounts, so its state is without the
+/// fee discount signer, which `migrate` of the code with it adds, and it can't run dex code that
+/// reads fee discounts from it
+pub fn is_before_fee_discounts(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
 ) -> color_eyre::eyre::Result<bool> {
-    let oracle_fees = super::view_function_result(
+    let fee_discount_signer = super::view_function_result(
         network_config,
         block_reference,
         &ENGINE_ACCOUNT_ID.to_owned(),
-        "oracle_fees",
-        serde_json::to_vec(&json!({ "oracle_key": "ed25519:11111111111111111111111111111111" }))?,
+        "get_fee_discount_signer",
+        serde_json::to_vec(&json!({}))?,
     )?;
-    Ok(oracle_fees.is_none())
+    Ok(fee_discount_signer.is_none())
 }
 
 pub fn trusted_code_deployer(

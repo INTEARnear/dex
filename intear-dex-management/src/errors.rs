@@ -167,6 +167,10 @@ pub enum PreflightError {
         "{ENGINE_ACCOUNT_ID} runs code from before call_after_deploy, which would deploy the code without calling {method} on it"
     )]
     EngineWithoutCallAfterDeploy { method: String },
+    #[error(
+        "{ENGINE_ACCOUNT_ID} runs code from before it took fee discounts, which can't run the code for {dex_id}, since that code reads fee discounts from it"
+    )]
+    EngineBeforeFeeDiscounts { dex_id: DexId },
     #[error("{ENGINE_ACCOUNT_ID} already has {fee_discounts}")]
     FeeDiscountSignerUnchanged { fee_discounts: String },
     #[error("These fees aren't allowed: {problem}")]
@@ -352,7 +356,7 @@ impl PreflightError {
             Self::AssetNotRegisteredForSigner {
                 register_command, ..
             } => Some(format!("Register it first:\n    {register_command}")),
-            Self::EngineWithoutCallAfterDeploy { .. } => {
+            Self::EngineWithoutCallAfterDeploy { .. } | Self::EngineBeforeFeeDiscounts { .. } => {
                 Some("Upgrade the engine with `engine upgrade` first".to_string())
             }
             Self::NotRegisteredWithToken { token_id, .. } => Some(format!(
@@ -462,8 +466,6 @@ pub const DEX_CODE_NOT_FOUND: &str = "Dex code not found";
 pub const NOT_INITIALIZED: &str = "The contract is not initialized";
 /// near-sdk's panic when a contract's code can't read its state
 pub const UNREADABLE_STATE: &str = "Cannot deserialize the contract state.";
-/// near-sdk's panic when a contract's code can't read an element of one of its collections
-pub const UNREADABLE_ELEMENT: &str = "Cannot deserialize element";
 
 struct ContractPanicHint {
     /// Part of the panic message as the contract sources spell it

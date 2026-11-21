@@ -189,7 +189,7 @@ impl From<DisableContext> for ActionContext {
 }
 
 /// What `fee_discount_signer` makes of fee discounts: who signs them, or that there are none
-fn fee_discounts_label(fee_discount_signer: Option<&PublicKey>) -> String {
+pub(super) fn fee_discounts_label(fee_discount_signer: Option<&PublicKey>) -> String {
     match fee_discount_signer {
         Some(public_key) => format!("fee discounts signed by {public_key}"),
         None => "fee discounts disabled".to_string(),
