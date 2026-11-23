@@ -260,7 +260,7 @@ impl StoreInner {
     pub fn initialize_instance(&mut self, instance: Instance, init: InstanceEntity) {
         assert!(
             init.is_initialized(),
-            "encountered an uninitialized new instance entity: {init:?}",
+            "encountered an uninitialized new instance entity",
         );
         let idx = match self.unwrap_stored(instance.as_inner()) {
             Ok(idx) => idx,
@@ -272,7 +272,7 @@ impl StoreInner {
             .unwrap_or_else(|| panic!("missing entity for the given instance: {instance:?}"));
         assert!(
             !uninit.is_initialized(),
-            "encountered an already initialized instance: {uninit:?}",
+            "encountered an already initialized instance",
         );
         *uninit = init;
     }

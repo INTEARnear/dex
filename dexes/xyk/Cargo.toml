@@ -14,4 +14,3 @@ full = []
 near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
 intear-dex-common = { path = "../../intear-dex-common", features = ["dex"] }
 xyk-dex-types = { path = "types", features = ["dex"] }
-talc = { version = "4.4.3", default-features = false, features = ["lock_api"] }

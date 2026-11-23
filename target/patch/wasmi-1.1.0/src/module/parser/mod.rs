@@ -551,6 +551,6 @@ impl ModuleParser {
                 return Err(Error::from(error));
             }
         }
-        panic!("encountered unsupported, unexpected or malformed Wasm payload: {payload:?}")
+        panic!("encountered unsupported, unexpected or malformed Wasm payload")
     }
 }

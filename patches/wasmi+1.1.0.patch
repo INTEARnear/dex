@@ -17,7 +17,7 @@ index f57acec..d65234f 100644
  wat = [
      "dep:wat",
 diff --git a/src/engine/code_map.rs b/src/engine/code_map.rs
-index f1fccb0..3bdbff1 100644
+index f1fccb0..e641346 100644
 --- a/src/engine/code_map.rs
 +++ b/src/engine/code_map.rs
 @@ -5,19 +5,21 @@
@@ -159,17 +159,19 @@ index f1fccb0..3bdbff1 100644
      /// Compile and validate the [`UncompiledFuncEntity`] identified by `func`.
      ///
      /// # Errors
-@@ -417,7 +485,9 @@ impl CodeMap {
+@@ -417,8 +485,10 @@ impl CodeMap {
                  FuncEntity::FailedToCompile => {
                      return Err(Error::from(TranslationError::LazyCompilationFailed))
                  }
 -                FuncEntity::Uncompiled(_) | FuncEntity::Uninit => {
+-                    panic!("unexpected function state: {entity:?}")
 +                #[cfg(feature = "translate")]
-+                FuncEntity::Uncompiled(_) => panic!("unexpected function state: {entity:?}"),
++                FuncEntity::Uncompiled(_) => panic!("unexpected function state: uncompiled"),
 +                FuncEntity::Serialized(_) | FuncEntity::Uninit => {
-                     panic!("unexpected function state: {entity:?}")
++                    panic!("unexpected function state: serialized or uninitialized")
                  }
              }
+         }
 @@ -432,8 +502,11 @@ impl CodeMap {
  enum FuncEntity {
      /// The function entity has not yet been initialized.
@@ -742,6 +744,24 @@ index 915830a..7eefa7b 100644
      impl From<FuelError> for Error::Fuel;
      impl From<FuncError> for Error::Func;
      impl From<EnforcedLimitsError> for Error::Limits;
+diff --git a/src/instance/builder.rs b/src/instance/builder.rs
+index 5e958a4..2246dca 100644
+--- a/src/instance/builder.rs
++++ b/src/instance/builder.rs
+@@ -163,11 +163,8 @@ impl InstanceEntityBuilder {
+     ///
+     /// If the name has already been used by an already pushed [`Extern`].
+     pub fn push_export(&mut self, name: &str, new_value: Extern) {
+-        if let Some(old_value) = self.exports.get(name) {
+-            panic!(
+-                "tried to register {new_value:?} for name {name} \
+-                but name is already used by {old_value:?}",
+-            )
++        if self.exports.contains_key(name) {
++            panic!("tried to register an export for name {name}, which is already used")
+         }
+         self.exports.insert(name.into(), new_value);
+     }
 diff --git a/src/lib.rs b/src/lib.rs
 index 235aa45..aac89f8 100644
 --- a/src/lib.rs
@@ -767,6 +787,30 @@ index 235aa45..aac89f8 100644
      };
      pub use wasmi_core::{FuelError, GlobalError, HostError, MemoryError, TableError};
  }
+diff --git a/src/module/init_expr.rs b/src/module/init_expr.rs
+index 079a1bd..af2e14a 100644
+--- a/src/module/init_expr.rs
++++ b/src/module/init_expr.rs
+@@ -323,9 +323,7 @@ impl ConstExpr {
+                             shared: false,
+                             ty: AbstractHeapType::Extern,
+                         } => Val::from(<Ref<ExternRef>>::Null),
+-                        invalid => {
+-                            panic!("invalid heap type for `ref.null`: {invalid:?}")
+-                        }
++                        _ => panic!("invalid heap type for `ref.null`"),
+                     };
+                     Op::constant(value)
+                 }
+@@ -337,7 +335,7 @@ impl ConstExpr {
+                 wasmparser::Operator::I64Sub => expr_op(&mut stack, wasm::i64_sub),
+                 wasmparser::Operator::I64Mul => expr_op(&mut stack, wasm::i64_mul),
+                 wasmparser::Operator::End => break,
+-                op => panic!("unexpected Wasm const expression operator: {op:?}"),
++                _ => panic!("unexpected Wasm const expression operator"),
+             };
+             stack.push(op);
+         }
 diff --git a/src/module/mod.rs b/src/module/mod.rs
 index 6c3071b..5f0fbda 100644
 --- a/src/module/mod.rs
@@ -853,7 +897,7 @@ index c9b1ab2..4041289 100644
                      let bytes = func_body.as_bytes();
                      self.process_code_entry(func_body, bytes, module)
 diff --git a/src/module/parser/mod.rs b/src/module/parser/mod.rs
-index b76746b..758e79a 100644
+index b76746b..e2289b7 100644
 --- a/src/module/parser/mod.rs
 +++ b/src/module/parser/mod.rs
 @@ -23,7 +23,6 @@ use wasmparser::{
@@ -1048,7 +1092,7 @@ index b76746b..758e79a 100644
      /// Process a single module code section entry.
      ///
      /// # Note
-@@ -510,6 +545,7 @@ impl ModuleParser {
+@@ -510,11 +545,12 @@ impl ModuleParser {
  
      /// Process an unexpected, unsupported or malformed Wasm module section payload.
      fn process_invalid_payload(&mut self, payload: Payload<'_>) -> Result<(), Error> {
@@ -1056,6 +1100,12 @@ index b76746b..758e79a 100644
          if let Some(validator) = &mut self.validator {
              if let Err(error) = validator.payload(&payload) {
                  return Err(Error::from(error));
+             }
+         }
+-        panic!("encountered unsupported, unexpected or malformed Wasm payload: {payload:?}")
++        panic!("encountered unsupported, unexpected or malformed Wasm payload")
+     }
+ }
 diff --git a/src/module/serialization.rs b/src/module/serialization.rs
 new file mode 100644
 index 0000000..faac27d
@@ -1322,3 +1372,86 @@ index 0000000..faac27d
 +    }
 +    Ok(bytes)
 +}
+diff --git a/src/module/utils.rs b/src/module/utils.rs
+index fc8d51b..6599bdd 100644
+--- a/src/module/utils.rs
++++ b/src/module/utils.rs
+@@ -136,7 +136,7 @@ impl From<wasmparser::HeapType> for WasmiValueType {
+                 shared: false,
+                 ty: AbstractHeapType::Extern,
+             } => Self::from(ValType::ExternRef),
+-            unsupported => panic!("encountered unsupported heap type: {unsupported:?}"),
++            _ => panic!("encountered unsupported heap type"),
+         }
+     }
+ }
+@@ -146,7 +146,7 @@ impl From<wasmparser::RefType> for WasmiValueType {
+         match ref_type {
+             wasmparser::RefType::FUNCREF => Self::from(ValType::FuncRef),
+             wasmparser::RefType::EXTERNREF => Self::from(ValType::ExternRef),
+-            unsupported => panic!("encountered unsupported reference type: {unsupported:?}"),
++            _ => panic!("encountered unsupported reference type"),
+         }
+     }
+ }
+diff --git a/src/store/inner.rs b/src/store/inner.rs
+index 30d55c1..be18fa1 100644
+--- a/src/store/inner.rs
++++ b/src/store/inner.rs
+@@ -260,7 +260,7 @@ impl StoreInner {
+     pub fn initialize_instance(&mut self, instance: Instance, init: InstanceEntity) {
+         assert!(
+             init.is_initialized(),
+-            "encountered an uninitialized new instance entity: {init:?}",
++            "encountered an uninitialized new instance entity",
+         );
+         let idx = match self.unwrap_stored(instance.as_inner()) {
+             Ok(idx) => idx,
+@@ -272,7 +272,7 @@ impl StoreInner {
+             .unwrap_or_else(|| panic!("missing entity for the given instance: {instance:?}"));
+         assert!(
+             !uninit.is_initialized(),
+-            "encountered an already initialized instance: {uninit:?}",
++            "encountered an already initialized instance",
+         );
+         *uninit = init;
+     }
+diff --git a/src/table/element.rs b/src/table/element.rs
+index 5cfc9d9..7c59be4 100644
+--- a/src/table/element.rs
++++ b/src/table/element.rs
+@@ -62,9 +62,9 @@ impl ElementSegment {
+                     .items()
+                     .iter()
+                     .map(|const_expr| {
+-                        const_expr.eval_with_context(get_global, get_func).unwrap_or_else(|| {
+-                            panic!("unexpected failed initialization of constant expression: {const_expr:?}")
+-                        })
++                        const_expr
++                            .eval_with_context(get_global, get_func)
++                            .expect("unexpected failed initialization of constant expression")
+                 }).collect()
+             }
+             module::ElementSegmentKind::Declared => Box::from([]),
+diff --git a/src/value.rs b/src/value.rs
+index ba10c5a..3218796 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -32,7 +32,7 @@ impl WithType for UntypedVal {
+             ValType::FuncRef => Val::FuncRef(self.into()),
+             ValType::ExternRef => Val::ExternRef(self.into()),
+             #[cfg(not(feature = "simd"))]
+-            unsupported => unimplemented!("encountered unsupported `ValType`: {unsupported:?}"),
++            _ => unimplemented!("encountered unsupported `ValType`"),
+         }
+     }
+ }
+@@ -49,7 +49,7 @@ impl From<Val> for UntypedVal {
+             Val::FuncRef(value) => value.into(),
+             Val::ExternRef(value) => value.into(),
+             #[cfg(not(feature = "simd"))]
+-            unsupported => unimplemented!("encountered unsupported `Val`: {unsupported:?}"),
++            _ => unimplemented!("encountered unsupported `Val`"),
+         }
+     }
+ }

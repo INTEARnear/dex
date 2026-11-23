@@ -133,11 +133,14 @@ impl RunContext {
                 Operation::Withdraw {
                     rescue_address: Some(_),
                     ..
+                } | Operation::OracleRequest {
+                    rescue_address: Some(_),
+                    ..
                 }
             )
         }) {
             return Err(eyre!(
-                "{} gives a Withdraw a rescue_address, which {ENGINE_ACCOUNT_ID} only reads when the operations come with a deposit in a transfer call or deposit_near, and this runs them with execute_operations",
+                "{} gives a Withdraw or an OracleRequest a rescue_address, which {ENGINE_ACCOUNT_ID} only reads when the operations come with a deposit in a transfer call or deposit_near, and this runs them with execute_operations",
                 scope.file
             ));
         }
@@ -531,6 +534,7 @@ fn operation_step(
             request,
             fee: (fee_asset, fee),
             swap,
+            rescue_address: _,
         } => {
             let wait_for = format!(
                 "for oracle {oracle_key} to respond to {} bytes of request for {dex_id}, paying its fee of {}",

@@ -1,6 +1,8 @@
 #![deny(clippy::arithmetic_side_effects)]
 
 mod amounts;
+#[cfg(target_arch = "wasm32")]
+mod bump_allocator;
 mod fee_balances;
 mod fee_discounts;
 mod pools;
@@ -9,6 +11,8 @@ mod routes;
 use std::{collections::HashMap, fmt, fmt::Display, str::FromStr};
 
 pub use amounts::{FULL_FEE_FRACTION, FeeFraction, TokenAmount, fraction_of, mul_div};
+#[cfg(target_arch = "wasm32")]
+pub use bump_allocator::BumpAllocator;
 #[cfg(feature = "dex")]
 pub use fee_balances::FeeBalances;
 pub use fee_balances::{GetPendingFeesArgs, WithdrawFeesArgs};

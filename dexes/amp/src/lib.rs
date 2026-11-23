@@ -30,13 +30,9 @@ use near_sdk::{
     store::{LookupMap, Vector},
 };
 
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
-static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
-    const MEMORY_SIZE: usize = 0x10000; // 64KB
-    static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
-    let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
-    talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
-};
+static ALLOCATOR: intear_dex_common::BumpAllocator = intear_dex_common::BumpAllocator;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]

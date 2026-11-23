@@ -21,6 +21,10 @@ use otc_dex_types::{
     WithdrawAssetsArgs, WithdrawRequest,
 };
 
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOCATOR: intear_dex_common::BumpAllocator = intear_dex_common::BumpAllocator;
+
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {

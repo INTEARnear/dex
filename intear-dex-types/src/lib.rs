@@ -233,12 +233,17 @@ pub enum Operation {
     /// called `execute_operations`, or bought with them by `swap`. The oracle
     /// keeps it once it responds, even if the operations after the request fail,
     /// and it's refunded in the fee asset if the oracle doesn't respond in time.
+    ///
+    /// A deposit that isn't used is refunded to its sender, or if that fails
+    /// and the sender has no balance of it on the engine, to the balance of
+    /// `rescue_address`, like a withdrawal.
     OracleRequest {
         oracle_key: PublicKeyHandle,
         dex_id: DexId,
         request: Base64VecU8,
         fee: (AssetId, TokenAmount),
         swap: Option<OracleFeeSwap>,
+        rescue_address: Option<AccountId>,
     },
 }
 

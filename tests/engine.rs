@@ -5810,6 +5810,7 @@ async fn test_oracle() {
         request: Base64VecU8(request),
         fee: (fee_asset, TokenAmount::ZERO),
         swap: None,
+        rescue_address: None,
     };
     let oracle_request = |request: Vec<u8>| oracle_request_paid_in(ft1_asset_id.clone(), request);
     let oracle_rate_swap =
@@ -6592,6 +6593,7 @@ async fn test_oracle_key_types() {
                     request: Base64VecU8(request.clone()),
                     fee: (AssetId::Near, TokenAmount::ZERO),
                     swap: None,
+                    rescue_address: None,
                 }],
             }))
             .transact_async()
@@ -6778,6 +6780,7 @@ async fn test_oracle_fees() {
             request: Base64VecU8(request.clone()),
             fee: (fee_asset.clone(), TokenAmount::new(fee)),
             swap: None,
+            rescue_address: None,
         };
     let oracle_rate_swap = |asset_in: &AssetId, amount: u128| Operation::SwapSimple {
         dex_id: dex_id.clone(),
@@ -7290,6 +7293,67 @@ async fn test_oracle_fees() {
     wait_for_blocks(&sandbox, 3).await;
     assert_untracked_near(&dex_engine_contract).await.unwrap();
 
+    // A deposit that can't be refunded to a trader without a balance of it on the engine goes to
+    // the rescue address of the oracle request, user4's balance
+    let trader = sandbox.dev_create_account().await.unwrap();
+    ft_storage_deposit(&ft1, &trader).await;
+    let result = deployer
+        .call(ft1.id(), "ft_transfer")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": trader.id(),
+            "amount": U128(ft1_deposit),
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let operations = vec![
+        Operation::OracleRequest {
+            oracle_key: oracle_key_handle(&oracle_key),
+            dex_id: dex_id.clone(),
+            request: Base64VecU8(request.clone()),
+            fee: (ft1_asset_id.clone(), TokenAmount::new(ft1_fee)),
+            swap: None,
+            rescue_address: Some(user4.id().clone()),
+        },
+        swap_rest_of_deposit(&ft1_asset_id),
+        withdraw_swap_output(),
+    ];
+    let waiting = trader
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(ft1_deposit),
+            "msg": near_sdk::serde_json::to_string(&operations).unwrap(),
+        }))
+        .transact_async()
+        .await
+        .unwrap();
+    waiting_for_oracle_request(&sandbox, &[&waiting], &request).await;
+    let result = trader
+        .call(ft1.id(), "storage_unregister")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({}))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let user4_ft1_on_engine = balance_on_engine(&user4, &ft1_asset_id).await;
+    sandbox.fast_forward(250).await.unwrap();
+    let result = executed(&sandbox, waiting).await;
+    assert!(format!("{result:?}").contains("Oracle didn't respond in time"));
+    assert_eq!(
+        balance_on_engine(&user4, &ft1_asset_id).await,
+        user4_ft1_on_engine + ft1_deposit
+    );
+    let ft1_in_custody = ft1_in_custody + ft1_deposit;
+    assert_eq!(total_in_custody(&ft1_asset_id).await, ft1_in_custody);
+
     // Removing the key removes its fee receiver and fees, whose storage the receiver gets back,
     // and what the oracle took stays the receiver's
     let storage_available_before_key = storage_available(&user3).await;
@@ -7479,6 +7543,7 @@ async fn test_oracle_fee_swap() {
                 asset_in: asset_in.clone(),
                 constraint: maximum_in.map(TokenAmount::new),
             }),
+            rescue_address: None,
         };
     let oracle_request_paid_with_near = |maximum_near_in: Option<u128>| {
         oracle_request_paid_with_swap(&AssetId::Near, maximum_near_in)

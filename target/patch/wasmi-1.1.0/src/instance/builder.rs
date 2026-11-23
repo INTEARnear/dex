@@ -163,11 +163,8 @@ impl InstanceEntityBuilder {
     ///
     /// If the name has already been used by an already pushed [`Extern`].
     pub fn push_export(&mut self, name: &str, new_value: Extern) {
-        if let Some(old_value) = self.exports.get(name) {
-            panic!(
-                "tried to register {new_value:?} for name {name} \
-                but name is already used by {old_value:?}",
-            )
+        if self.exports.contains_key(name) {
+            panic!("tried to register an export for name {name}, which is already used")
         }
         self.exports.insert(name.into(), new_value);
     }

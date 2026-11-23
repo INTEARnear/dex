@@ -486,9 +486,9 @@ impl CodeMap {
                     return Err(Error::from(TranslationError::LazyCompilationFailed))
                 }
                 #[cfg(feature = "translate")]
-                FuncEntity::Uncompiled(_) => panic!("unexpected function state: {entity:?}"),
+                FuncEntity::Uncompiled(_) => panic!("unexpected function state: uncompiled"),
                 FuncEntity::Serialized(_) | FuncEntity::Uninit => {
-                    panic!("unexpected function state: {entity:?}")
+                    panic!("unexpected function state: serialized or uninitialized")
                 }
             }
         }

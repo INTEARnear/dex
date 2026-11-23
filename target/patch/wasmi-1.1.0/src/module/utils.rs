@@ -136,7 +136,7 @@ impl From<wasmparser::HeapType> for WasmiValueType {
                 shared: false,
                 ty: AbstractHeapType::Extern,
             } => Self::from(ValType::ExternRef),
-            unsupported => panic!("encountered unsupported heap type: {unsupported:?}"),
+            _ => panic!("encountered unsupported heap type"),
         }
     }
 }
@@ -146,7 +146,7 @@ impl From<wasmparser::RefType> for WasmiValueType {
         match ref_type {
             wasmparser::RefType::FUNCREF => Self::from(ValType::FuncRef),
             wasmparser::RefType::EXTERNREF => Self::from(ValType::ExternRef),
-            unsupported => panic!("encountered unsupported reference type: {unsupported:?}"),
+            _ => panic!("encountered unsupported reference type"),
         }
     }
 }

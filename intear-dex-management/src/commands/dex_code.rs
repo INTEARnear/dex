@@ -65,6 +65,7 @@ pub fn build_dex_package(
 ) -> color_eyre::eyre::Result<Vec<u8>> {
     build_dex_wasm(
         package_name,
+        "release",
         &[format!("--features={}", features.join(","))],
     )
 }
@@ -72,10 +73,18 @@ pub fn build_dex_package(
 /// Builds the swap code of `package_name` like [`build_dex_package`]: without its default
 /// `full` feature, so with only its swap method
 pub fn build_dex_swap_code(package_name: &str) -> color_eyre::eyre::Result<Vec<u8>> {
-    build_dex_wasm(package_name, &["--no-default-features".to_string()])
+    build_dex_wasm(
+        package_name,
+        "swap-code",
+        &["--no-default-features".to_string()],
+    )
 }
 
-fn build_dex_wasm(package_name: &str, cargo_args: &[String]) -> color_eyre::eyre::Result<Vec<u8>> {
+fn build_dex_wasm(
+    package_name: &str,
+    profile: &str,
+    cargo_args: &[String],
+) -> color_eyre::eyre::Result<Vec<u8>> {
     let deploy_built_file_instead = "Or deploy a wasm file that's already built with use-file";
     // A missing wasm-opt fails before the build, which takes a while
     let is_wasm_opt_installed = Command::new("wasm-opt")
@@ -121,13 +130,13 @@ fn build_dex_wasm(package_name: &str, cargo_args: &[String]) -> color_eyre::eyre
                 .suggestion(deploy_built_file_instead),
         );
     }
-    tracing::info!("Building {package_name} with {cargo_args:?} in {workspace_root}");
+    tracing::info!("Building {package_name} with {profile} and {cargo_args:?} in {workspace_root}");
     let build_status = Command::new("cargo")
         .current_dir(workspace_root)
         .args([
             "build",
             &format!("--package={package_name}"),
-            "--release",
+            &format!("--profile={profile}"),
             "--target=wasm32-unknown-unknown",
         ])
         .args(cargo_args)
@@ -139,7 +148,7 @@ fn build_dex_wasm(package_name: &str, cargo_args: &[String]) -> color_eyre::eyre
         ));
     }
     let wasm_path = PathBuf::from(target_directory).join(format!(
-        "wasm32-unknown-unknown/release/{}.wasm",
+        "wasm32-unknown-unknown/{profile}/{}.wasm",
         package_name.replace('-', "_")
     ));
     let wasm_opt_status = Command::new("wasm-opt")

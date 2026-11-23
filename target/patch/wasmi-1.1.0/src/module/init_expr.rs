@@ -323,9 +323,7 @@ impl ConstExpr {
                             shared: false,
                             ty: AbstractHeapType::Extern,
                         } => Val::from(<Ref<ExternRef>>::Null),
-                        invalid => {
-                            panic!("invalid heap type for `ref.null`: {invalid:?}")
-                        }
+                        _ => panic!("invalid heap type for `ref.null`"),
                     };
                     Op::constant(value)
                 }
@@ -337,7 +335,7 @@ impl ConstExpr {
                 wasmparser::Operator::I64Sub => expr_op(&mut stack, wasm::i64_sub),
                 wasmparser::Operator::I64Mul => expr_op(&mut stack, wasm::i64_mul),
                 wasmparser::Operator::End => break,
-                op => panic!("unexpected Wasm const expression operator: {op:?}"),
+                _ => panic!("unexpected Wasm const expression operator"),
             };
             stack.push(op);
         }

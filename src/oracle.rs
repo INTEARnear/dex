@@ -277,6 +277,7 @@ impl DexEngine {
         trader: Caller,
         held_assets: Option<HashMap<AssetId, TokenAmount>>,
         oracle_fee: OracleFee,
+        rescue_address: Option<AccountId>,
         #[callback_result] outcome: Result<OracleRequestOutcome, PromiseError>,
     ) -> PromiseOrValue<()> {
         let mut events = CallEvents::default();
@@ -350,7 +351,11 @@ impl DexEngine {
                         asset_id,
                         refund_amount,
                         alleged_sender.clone(),
-                        AccountOrDexId::Account(alleged_sender.clone()),
+                        AccountOrDexId::Account(
+                            rescue_address
+                                .clone()
+                                .unwrap_or_else(|| alleged_sender.clone()),
+                        ),
                     )
                     .detach();
                 }
@@ -405,6 +410,7 @@ impl DexEngine {
             request,
             fee: (fee_asset, fee),
             swap,
+            rescue_address,
         } = operations.remove(0)
         else {
             unreachable!("Operations that wait for an oracle start with an oracle request");
@@ -534,7 +540,7 @@ impl DexEngine {
             Self::ext(near_sdk::env::current_account_id())
                 .with_static_gas(gas_for_after_oracle_operations)
                 .with_unused_gas_weight(0)
-                .after_oracle_operations(trader, sandboxed_assets, oracle_fee),
+                .after_oracle_operations(trader, sandboxed_assets, oracle_fee, rescue_address),
         )
     }
 }

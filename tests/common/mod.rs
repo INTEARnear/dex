@@ -138,19 +138,23 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
             )
             .unwrap();
 
-            let release_wasm_directory = target_directory.join("wasm32-unknown-unknown/release");
+            let wasm_directory = target_directory.join("wasm32-unknown-unknown");
 
             let test_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "test-dex", &[]).await;
+                compile_dex(workspace_root, &wasm_directory, "test-dex", "release", &[]).await;
             let otc_dex_wasm =
-                compile_dex(workspace_root, &release_wasm_directory, "otc-dex", &[]).await;
+                compile_dex(workspace_root, &wasm_directory, "otc-dex", "release", &[]).await;
             let xyk_dex_wasm = match prebuilt_wasm("INTEAR_DEX_XYK_WASM") {
                 Some(wasm) => wasm,
-                None => compile_dex(workspace_root, &release_wasm_directory, "xyk-dex", &[]).await,
+                None => {
+                    compile_dex(workspace_root, &wasm_directory, "xyk-dex", "release", &[]).await
+                }
             };
             let amp_dex_wasm = match prebuilt_wasm("INTEAR_DEX_AMP_WASM") {
                 Some(wasm) => wasm,
-                None => compile_dex(workspace_root, &release_wasm_directory, "amp-dex", &[]).await,
+                None => {
+                    compile_dex(workspace_root, &wasm_directory, "amp-dex", "release", &[]).await
+                }
             };
             let swap_only = ["--no-default-features"];
             let xyk_dex_swap_wasm = match prebuilt_wasm("INTEAR_DEX_XYK_SWAP_WASM") {
@@ -158,8 +162,9 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 None => {
                     compile_dex(
                         workspace_root,
-                        &release_wasm_directory,
+                        &wasm_directory,
                         "xyk-dex",
+                        "swap-code",
                         &swap_only,
                     )
                     .await
@@ -170,8 +175,9 @@ pub async fn get_compiled_wasms() -> &'static CompiledWasms {
                 None => {
                     compile_dex(
                         workspace_root,
-                        &release_wasm_directory,
+                        &wasm_directory,
                         "amp-dex",
+                        "swap-code",
                         &swap_only,
                     )
                     .await
@@ -208,18 +214,22 @@ fn prebuilt_wasm(env_var: &str) -> Option<Vec<u8>> {
 
 async fn compile_dex(
     workspace_root: &Path,
-    release_wasm_directory: &Path,
+    wasm_directory: &Path,
     package: &str,
+    profile: &str,
     cargo_args: &[&str],
 ) -> Vec<u8> {
-    println!("Compiling {package} {}", cargo_args.join(" "));
+    println!(
+        "Compiling {package} with {profile} {}",
+        cargo_args.join(" ")
+    );
     assert!(
         Command::new("cargo")
             .current_dir(workspace_root)
             .args([
                 "build",
                 &format!("--package={package}"),
-                "--release",
+                &format!("--profile={profile}"),
                 "--target",
                 "wasm32-unknown-unknown",
             ])
@@ -229,7 +239,9 @@ async fn compile_dex(
             .unwrap()
             .success()
     );
-    let wasm_path = release_wasm_directory.join(format!("{}.wasm", package.replace('-', "_")));
+    let wasm_path = wasm_directory
+        .join(profile)
+        .join(format!("{}.wasm", package.replace('-', "_")));
     assert!(
         Command::new("wasm-opt")
             .arg("-O")

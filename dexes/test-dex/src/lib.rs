@@ -11,12 +11,9 @@ use test_dex_types::{
     RemoveLiquidityArgs, SimplePool, SwapMessage,
 };
 
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
-static ALLOCATOR: talc::Talck<talc::locking::AssumeUnlockable, talc::ClaimOnOom> = {
-    static mut MEMORY: [u8; 0x8000] = [0; 0x8000]; // 32KB
-    let span = talc::Span::from_array(core::ptr::addr_of!(MEMORY).cast_mut());
-    talc::Talc::new(unsafe { talc::ClaimOnOom::new(span) }).lock()
-};
+static ALLOCATOR: intear_dex_common::BumpAllocator = intear_dex_common::BumpAllocator;
 
 /// The dex that the engine's tests run: the simplest possible x*y=k pools,
 /// with just one liquidity provider each, swaps of an asset for itself, and

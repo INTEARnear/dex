@@ -62,9 +62,9 @@ impl ElementSegment {
                     .items()
                     .iter()
                     .map(|const_expr| {
-                        const_expr.eval_with_context(get_global, get_func).unwrap_or_else(|| {
-                            panic!("unexpected failed initialization of constant expression: {const_expr:?}")
-                        })
+                        const_expr
+                            .eval_with_context(get_global, get_func)
+                            .expect("unexpected failed initialization of constant expression")
                 }).collect()
             }
             module::ElementSegmentKind::Declared => Box::from([]),

@@ -32,7 +32,7 @@ impl WithType for UntypedVal {
             ValType::FuncRef => Val::FuncRef(self.into()),
             ValType::ExternRef => Val::ExternRef(self.into()),
             #[cfg(not(feature = "simd"))]
-            unsupported => unimplemented!("encountered unsupported `ValType`: {unsupported:?}"),
+            _ => unimplemented!("encountered unsupported `ValType`"),
         }
     }
 }
@@ -49,7 +49,7 @@ impl From<Val> for UntypedVal {
             Val::FuncRef(value) => value.into(),
             Val::ExternRef(value) => value.into(),
             #[cfg(not(feature = "simd"))]
-            unsupported => unimplemented!("encountered unsupported `Val`: {unsupported:?}"),
+            _ => unimplemented!("encountered unsupported `Val`"),
         }
     }
 }

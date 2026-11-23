@@ -36,7 +36,9 @@ impl DexEngine {
     ) {
         let translation = |result_index: u64| {
             near_sdk::env::promise_result_checked(result_index, usize::MAX).unwrap_or_else(|err| {
-                panic!("The translator didn't translate the {result_index} code of {dex_id}: {err:?}")
+                panic!(
+                    "The translator didn't translate the {result_index} code of {dex_id}: {err:?}"
+                )
             })
         };
         let translated_code = translation(0);

@@ -41,6 +41,10 @@ use near_sdk::{
 
 pub type AssetBalances = IterableMap<AssetId, TokenAmount>;
 
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOCATOR: intear_dex_common::BumpAllocator = intear_dex_common::BumpAllocator;
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct DexEngine {
