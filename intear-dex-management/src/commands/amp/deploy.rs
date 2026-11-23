@@ -108,7 +108,12 @@ impl BuildContext {
         _scope: &<Build as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let code = dex_code::build_dex_package("amp-dex", &[])?;
-        Ok(Self(deploy_action_context(previous_context, code)))
+        let swap_code = dex_code::build_dex_swap_code("amp-dex")?;
+        Ok(Self(deploy_action_context(
+            previous_context,
+            code,
+            Some(swap_code),
+        )))
     }
 }
 
@@ -124,6 +129,11 @@ impl From<BuildContext> for ActionContext {
 pub struct UseFile {
     /// The wasm file
     file: near_cli_rs::types::path_buf::PathBuf,
+    #[interactive_clap(long)]
+    #[interactive_clap(skip_interactive_input)]
+    /// A wasm file built with only the swap method, without the default features, which swaps
+    /// run instead of the code
+    swap_code_file: Option<near_cli_rs::types::path_buf::PathBuf>,
     #[interactive_clap(named_arg)]
     /// Select network
     network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
@@ -138,7 +148,16 @@ impl UseFileContext {
         scope: &<UseFile as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
     ) -> color_eyre::eyre::Result<Self> {
         let code = dex_code::read_wasm_file(&scope.file)?;
-        Ok(Self(deploy_action_context(previous_context, code)))
+        let swap_code = scope
+            .swap_code_file
+            .as_ref()
+            .map(dex_code::read_wasm_file)
+            .transpose()?;
+        Ok(Self(deploy_action_context(
+            previous_context,
+            code,
+            swap_code,
+        )))
     }
 }
 
@@ -148,7 +167,11 @@ impl From<UseFileContext> for ActionContext {
     }
 }
 
-fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> ActionContext {
+fn deploy_action_context(
+    deploy_context: DeployContext,
+    code: Vec<u8>,
+    swap_code: Option<Vec<u8>>,
+) -> ActionContext {
     let DeployContext {
         global_context,
         dex_id,
@@ -161,10 +184,18 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
         let dex_code::CodeDeployment {
             is_upgrade,
             code_hash,
+            swap_code_hash,
             code_label,
             mut steps,
             function_calls,
-        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, 0, migration)?;
+        } = dex_code::plan_code_deployment(
+            preflight,
+            &dex_id,
+            &code,
+            swap_code.as_deref(),
+            0,
+            migration,
+        )?;
         if is_upgrade && !migrates {
             steps.push("Keep the state as it is".to_string());
         }
@@ -198,6 +229,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                 deployment: Some(ExpectedDeployment {
                     dex_id: dex_id.clone(),
                     code_hash,
+                    swap_code_hash,
                     next_step: (!is_upgrade)
                         .then(|| format!("Next, initialize it: {init_command}")),
                 }),

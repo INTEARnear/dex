@@ -151,13 +151,22 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
             &dex_id,
             preflight.protocol_limits.extra_bytes_per_record,
         )?;
+        // The OTC dex has no build with only its swap method
         let dex_code::CodeDeployment {
             is_upgrade,
             code_hash,
+            swap_code_hash,
             code_label,
             mut steps,
             function_calls,
-        } = dex_code::plan_code_deployment(preflight, &dex_id, &code, initial_state_bytes, None)?;
+        } = dex_code::plan_code_deployment(
+            preflight,
+            &dex_id,
+            &code,
+            None,
+            initial_state_bytes,
+            None,
+        )?;
         if is_upgrade {
             steps.push("Keep the state as it is".to_string());
         }
@@ -186,6 +195,7 @@ fn deploy_action_context(deploy_context: DeployContext, code: Vec<u8>) -> Action
                 deployment: Some(ExpectedDeployment {
                     dex_id: dex_id.clone(),
                     code_hash,
+                    swap_code_hash,
                     next_step: (!is_upgrade).then(|| {
                         format!(
                             "It needs no initialization. Each trader pays for their records on it, e.g.: {storage_deposit_command}"

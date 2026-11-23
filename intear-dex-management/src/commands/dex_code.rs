@@ -23,6 +23,7 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, Preflight, format_near
 const DEPLOY_DEX_CODE_GAS: Gas = Gas::from_teragas(300);
 const WASM_MAGIC_BYTES: &[u8] = b"\0asm";
 const CALL_AFTER_DEPLOY_ARG: &[u8] = b"call_after_deploy";
+const SWAP_CODE_ARG: &[u8] = b"swap_code_base64";
 /// The host function that dex code reads fee discounts from the engine with
 const FEE_DISCOUNT_HOST_FUNCTION: &str = "fee_discount";
 /// The view of dex code from while dexes checked fee discounts themselves, which stored the key
@@ -62,6 +63,19 @@ pub fn build_dex_package(
     package_name: &str,
     features: &[&str],
 ) -> color_eyre::eyre::Result<Vec<u8>> {
+    build_dex_wasm(
+        package_name,
+        &[format!("--features={}", features.join(","))],
+    )
+}
+
+/// Builds the swap code of `package_name` like [`build_dex_package`]: without its default
+/// `full` feature, so with only its swap method
+pub fn build_dex_swap_code(package_name: &str) -> color_eyre::eyre::Result<Vec<u8>> {
+    build_dex_wasm(package_name, &["--no-default-features".to_string()])
+}
+
+fn build_dex_wasm(package_name: &str, cargo_args: &[String]) -> color_eyre::eyre::Result<Vec<u8>> {
     let deploy_built_file_instead = "Or deploy a wasm file that's already built with use-file";
     // A missing wasm-opt fails before the build, which takes a while
     let is_wasm_opt_installed = Command::new("wasm-opt")
@@ -107,16 +121,16 @@ pub fn build_dex_package(
                 .suggestion(deploy_built_file_instead),
         );
     }
-    tracing::info!("Building {package_name} with features {features:?} in {workspace_root}");
+    tracing::info!("Building {package_name} with {cargo_args:?} in {workspace_root}");
     let build_status = Command::new("cargo")
         .current_dir(workspace_root)
         .args([
             "build",
             &format!("--package={package_name}"),
-            &format!("--features={}", features.join(",")),
             "--release",
             "--target=wasm32-unknown-unknown",
         ])
+        .args(cargo_args)
         .status()
         .wrap_err("Couldn't run cargo build")?;
     if !build_status.success() {
@@ -207,18 +221,20 @@ pub struct CodeDeployment {
     /// Whether the dex already has code, which the new code replaces
     pub is_upgrade: bool,
     pub code_hash: Base58CryptoHash,
+    pub swap_code_hash: Option<Base58CryptoHash>,
     pub code_label: String,
     pub steps: Vec<String>,
     pub function_calls: Vec<FunctionCall>,
 }
 
-/// `extra_state_bytes` is what the dex's storage balance has to cover on top
-/// of the code of a new dex, for state that the dex stores as soon as it's
-/// called
+/// `swap_code` is a build of the dex with only its swap method, which its swaps run instead of
+/// `code`. `extra_state_bytes` is what the dex's storage balance has to cover on top of the code
+/// of a new dex, for state that the dex stores as soon as it's called.
 pub fn plan_code_deployment(
     preflight: &Preflight,
     dex_id: &DexId,
     code: &[u8],
+    swap_code: Option<&[u8]>,
     extra_state_bytes: u64,
     call_after_deploy: Option<CallAfterDeploy>,
 ) -> color_eyre::eyre::Result<CodeDeployment> {
@@ -243,36 +259,74 @@ pub fn plan_code_deployment(
         }
         .into_report());
     }
-    if let Some(call_after_deploy) = &call_after_deploy {
-        // The engine ignores arguments it doesn't take, so code from before call_after_deploy
-        // would deploy without making the call. Code that takes it has its name to read it.
-        let engine_code = account::view_code(
-            &preflight.network_config,
-            &preflight.block_reference,
-            &ENGINE_ACCOUNT_ID.to_owned(),
-        )?;
-        if !engine_code
-            .windows(CALL_AFTER_DEPLOY_ARG.len())
-            .any(|bytes| bytes == CALL_AFTER_DEPLOY_ARG)
-        {
-            return Err(PreflightError::EngineWithoutCallAfterDeploy {
-                method: call_after_deploy.method.clone(),
-            }
-            .into_report());
+    if let Some(swap_code) = swap_code {
+        let swap_module =
+            wasmi::Module::new(&wasmi::Engine::default(), swap_code).map_err(|err| {
+                eyre!(
+                    "The translator rejects {} bytes of swap code: {err}",
+                    swap_code.len()
+                )
+            })?;
+        if !swap_module.exports().any(|export| export.name() == "swap") {
+            return Err(eyre!("The swap code has no swap method"));
         }
+    }
+    // The engine ignores arguments it doesn't take, so code from before an argument would deploy
+    // without what it's for. Code that takes one has its name to read it.
+    let engine_code = account::view_code(
+        &preflight.network_config,
+        &preflight.block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+    )?;
+    let engine_takes = |argument: &[u8]| {
+        engine_code
+            .windows(argument.len())
+            .any(|bytes| bytes == argument)
+    };
+    if let Some(call_after_deploy) = &call_after_deploy
+        && !engine_takes(CALL_AFTER_DEPLOY_ARG)
+    {
+        return Err(PreflightError::EngineWithoutCallAfterDeploy {
+            method: call_after_deploy.method.clone(),
+        }
+        .into_report());
+    }
+    let engine_takes_swap_code = engine_takes(SWAP_CODE_ARG);
+    if swap_code.is_some() && !engine_takes_swap_code {
+        return Err(PreflightError::EngineWithoutSwapCode.into_report());
     }
     let deployed_code = engine::dex_code(
         &preflight.network_config,
         &preflight.block_reference,
         dex_id,
     )?;
+    let deployed_swap_code = if engine_takes_swap_code && deployed_code.is_some() {
+        engine::dex_swap_code(
+            &preflight.network_config,
+            &preflight.block_reference,
+            dex_id,
+        )?
+    } else {
+        None
+    };
     let is_upgrade = deployed_code.is_some();
     let code_hash = Base58CryptoHash::from(near_primitives::hash::hash(code).0);
-    let code_label = format!(
-        "{} bytes of code (sha256 {})",
-        code.len(),
-        String::from(&code_hash)
-    );
+    let swap_code_hash =
+        swap_code.map(|swap_code| Base58CryptoHash::from(near_primitives::hash::hash(swap_code).0));
+    let code_label = match (swap_code, &swap_code_hash) {
+        (Some(swap_code), Some(swap_code_hash)) => format!(
+            "{} bytes of code (sha256 {}) with {} bytes of swap code (sha256 {}) that its swaps run",
+            code.len(),
+            String::from(&code_hash),
+            swap_code.len(),
+            String::from(swap_code_hash)
+        ),
+        _ => format!(
+            "{} bytes of code (sha256 {})",
+            code.len(),
+            String::from(&code_hash)
+        ),
+    };
     let mut steps = Vec::new();
     let mut function_calls = Vec::new();
     // The engine stores the code and its translation
@@ -286,11 +340,19 @@ pub fn plan_code_deployment(
             )?)
             .ok_or_else(|| eyre!("Storage size overflow"))
     };
-    // The engine charges an upgrade only for what the new code and its translation
+    // The swap code is stored the same way, under keys as long
+    let stored_codes_bytes = |code: &[u8], swap_code: Option<&[u8]>| {
+        stored_bytes(code)?
+            .checked_add(swap_code.map(stored_bytes).transpose()?.unwrap_or(0))
+            .ok_or_else(|| eyre!("Storage size overflow"))
+    };
+    // The engine charges an upgrade only for what the new codes and their translations
     // take more than the old, and frees what they take less
     let bytes = match &deployed_code {
-        Some(deployed_code) => stored_bytes(code)?.saturating_sub(stored_bytes(deployed_code)?),
-        None => stored_bytes(code)?
+        Some(deployed_code) => stored_codes_bytes(code, swap_code)?.saturating_sub(
+            stored_codes_bytes(deployed_code, deployed_swap_code.as_deref())?,
+        ),
+        None => stored_codes_bytes(code, swap_code)?
             .checked_add(extra_state_bytes)
             .ok_or_else(|| eyre!("Storage size overflow"))?,
     };
@@ -325,10 +387,12 @@ pub fn plan_code_deployment(
             gas: DEPOSIT_NEAR_GAS,
         });
     }
-    steps.push(if is_upgrade {
-        format!("Deploy {code_label} to {dex_id}, replacing its code")
-    } else {
-        format!("Deploy {code_label} to {dex_id}, a new dex")
+    steps.push(match (is_upgrade, &deployed_swap_code) {
+        (true, Some(_)) if swap_code.is_none() => format!(
+            "Deploy {code_label} to {dex_id}, replacing its code and removing its swap code, so that its swaps run the new code"
+        ),
+        (true, _) => format!("Deploy {code_label} to {dex_id}, replacing its code"),
+        (false, _) => format!("Deploy {code_label} to {dex_id}, a new dex"),
     });
     let gas = match &call_after_deploy {
         Some(call_after_deploy) => {
@@ -357,6 +421,7 @@ pub fn plan_code_deployment(
         args: json!({
             "last_part_of_id": dex_id.id,
             "code_base64": Base64VecU8(code.to_vec()),
+            "swap_code_base64": swap_code.map(|swap_code| Base64VecU8(swap_code.to_vec())),
             "call_after_deploy": call_after_deploy.map(|call_after_deploy| DexCallAfterDeploy {
                 method: call_after_deploy.method,
                 args: Base64VecU8(call_after_deploy.args),
@@ -378,6 +443,7 @@ pub fn plan_code_deployment(
     Ok(CodeDeployment {
         is_upgrade,
         code_hash,
+        swap_code_hash,
         code_label,
         steps,
         function_calls,

@@ -19,7 +19,7 @@ use near_sdk::serde_json::json;
 use near_sdk::{
     AccountId, NearToken,
     base64::{Engine, prelude::BASE64_STANDARD},
-    json_types::{Base64VecU8, U128},
+    json_types::{Base58CryptoHash, Base64VecU8, U128},
 };
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -2394,4 +2394,165 @@ async fn test_amp_complex_route() {
         )
         .assets
     );
+}
+
+/// Deploys the dex's code again, with `swap_code` for swaps to run, or without swap code
+async fn deploy_amp_code(test: &AmpTest, swap_code: Option<&[u8]>) -> ExecutionFinalResult {
+    let wasms = get_compiled_wasms().await;
+    test.context
+        .deployer
+        .call(test.context.dex_engine_contract.id(), "deploy_dex_code")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "last_part_of_id": test.dex_id.id,
+            "code_base64": Base64VecU8(wasms.amp_dex_wasm.clone()),
+            "swap_code_base64": swap_code.map(|swap_code| Base64VecU8(swap_code.to_vec())),
+        }))
+        .transact()
+        .await
+        .unwrap()
+}
+
+/// The swap code hash of the DexDeployed event of a deployment
+fn deployed_swap_code_hash(result: &ExecutionFinalResult) -> Option<String> {
+    let event = result
+        .logs()
+        .into_iter()
+        .filter_map(|log| log.strip_prefix("EVENT_JSON:"))
+        .map(|log| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(log).unwrap())
+        .find(|event| event["event"] == "dex_deployed")
+        .unwrap();
+    event["data"]["swap_code_hash"].as_str().map(str::to_string)
+}
+
+#[tokio::test]
+async fn test_amp_swaps_run_the_swap_code() {
+    let test = setup_amp().await;
+    let wasms = get_compiled_wasms().await;
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user1,
+        ft1,
+        ..
+    } = &test.context;
+    let dex_id = &test.dex_id;
+    let (near_asset_id, usdc_asset_id) = (&test.near_asset_id, &test.usdc_asset_id);
+    let swap_code_view = async || {
+        dex_engine_contract
+            .view("dex_swap_code")
+            .args_json(json!({ "dex_id": dex_id }))
+            .await
+            .unwrap()
+            .json::<Option<Base64VecU8>>()
+            .unwrap()
+    };
+
+    let result = deploy_amp_code(&test, Some(&wasms.amp_dex_swap_wasm)).await;
+    assert_success(&result).unwrap();
+    assert_eq!(
+        deployed_swap_code_hash(&result),
+        Some(String::from(&Base58CryptoHash::from(
+            near_sdk::env::sha256_array(&wasms.amp_dex_swap_wasm)
+        )))
+    );
+    assert_eq!(
+        swap_code_view().await,
+        Some(Base64VecU8(wasms.amp_dex_swap_wasm.clone()))
+    );
+
+    // Dex calls run the whole code, since the swap code has no other methods than swap
+    let fixed_price = "3.75".parse().unwrap();
+    let pool_id = test
+        .create_pool(CreatePoolArgs {
+            rate_source: NewPoolRateSource::Fixed(fixed_price),
+            ..test.create_pool_args(FeeFraction::new(1_000), (near(1_000_000), usdc(3_750_000)))
+        })
+        .await;
+    let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
+
+    deposit_near(dex_engine_contract, user1, NearToken::from_near(1)).await;
+    deposit_ft(dex_engine_contract, deployer, ft1, user1, near(300)).await;
+    // What the receipt that ran the swap burnt
+    let swap = async || {
+        let result = execute_operations(
+            user1,
+            dex_engine_contract,
+            vec![Operation::SwapSimple {
+                dex_id: dex_id.clone(),
+                message: Base64VecU8(
+                    near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap(),
+                ),
+                asset_in: near_asset_id.clone(),
+                asset_out: usdc_asset_id.clone(),
+                amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                    near(100),
+                ))),
+                constraint: None,
+                quote_improvement_fee: None,
+            }],
+        )
+        .await;
+        assert_success(&result).unwrap();
+        result
+            .receipt_outcomes()
+            .iter()
+            .find(|outcome| {
+                outcome
+                    .logs
+                    .iter()
+                    .any(|log| log.contains("\"event\":\"swap\""))
+            })
+            .unwrap()
+            .gas_burnt
+    };
+    let usdc_before = inner_balance(
+        dex_engine_contract,
+        AccountOrDexId::Account(user1.id().clone()),
+        usdc_asset_id,
+    )
+    .await;
+    let gas_with_swap_code = swap().await;
+    let usdc_out = inner_balance(
+        dex_engine_contract,
+        AccountOrDexId::Account(user1.id().clone()),
+        usdc_asset_id,
+    )
+    .await
+        - usdc_before;
+    assert_eq!(
+        usdc_out,
+        pool.rated(fixed_price)
+            .exact_in_amount_out(
+                AssetIndex::First,
+                TokenAmount::new(after_fees(near(100), &[800, 200]))
+            )
+            .get()
+    );
+
+    // Translating the codes again keeps the swap code
+    let result = deployer
+        .call(dex_engine_contract.id(), "translate_dex_codes")
+        .max_gas()
+        .args_json(json!({ "dex_ids": [dex_id] }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+    let gas_after_translation = swap().await;
+
+    // Deploying without swap code removes it, and swaps run the whole code, which takes more
+    // gas to load
+    let result = deploy_amp_code(&test, None).await;
+    assert_success(&result).unwrap();
+    assert_eq!(deployed_swap_code_hash(&result), None);
+    assert_eq!(swap_code_view().await, None);
+    let gas_without_swap_code = swap().await;
+    for gas in [gas_with_swap_code, gas_after_translation] {
+        assert!(
+            gas.as_gas() + 1_000_000_000_000 < gas_without_swap_code.as_gas(),
+            "{gas} with swap code, {gas_without_swap_code} without"
+        );
+    }
 }

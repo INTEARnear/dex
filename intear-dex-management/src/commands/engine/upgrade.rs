@@ -6,20 +6,15 @@ use std::process::Command;
 
 use color_eyre::Section;
 use color_eyre::eyre::{Context, eyre};
-use intear_dex_common::DexId;
 use near_cli_rs::commands::ActionContext;
 use near_primitives::gas::Gas;
+use near_sdk::NearToken;
 use near_sdk::json_types::Base58CryptoHash;
-use near_sdk::{NearToken, PublicKey};
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
-use super::fee_discounts::fee_discounts_label;
-use crate::chain::{account, engine, xyk};
-use crate::deployment::{
-    DEFAULT_AMP_DEX_DEPLOYER, DEFAULT_AMP_DEX_NAME, DEFAULT_XYK_DEX_DEPLOYER, DEFAULT_XYK_DEX_NAME,
-    ENGINE_ACCOUNT_ID,
-};
+use crate::chain::{account, engine};
+use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::errors::PreflightError;
 use crate::outcome::{DexEvents, ExpectedOutcome};
 use crate::planning::{self, CallArgs, FunctionCall, Preflight, TransactionPlan, storage};
@@ -159,40 +154,6 @@ fn ensure_untracked_near_covers(
     Ok(())
 }
 
-/// The key that signs the fee discounts of the xyk and amp dexes while their code checks fee
-/// discounts itself, which the engine takes over, since their code from after that reads fee
-/// discounts from it
-fn fee_discount_signer_of_dexes(
-    preflight: &Preflight,
-) -> color_eyre::eyre::Result<Option<PublicKey>> {
-    let xyk_dex_id = DexId {
-        deployer: DEFAULT_XYK_DEX_DEPLOYER.to_owned(),
-        id: DEFAULT_XYK_DEX_NAME.to_string(),
-    };
-    let amp_dex_id = DexId {
-        deployer: DEFAULT_AMP_DEX_DEPLOYER.to_owned(),
-        id: DEFAULT_AMP_DEX_NAME.to_string(),
-    };
-    let xyk_fee_discount_signer = xyk::fee_discount_signer(
-        &preflight.network_config,
-        &preflight.block_reference,
-        &xyk_dex_id,
-    )?;
-    let amp_fee_discount_signer = xyk::fee_discount_signer(
-        &preflight.network_config,
-        &preflight.block_reference,
-        &amp_dex_id,
-    )?;
-    if xyk_fee_discount_signer != amp_fee_discount_signer {
-        return Err(eyre!(
-            "{xyk_dex_id} has {} and {amp_dex_id} has {}, and {ENGINE_ACCOUNT_ID} has one fee discount signer for every dex",
-            fee_discounts_label(xyk_fee_discount_signer.as_ref()),
-            fee_discounts_label(amp_fee_discount_signer.as_ref())
-        ));
-    }
-    Ok(xyk_fee_discount_signer)
-}
-
 fn upgrade_command(arguments: &[&str]) -> String {
     shell_words::join(
         ["near", "intear-dex-management", "engine", "upgrade"]
@@ -263,7 +224,7 @@ impl BuildContext {
             ));
         }
         lines.push(
-            "deploy calls migrate on the new code right after it's deployed if the state of the deployed code is from before fee discounts, with the key that signs the fee discounts of the xyk and amp dexes, else is_paused".to_string(),
+            "deploy calls migrate on the new code right after it's deployed if the state of the deployed code is from before swap codes, else is_paused".to_string(),
         );
         tracing::info!("{}", lines.join("\n│  "));
         Ok(Self)
@@ -387,17 +348,13 @@ impl DeployContext {
             &previous_context,
             ENGINE_ACCOUNT_ID.to_owned(),
             move |preflight| {
-                // The new code can't read state from before fee discounts until it migrates it,
-                // taking over the key that signs the fee discounts of the xyk and amp dexes, and
+                // The new code can't read state from before swap codes until it migrates it, and
                 // otherwise a view shows that it reads the state
-                let (then_call, then_call_args) = if engine::is_before_fee_discounts(
+                let (then_call, then_call_args) = if engine::is_before_swap_codes(
                     &preflight.network_config,
                     &preflight.block_reference,
                 )? {
-                    (
-                        "migrate",
-                        json!({ "fee_discount_signer": fee_discount_signer_of_dexes(preflight)? }),
-                    )
+                    ("migrate", json!({}))
                 } else {
                     ("is_paused", json!({}))
                 };

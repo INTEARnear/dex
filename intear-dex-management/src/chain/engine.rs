@@ -96,6 +96,24 @@ pub fn is_paused(
     )
 }
 
+/// Whether the engine's code is from before dexes deployed swap code, so its state is without the
+/// swap codes, which `migrate` of the code with them adds
+pub fn is_before_swap_codes(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+) -> color_eyre::eyre::Result<bool> {
+    let code = super::account::view_code(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+    )?;
+    let module = wasmi::Module::new(&wasmi::Engine::default(), &code)
+        .wrap_err_with(|| format!("The code of {ENGINE_ACCOUNT_ID} doesn't compile"))?;
+    Ok(!module
+        .exports()
+        .any(|export| export.name() == "dex_swap_code"))
+}
+
 /// Whether the engine's code is from before it took fee discounts, so its state is without the
 /// fee discount signer, which `migrate` of the code with it adds, and it can't run dex code that
 /// reads fee discounts from it
@@ -365,20 +383,45 @@ pub fn dex_code(
     }
 }
 
-/// The length of the translation of a dex's code that the engine stores, `None` while it
-/// stores none. The engine has no view for it, so this reads it from the engine's state.
+/// The swap code deployed to a dex, which its swaps run instead of its code, `None` for a dex
+/// without one
+pub fn dex_swap_code(
+    network_config: &NetworkConfig,
+    block_reference: &BlockReference,
+    dex_id: &DexId,
+) -> color_eyre::eyre::Result<Option<Vec<u8>>> {
+    let swap_code = super::view_json::<Option<Base64VecU8>>(
+        network_config,
+        block_reference,
+        &ENGINE_ACCOUNT_ID.to_owned(),
+        "dex_swap_code",
+        json!({ "dex_id": dex_id }),
+    )?;
+    Ok(swap_code.map(|swap_code| swap_code.0))
+}
+
+/// Which code of a dex: its code, or its swap code
+#[derive(Clone, Copy)]
+pub enum DexCodeKind {
+    Code,
+    SwapCode,
+}
+
+/// The length of the translation of a dex's code or swap code that the engine stores, `None`
+/// while it stores none. The engine has no view for it, so this reads it from the engine's state.
 pub fn dex_code_translation_len(
     network_config: &NetworkConfig,
     block_reference: &BlockReference,
     dex_id: &DexId,
+    kind: DexCodeKind,
 ) -> color_eyre::eyre::Result<Option<usize>> {
-    // The engine keeps the translation of every dex's code under this prefix, keyed by the dex id
-    const ENGINE_TRANSLATED_DEX_CODES_PREFIX: u8 = 12;
-    let key = [
-        vec![ENGINE_TRANSLATED_DEX_CODES_PREFIX],
-        near_sdk::borsh::to_vec(dex_id)?,
-    ]
-    .concat();
+    // The engine keeps the translations of every dex's code and swap code under these
+    // prefixes, keyed by the dex id
+    let prefix: u8 = match kind {
+        DexCodeKind::Code => 12,
+        DexCodeKind::SwapCode => 16,
+    };
+    let key = [vec![prefix], near_sdk::borsh::to_vec(dex_id)?].concat();
     let state = engine_state_page(
         network_config,
         block_reference,

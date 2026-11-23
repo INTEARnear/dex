@@ -3,14 +3,10 @@ use crate::common::*;
 use intear_dex::oracle::{
     GAS_FOR_AFTER_ORACLE_OPERATIONS, MAX_ORACLE_REQUEST_BYTES, MAX_ORACLE_RESPONSE_BYTES,
 };
-use intear_dex_common::{
-    AssetId, DexId, FULL_FEE_DISCOUNT, FeeDiscountFraction, FeeFraction, SwapRequestAmount,
-    TokenAmount,
-};
+use intear_dex_common::{AssetId, DexId, FeeFraction, SwapRequestAmount, TokenAmount};
 use intear_dex_types::{
-    AccountOrDexId, DexCallAfterDeploy, FeeDiscount, Operation, OperationsFeeDiscount,
-    OracleFeeSwap, QuoteImprovementFee, SignedFeeDiscount, SwapAdvancedMode, SwapOperationAmount,
-    SwapOption, WithdrawAmount,
+    AccountOrDexId, DexCallAfterDeploy, Operation, OracleFeeSwap, QuoteImprovementFee,
+    SwapAdvancedMode, SwapOperationAmount, SwapOption, WithdrawAmount,
 };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds};
 use near_crypto::{KeyType, SecretKey};
@@ -7743,7 +7739,7 @@ async fn test_set_fee_discount_signer() {
 }
 
 #[tokio::test]
-async fn test_fee_discount_signer_migration() {
+async fn test_swap_codes_migration() {
     let TestContext {
         sandbox,
         dex_engine_contract,
@@ -7759,12 +7755,14 @@ async fn test_fee_discount_signer_migration() {
             .remove(b"STATE".as_slice())
             .unwrap()
     };
+    let fee_discount_signer = get_fee_discount_signer(&dex_engine_contract).await;
 
-    // The state from before the fee discount signer, which is the last field that's stored, and
-    // which a new engine doesn't have
-    let state_with_signer = state().await;
-    let (no_signer, state_before_migration) = state_with_signer.split_last().unwrap();
-    assert_eq!(*no_signer, 0);
+    // The state from before the swap codes, which are the last field that's stored, and which a
+    // new engine doesn't have: a LookupMap stores its prefix, StorageKey::DexSwapCodes, the 16th
+    let state_with_swap_codes = state().await;
+    let (state_before_migration, swap_codes) =
+        state_with_swap_codes.split_at(state_with_swap_codes.len() - 5);
+    assert_eq!(swap_codes, [1, 0, 0, 0, 15]);
     sandbox
         .patch(dex_engine_contract.id())
         .state(b"STATE", state_before_migration)
@@ -7776,25 +7774,19 @@ async fn test_fee_discount_signer_migration() {
 
     // The migrate that `engine upgrade deploy` calls on the new code in the receipt that deploys
     // it, so that the engine can store the code chunks with the old code that reads the old state
-    let fee_discount_signer: near_sdk::PublicKey =
-        SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer")
-            .public_key()
-            .to_string()
-            .parse()
-            .unwrap();
     let result = dex_engine_contract
         .call("migrate")
         .max_gas()
-        .args_json(json!({ "fee_discount_signer": fee_discount_signer }))
+        .args_json(json!({}))
         .transact()
         .await
         .unwrap();
     assert_success(&result).unwrap();
+    assert!(!is_paused(&dex_engine_contract).await.unwrap());
     assert_eq!(
         get_fee_discount_signer(&dex_engine_contract).await,
-        Some(fee_discount_signer.clone())
+        fee_discount_signer
     );
-    assert!(!is_paused(&dex_engine_contract).await.unwrap());
     assert_eq!(
         dex_engine_contract
             .view("get_trusted_code_deployer")
@@ -7804,14 +7796,7 @@ async fn test_fee_discount_signer_migration() {
             .unwrap(),
         *deployer.id()
     );
-    assert_eq!(
-        state().await,
-        [
-            state_before_migration.to_vec(),
-            near_sdk::borsh::to_vec(&Some(fee_discount_signer)).unwrap(),
-        ]
-        .concat()
-    );
+    assert_eq!(state().await, state_with_swap_codes);
 }
 
 /// The borsh of what a view of `dex_id` returns
@@ -7901,7 +7886,7 @@ fn assert_same_pools<Pool: PartialEq + std::fmt::Debug>(pools: Vec<Pool>, expect
 }
 
 #[tokio::test]
-async fn test_fee_discount_migration_of_mainnet_state() {
+async fn test_swap_code_migration_of_mainnet_state() {
     let sandbox = near_workspaces::sandbox().await.unwrap();
     let (dex_engine_contract, _) = import_mainnet_engine(&sandbox).await;
     // The owner of the dexes, which is the trusted code deployer of the engine
@@ -7914,6 +7899,7 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         deployer: owner.id().clone(),
         id: "amp".to_string(),
     };
+    let fee_discount_signer_before_migration = get_fee_discount_signer(&dex_engine_contract).await;
     let xyk_pools_before_migration = pool_views(&dex_engine_contract, &xyk_dex_id).await;
     let amp_pools_before_migration = pool_views(&dex_engine_contract, &amp_dex_id).await;
     let total_storage_balances = async || {
@@ -7979,18 +7965,7 @@ async fn test_fee_discount_migration_of_mainnet_state() {
     let near_in = SwapRequestAmount::ExactIn(TokenAmount::new(10u128.pow(22)));
     let single_pool_message =
         near_sdk::borsh::to_vec(&xyk_dex_types::SwapArgs::single_pool(pool_id)).unwrap();
-    let swap_operations = |message: Vec<u8>| {
-        vec![Operation::SwapSimple {
-            dex_id: xyk_dex_id.clone(),
-            message: Base64VecU8(message),
-            asset_in: AssetId::Near,
-            asset_out: asset_out.clone(),
-            amount: SwapOperationAmount::Amount(near_in),
-            constraint: None,
-            quote_improvement_fee: None,
-        }]
-    };
-    let simulate = async |fee_discount: Option<FeeDiscountFraction>| {
+    let simulate = async || {
         dex_engine_contract
             .view("simulate_swap_simple")
             .args_json(json!({
@@ -8000,7 +7975,6 @@ async fn test_fee_discount_migration_of_mainnet_state() {
                 "asset_in": AssetId::Near,
                 "asset_out": asset_out,
                 "amount": near_in,
-                "fee_discount": fee_discount,
             }))
             .await
             .unwrap()
@@ -8020,15 +7994,22 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         .unwrap()
         .0
     };
-    let swap = async |message: Vec<u8>, fee_discount: Option<SignedFeeDiscount>| {
+    let swap = async || {
         let balance_before = balance_out().await;
         let result = trader
             .call(dex_engine_contract.id(), "execute_operations")
             .max_gas()
             .deposit(NearToken::from_yoctonear(1))
             .args_json(json!({
-                "operations": swap_operations(message),
-                "fee_discount": fee_discount,
+                "operations": [Operation::SwapSimple {
+                    dex_id: xyk_dex_id.clone(),
+                    message: Base64VecU8(single_pool_message.clone()),
+                    asset_in: AssetId::Near,
+                    asset_out: asset_out.clone(),
+                    amount: SwapOperationAmount::Amount(near_in),
+                    constraint: None,
+                    quote_improvement_fee: None,
+                }],
             }))
             .transact()
             .await
@@ -8036,25 +8017,27 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         assert_success(&result).unwrap();
         balance_out().await - balance_before
     };
+    let dex_swap_code = async |dex_id: &DexId| {
+        dex_engine_contract
+            .view("dex_swap_code")
+            .args_json(json!({ "dex_id": dex_id }))
+            .await
+            .unwrap()
+            .json::<Option<Base64VecU8>>()
+            .unwrap()
+            .map(|swap_code| swap_code.0)
+    };
 
     let total_storage_balances_before_migration = total_storage_balances().await;
 
     // The engine of this checkout, as `engine upgrade deploy` deploys it: the old code stores the
     // chunks, and migrate runs on the new code in the receipt that deploys it
-    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
-    let fee_discount_signer_public_key: near_sdk::PublicKey = fee_discount_signer
-        .public_key()
-        .to_string()
-        .parse()
-        .unwrap();
     let result = deploy_code_in_chunks(
         &dex_engine_contract,
         &get_compiled_wasms().await.contract_wasm,
         700_000,
         "migrate",
-        json!({ "fee_discount_signer": fee_discount_signer_public_key })
-            .to_string()
-            .as_bytes(),
+        b"{}",
     )
     .await;
     assert_success(&result).unwrap();
@@ -8064,10 +8047,10 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         result.total_gas_burnt.as_gas() as f64 / 1e12
     );
     create_translator(&dex_engine_contract).await;
-    // The engine reads the state that it had, with the signer, and the old dexes still read theirs
+    // The engine reads the state that it had, and the dexes still read theirs
     assert_eq!(
         get_fee_discount_signer(&dex_engine_contract).await,
-        Some(fee_discount_signer_public_key)
+        fee_discount_signer_before_migration
     );
     assert_eq!(
         dex_engine_contract
@@ -8087,16 +8070,18 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
         xyk_pools(&xyk_pools_before_migration),
     );
-    // The old code of the dexes swaps on the new engine until they're deployed too
-    let expected_out = simulate(None).await;
-    assert_eq!(swap(single_pool_message.clone(), None).await, expected_out);
-    let xyk_pools_before_dex_migration = pool_views(&dex_engine_contract, &xyk_dex_id).await;
+    // No dex has swap code yet, so swaps run the code of the dexes
+    assert_eq!(dex_swap_code(&xyk_dex_id).await, None);
+    let expected_out = simulate().await;
+    assert_eq!(swap().await, expected_out);
+    let xyk_pools_before_deploy = pool_views(&dex_engine_contract, &xyk_dex_id).await;
 
-    // What `xyk deploy` and `amp deploy` send: a top-up of the dex's storage balance for the code,
-    // and the code with the migration, which runs once the code is stored
-    for (dex_id, code) in [
-        (&xyk_dex_id, &get_compiled_wasms().await.xyk_dex_wasm),
-        (&amp_dex_id, &get_compiled_wasms().await.amp_dex_wasm),
+    // What `xyk deploy` and `amp deploy` send: a top-up of the dex's storage balance for the codes,
+    // and the code with its swap code. Their state is from after their own migration.
+    let wasms = get_compiled_wasms().await;
+    for (dex_id, code, swap_code) in [
+        (&xyk_dex_id, &wasms.xyk_dex_wasm, &wasms.xyk_dex_swap_wasm),
+        (&amp_dex_id, &wasms.amp_dex_wasm, &wasms.amp_dex_swap_wasm),
     ] {
         let result = owner
             .batch(dex_engine_contract.id())
@@ -8111,11 +8096,7 @@ async fn test_fee_discount_migration_of_mainnet_state() {
                     .args_json(json!({
                         "last_part_of_id": dex_id.id,
                         "code_base64": BASE64_STANDARD.encode(code),
-                        "call_after_deploy": DexCallAfterDeploy {
-                            method: "migrate".to_string(),
-                            args: Base64VecU8(Vec::new()),
-                            attached_assets: HashMap::new(),
-                        },
+                        "swap_code_base64": BASE64_STANDARD.encode(swap_code),
                     }))
                     .deposit(NearToken::from_yoctonear(1))
                     .gas(Gas::from_tgas(980)),
@@ -8126,65 +8107,36 @@ async fn test_fee_discount_migration_of_mainnet_state() {
         assert_success(&result).unwrap();
         println!(
             "GAS {:<40} {:>8.3} TGas",
-            format!("top up, deploy {} and migrate", dex_id.id),
+            format!("top up, deploy {} with swap code", dex_id.id),
             result.total_gas_burnt.as_gas() as f64 / 1e12
         );
+        assert_eq!(dex_swap_code(dex_id).await.as_ref(), Some(swap_code));
     }
-    // Every pool is as it was, which the new code views in the layout of its version
     assert_same_pools(
         xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
-        xyk_pools(&xyk_pools_before_dex_migration),
+        xyk_pools(&xyk_pools_before_deploy),
     );
     assert_same_pools(
         amp_pools(&pool_views(&dex_engine_contract, &amp_dex_id).await),
         amp_pools(&amp_pools_before_migration),
     );
+    // Swaps run the swap code, which swaps like the code
+    let expected_out = simulate().await;
+    assert_eq!(swap().await, expected_out);
 
-    // On the migrated xyk dex, the trader swaps without a fee discount, with one for the
-    // operations, and with a message from before the engine took fee discounts
-    let expected_out = simulate(None).await;
-    assert_eq!(swap(single_pool_message.clone(), None).await, expected_out);
-
-    let expected_out = simulate(Some(FULL_FEE_DISCOUNT)).await;
-    assert!(expected_out > simulate(None).await);
-    let chain_id = sandbox.status().await.unwrap().chain_id;
-    let fee_discount = sign_fee_discount(
-        FeeDiscount::ForOperations(OperationsFeeDiscount {
-            operations_hash: operations_hash(&swap_operations(single_pool_message.clone())),
-            trader_id: Some(trader.id().clone()),
-            fee_discount: FULL_FEE_DISCOUNT,
-            expiration_block_height: sandbox.view_block().await.unwrap().height() + 1_000,
-        }),
-        &fee_discount_signer,
-        &chain_id,
-        dex_engine_contract.id(),
-    );
+    // Translating the codes again translates the swap codes that the state has too
+    let result = owner
+        .call(dex_engine_contract.id(), "translate_dex_codes")
+        .args_json(json!({ "dex_ids": [&xyk_dex_id, &amp_dex_id] }))
+        .max_gas()
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
     assert_eq!(
-        swap(single_pool_message.clone(), Some(fee_discount)).await,
-        expected_out
+        dex_swap_code(&xyk_dex_id).await.as_ref(),
+        Some(&wasms.xyk_dex_swap_wasm)
     );
-
-    // The discount that the message carries is ignored
-    let routes = xyk_dex_types::SwapArgs::single_pool(pool_id).routes;
-    let message_with_old_fee_discount = [
-        near_sdk::borsh::to_vec(&routes).unwrap(),
-        near_sdk::borsh::to_vec(&(
-            1u8,
-            &routes,
-            AssetId::Near,
-            &asset_out,
-            Some(trader.id()),
-            near_in,
-            FULL_FEE_DISCOUNT,
-            u64::MAX,
-            vec![0u8; 64],
-        ))
-        .unwrap(),
-    ]
-    .concat();
-    let expected_out = simulate(None).await;
-    assert_eq!(
-        swap(message_with_old_fee_discount, None).await,
-        expected_out
-    );
+    let expected_out = simulate().await;
+    assert_eq!(swap().await, expected_out);
 }

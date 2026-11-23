@@ -179,7 +179,7 @@ impl DexEngine {
         oracle_response: Option<&OracleResponse>,
         fee_discount: Option<FeeDiscountFraction>,
     ) -> (TokenAmount, TokenAmount) {
-        let module = self.translated_dex_codes.get(&dex_id);
+        let module = self.translated_dex_codes.get_for_swaps(&dex_id);
         let swap = self
             .internal_simulate_swap_simple(
                 dex_id,
@@ -368,7 +368,7 @@ impl DexEngine {
         expect!(!options.is_empty(), "At least one swap option is required");
         let mut best: Option<SimulatedSwap> = None;
         for option in options {
-            let module = self.translated_dex_codes.get(&option.dex_id);
+            let module = self.translated_dex_codes.get_for_swaps(&option.dex_id);
             let simulation = self.internal_simulate_swap_simple(
                 option.dex_id.clone(),
                 &module,

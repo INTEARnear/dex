@@ -168,6 +168,10 @@ pub enum PreflightError {
     )]
     EngineWithoutCallAfterDeploy { method: String },
     #[error(
+        "{ENGINE_ACCOUNT_ID} runs code from before swap code, which would deploy the code without the swap code"
+    )]
+    EngineWithoutSwapCode,
+    #[error(
         "{ENGINE_ACCOUNT_ID} runs code from before it took fee discounts, which can't run the code for {dex_id}, since that code reads fee discounts from it"
     )]
     EngineBeforeFeeDiscounts { dex_id: DexId },
@@ -356,7 +360,9 @@ impl PreflightError {
             Self::AssetNotRegisteredForSigner {
                 register_command, ..
             } => Some(format!("Register it first:\n    {register_command}")),
-            Self::EngineWithoutCallAfterDeploy { .. } | Self::EngineBeforeFeeDiscounts { .. } => {
+            Self::EngineWithoutCallAfterDeploy { .. }
+            | Self::EngineWithoutSwapCode
+            | Self::EngineBeforeFeeDiscounts { .. } => {
                 Some("Upgrade the engine with `engine upgrade` first".to_string())
             }
             Self::NotRegisteredWithToken { token_id, .. } => Some(format!(

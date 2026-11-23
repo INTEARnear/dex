@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = ["full"]
+full = []
+
 [dependencies]
 near-sdk = { version = "5.30", default-features = false, features = ["unstable"] }
 intear-dex-common = { path = "../../intear-dex-common", features = ["dex"] }

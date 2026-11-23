@@ -2057,6 +2057,16 @@ async fn test_xyk_scheduled_fees() {
 
 #[tokio::test]
 async fn test_xyk_exact_output() {
+    xyk_exact_output(None).await;
+}
+
+#[tokio::test]
+async fn test_xyk_exact_output_on_swap_code() {
+    xyk_exact_output(Some(&get_compiled_wasms().await.xyk_dex_swap_wasm)).await;
+}
+
+/// An exact-output swap, on `swap_code` that the dex deploys after its pool is created, if any
+async fn xyk_exact_output(swap_code: Option<&[u8]>) {
     let initial_near_deposit = NearToken::from_near(20);
     let storage_deposit_for_pool = NearToken::from_millinear(50);
     let add_liquidity_ft1 = 1_000_000_000u128;
@@ -2181,6 +2191,22 @@ async fn test_xyk_exact_output() {
             assert_eq!(owner_id, deployer.id());
         }
         _ => panic!("Expected private pool"),
+    }
+
+    if let Some(swap_code) = swap_code {
+        let result = deployer
+            .call(dex_engine_contract.id(), "deploy_dex_code")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "last_part_of_id": dex_id.id,
+                "code_base64": Base64VecU8(wasms.xyk_dex_wasm.clone()),
+                "swap_code_base64": Base64VecU8(swap_code.to_vec()),
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
     }
 
     let ft1_for_swap = 200_000_000u128;

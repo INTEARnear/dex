@@ -89,6 +89,8 @@ pub struct DexEngine {
     oracle_fees: LookupMap<PublicKeyHandle, HashMap<AssetId, TokenAmount>>,
     /// The key that signs the fee discounts that dexes read
     fee_discount_signer: Option<PublicKey>,
+    /// Wasm code with only the swap method
+    dex_swap_codes: LookupMap<DexId, Vec<u8>>,
     /// The translation of each dex's code
     #[borsh(skip)]
     translated_dex_codes: TranslatedDexCodes,
@@ -118,6 +120,8 @@ enum StorageKey {
     TranslatedDexCodes,
     OracleFeeReceivers,
     OracleFees,
+    DexSwapCodes,
+    TranslatedDexSwapCodes,
 }
 
 enum CallType<'a> {
@@ -335,13 +339,14 @@ impl DexEngine {
             oracle_fee_receivers: LookupMap::new(StorageKey::OracleFeeReceivers),
             oracle_fees: LookupMap::new(StorageKey::OracleFees),
             fee_discount_signer: None,
+            dex_swap_codes: LookupMap::new(StorageKey::DexSwapCodes),
             translated_dex_codes: TranslatedDexCodes::default(),
         }
     }
 
     #[private]
     #[init(ignore_state)]
-    pub fn migrate(fee_discount_signer: Option<PublicKey>) -> Self {
+    pub fn migrate() -> Self {
         #[near(serializers=[borsh])]
         struct OldState {
             dex_balances: LookupMap<DexId, AssetBalances>,
@@ -356,6 +361,7 @@ impl DexEngine {
             uploaded_code: LazyOption<Vec<u8>>,
             oracle_fee_receivers: LookupMap<PublicKeyHandle, AccountId>,
             oracle_fees: LookupMap<PublicKeyHandle, HashMap<AssetId, TokenAmount>>,
+            fee_discount_signer: Option<PublicKey>,
         }
         let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
         Self {
@@ -371,7 +377,8 @@ impl DexEngine {
             uploaded_code: old_state.uploaded_code,
             oracle_fee_receivers: old_state.oracle_fee_receivers,
             oracle_fees: old_state.oracle_fees,
-            fee_discount_signer,
+            fee_discount_signer: old_state.fee_discount_signer,
+            dex_swap_codes: LookupMap::new(StorageKey::DexSwapCodes),
             translated_dex_codes: TranslatedDexCodes::default(),
         }
     }
@@ -474,6 +481,7 @@ impl DexEngine {
         last_part_of_id: String,
         code_base64: Base64VecU8,
         call_after_deploy: Option<DexCallAfterDeploy>,
+        swap_code_base64: Option<Base64VecU8>,
     ) -> Promise {
         near_sdk::assert_one_yocto();
         self.assert_not_paused();
@@ -486,7 +494,13 @@ impl DexEngine {
             deployer,
             id: last_part_of_id,
         };
-        Self::translate_dex_code(dex_id, code_base64.0, true, call_after_deploy)
+        Self::translate_dex_code(
+            dex_id,
+            code_base64.0,
+            swap_code_base64.map(|swap_code| swap_code.0),
+            true,
+            call_after_deploy,
+        )
     }
 
     /// Swap one asset for another on a specific dex.
@@ -739,6 +753,10 @@ impl DexEngine {
         )
     }
 
+    pub fn dex_swap_code(&self, dex_id: DexId) -> Option<Base64VecU8> {
+        self.dex_swap_codes.get(&dex_id).cloned().map(Base64VecU8)
+    }
+
     // View method, but needs &mut for compatibility ergonomics with RunnerData
     pub fn dex_view(&self, dex_id: DexId, method: String, args: Base64VecU8) -> Base64VecU8 {
         self.internal_dex_view(dex_id, method, args)
@@ -784,7 +802,7 @@ impl DexEngine {
                 }
             },
         );
-        let module = self.translated_dex_codes.load(&dex_id);
+        let module = self.translated_dex_codes.load_for_swaps(&dex_id);
         self.internal_simulate_swap_simple(
             dex_id,
             &module,

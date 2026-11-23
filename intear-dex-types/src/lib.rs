@@ -404,10 +404,11 @@ mod deprecation_warning_workaround {
     #[near(event_json(standard = "inteardex"))]
     #[derive(Deserialize, Debug)]
     pub enum IntearDexEvent {
-        #[event_version("1.0.0")]
+        #[event_version("1.1.0")]
         DexDeployed {
             dex_id: DexId,
             code_hash: Base58CryptoHash,
+            swap_code_hash: Option<Base58CryptoHash>,
         },
         #[event_version("1.0.0")]
         DexEvent {

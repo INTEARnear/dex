@@ -320,6 +320,11 @@ impl TopUpContext {
                     }
                     .into_report()
                 })?;
+                let swap_code = engine::dex_swap_code(
+                    &preflight.network_config,
+                    &preflight.block_reference,
+                    &dex_id,
+                )?;
                 let translation_bytes = |translation_len| {
                     storage::dex_code_translation_record_bytes(
                         &dex_id,
@@ -328,16 +333,25 @@ impl TopUpContext {
                     )
                 };
                 // A new translation replaces the one that the engine stores, if it has one
-                let stored_translation_bytes = match engine::dex_code_translation_len(
+                let stored_translation_bytes = |kind| match engine::dex_code_translation_len(
                     &preflight.network_config,
                     &preflight.block_reference,
                     &dex_id,
+                    kind,
                 )? {
-                    Some(stored_translation_len) => translation_bytes(stored_translation_len)?,
-                    None => 0,
+                    Some(stored_translation_len) => translation_bytes(stored_translation_len),
+                    None => Ok(0),
                 };
-                let bytes = translation_bytes(dex_code::translate(&code)?.len())?
-                    .saturating_sub(stored_translation_bytes);
+                let mut bytes = translation_bytes(dex_code::translate(&code)?.len())?
+                    .saturating_sub(stored_translation_bytes(engine::DexCodeKind::Code)?);
+                // The engine translates the swap code again too
+                if let Some(swap_code) = &swap_code {
+                    bytes = bytes.saturating_add(
+                        translation_bytes(dex_code::translate(swap_code)?.len())?.saturating_sub(
+                            stored_translation_bytes(engine::DexCodeKind::SwapCode)?,
+                        ),
+                    );
+                }
                 let Some(storage_top_up) = preflight.dex_storage_top_up(&dex_id, bytes)? else {
                     return Err(PreflightError::DexStorageCoversTranslation {
                         dex_id: dex_id.clone(),

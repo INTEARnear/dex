@@ -47,11 +47,12 @@ pub enum DexEvents {
     NotRead,
 }
 
-/// The engine reports the hash of the code it stored, which has to be the
-/// hash of the code that was sent
+/// The engine reports the hashes of the code and swap code it stored, which
+/// have to be the hashes of the code that was sent
 pub struct ExpectedDeployment {
     pub dex_id: DexId,
     pub code_hash: Base58CryptoHash,
+    pub swap_code_hash: Option<Base58CryptoHash>,
     /// What to run once the code is deployed
     pub next_step: Option<String>,
 }
@@ -320,8 +321,12 @@ pub fn report_outcome(
                     display::format_amount(amount.get(), metadata.as_ref())
                 ));
             }
-            IntearDexEvent::DexDeployed { dex_id, code_hash } => {
-                deployed_code_hashes.push((dex_id, code_hash));
+            IntearDexEvent::DexDeployed {
+                dex_id,
+                code_hash,
+                swap_code_hash,
+            } => {
+                deployed_code_hashes.push((dex_id, code_hash, swap_code_hash));
             }
             #[allow(deprecated)]
             IntearDexEvent::UserBalanceUpdate {
@@ -364,18 +369,32 @@ pub fn report_outcome(
         ));
     }
     if let Some(expected_deployment) = &expected_outcome.deployment {
-        let deployed_code_hash = deployed_code_hashes
+        let deployed_code_hashes = deployed_code_hashes
             .iter()
-            .find(|(dex_id, _)| *dex_id == expected_deployment.dex_id)
-            .map(|(_, code_hash)| *code_hash);
-        match deployed_code_hash {
-            Some(code_hash) if code_hash == expected_deployment.code_hash => {}
-            Some(code_hash) => failure_lines.push(format!(
-                "{ENGINE_ACCOUNT_ID} stored code with hash {} for {}, but the code sent has hash {}",
-                String::from(&code_hash),
-                expected_deployment.dex_id,
-                String::from(&expected_deployment.code_hash)
-            )),
+            .find(|(dex_id, ..)| *dex_id == expected_deployment.dex_id)
+            .map(|(_, code_hash, swap_code_hash)| (*code_hash, *swap_code_hash));
+        let hash_name = |hash: Option<Base58CryptoHash>| match hash {
+            Some(hash) => format!("hash {}", String::from(&hash)),
+            None => "none".to_string(),
+        };
+        match deployed_code_hashes {
+            Some((code_hash, _)) if code_hash != expected_deployment.code_hash => {
+                failure_lines.push(format!(
+                    "{ENGINE_ACCOUNT_ID} stored code with hash {} for {}, but the code sent has hash {}",
+                    String::from(&code_hash),
+                    expected_deployment.dex_id,
+                    String::from(&expected_deployment.code_hash)
+                ))
+            }
+            Some((_, swap_code_hash)) if swap_code_hash != expected_deployment.swap_code_hash => {
+                failure_lines.push(format!(
+                    "{ENGINE_ACCOUNT_ID} stored swap code with {} for {}, but the swap code sent has {}",
+                    hash_name(swap_code_hash),
+                    expected_deployment.dex_id,
+                    hash_name(expected_deployment.swap_code_hash)
+                ))
+            }
+            Some(_) => {}
             // A failed deploy is among the receipt failures
             None if receipt_failures.is_empty() => failure_lines.push(format!(
                 "{ENGINE_ACCOUNT_ID} didn't report deploying {}",

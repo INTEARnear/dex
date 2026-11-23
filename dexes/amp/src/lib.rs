@@ -1,5 +1,7 @@
 #![deny(clippy::arithmetic_side_effects)]
+#![cfg_attr(not(feature = "full"), allow(dead_code, unused_imports))]
 
+#[cfg(feature = "full")]
 mod migration;
 
 use std::collections::HashMap;
@@ -444,6 +446,7 @@ fn credit_liquidity_fees(
     .emit();
 }
 
+#[cfg(feature = "full")]
 #[near]
 impl AmpDex {
     #[init]
