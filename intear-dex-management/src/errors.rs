@@ -57,6 +57,16 @@ pub enum PreflightError {
         oracle_key: String,
         fee_receiver_id: AccountId,
     },
+    #[error("The oracle {oracle_key} has set no fees on {ENGINE_ACCOUNT_ID}, so it can't be asked")]
+    OracleWithoutFees { oracle_key: String },
+    #[error(
+        "{owner}'s balance on {ENGINE_ACCOUNT_ID} pays none of the fees of the oracle {oracle_key} on top of the liquidity: {fees}"
+    )]
+    OracleFeeUnaffordable {
+        owner: AccountId,
+        oracle_key: String,
+        fees: String,
+    },
     #[error("{signer_id} can't pause or unpause {ENGINE_ACCOUNT_ID}")]
     NotAllowedToPause { signer_id: AccountId },
     #[error("{ENGINE_ACCOUNT_ID} is already paused")]
@@ -201,6 +211,8 @@ pub enum PreflightError {
     },
     #[error("Pool #{pool_id} of {dex_id} has a fixed price, not an oracle")]
     PoolHasFixedPrice { dex_id: DexId, pool_id: PoolId },
+    #[error("Pool #{pool_id} of {dex_id} has no oracle price yet to estimate the shares at")]
+    NoOraclePrice { dex_id: DexId, pool_id: PoolId },
     #[error("Launch pools pair NEAR with a token, so the token can't be NEAR itself")]
     LaunchOfNear,
     #[error("Pool #{pool_id} of {dex_id} is owned by {owner_id}, and {signer_id} signed")]
@@ -354,6 +366,10 @@ impl PreflightError {
             Self::NotOracleFeeReceiver {
                 fee_receiver_id, ..
             } => Some(format!("Sign with {fee_receiver_id}")),
+            Self::OracleFeeUnaffordable { .. } => {
+                Some("`engine deposit` adds one of them to the balance".to_string())
+            }
+            Self::NoOraclePrice { .. } => Some("The pool's first swap sets it".to_string()),
             Self::UntrackedNearShort { .. } => Some(format!(
                 "Send {ENGINE_ACCOUNT_ID} the NEAR it lacks, so the storage isn't paid with NEAR it holds for others"
             )),
@@ -399,6 +415,7 @@ impl PreflightError {
             | Self::NoAssetDecimals { .. }
             | Self::PoolSettingUnchanged { .. }
             | Self::PoolHasFixedPrice { .. }
+            | Self::OracleWithoutFees { .. }
             | Self::LaunchOfNear
             | Self::PoolLocked { .. }
             | Self::PoolKindNotSupported { .. }

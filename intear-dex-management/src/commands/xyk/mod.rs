@@ -234,8 +234,21 @@ impl PoolToWrite {
     }
 }
 
-/// The signer's amounts of the two assets of a pool, in pool order
+/// The signer's amounts of the two assets of a pool, in pool order, both more than zero
 pub fn amounts_in_pool_order(
+    assets: &[(AssetId, Option<AssetMetadata>); 2],
+    pair_label: &str,
+    amounts: &(AmountArg, AmountArg),
+) -> color_eyre::eyre::Result<(u128, u128)> {
+    let amounts = amounts_in_pool_order_allowing_zero(assets, pair_label, amounts)?;
+    if amounts.0 == 0 || amounts.1 == 0 {
+        return Err(PreflightError::ZeroAmount.into_report());
+    }
+    Ok(amounts)
+}
+
+/// The signer's amounts of the two assets of a pool, in pool order
+pub fn amounts_in_pool_order_allowing_zero(
     assets: &[(AssetId, Option<AssetMetadata>); 2],
     pair_label: &str,
     amounts: &(AmountArg, AmountArg),
@@ -248,15 +261,11 @@ pub fn amounts_in_pool_order(
         }
         .into_report());
     }
-    let amounts = if first_asset_id == assets[0].0 {
+    Ok(if first_asset_id == assets[0].0 {
         (first_amount, second_amount)
     } else {
         (second_amount, first_amount)
-    };
-    if amounts.0 == 0 || amounts.1 == 0 {
-        return Err(PreflightError::ZeroAmount.into_report());
-    }
-    Ok(amounts)
+    })
 }
 
 /// Every asset that some pool of the dex holds, once each, in pool order

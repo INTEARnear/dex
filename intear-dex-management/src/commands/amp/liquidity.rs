@@ -1,25 +1,28 @@
 use amp_dex_types::{
-    AddLiquidityArgs, PoolView, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    TokenAmount,
+    AddLiquidityArgs, PoolAssets, PoolRateSource, PoolView, ProviderShares, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, TokenAmount,
 };
-use intear_dex_common::DexId;
-use intear_dex_types::AccountOrDexId;
+use intear_dex_common::{AssetId, DexId};
+use intear_dex_types::{AccountOrDexId, Operation};
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
     ArgsForViewContext, OnAfterGettingBlockReferenceCallback,
 };
 use near_primitives::gas::Gas;
 use near_primitives::types::AccountId;
+use near_sdk::PublicKeyHandle;
+use near_sdk::json_types::{Base64VecU8, U128};
 use serde_json::json;
 use strum::{EnumDiscriminants, EnumIter, EnumMessage};
 
 use super::presentation::pool_assets;
 use super::{AmpContext, PoolToWrite, amp_pool_id};
-use crate::chain::asset_metadata::AssetMetadataCache;
+use crate::chain::asset_metadata::{AssetMetadata, AssetMetadataCache};
 use crate::chain::{amp, engine, fungible_token};
 use crate::commands::xyk::liquidity::shares_to_remove;
 use crate::commands::xyk::{
-    FeeBalanceKind, FeeBalances, amounts_in_pool_order, new_fee_balances_bytes,
+    FeeBalanceKind, FeeBalances, amounts_in_pool_order, amounts_in_pool_order_allowing_zero,
+    new_fee_balances_bytes,
 };
 use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
@@ -29,15 +32,15 @@ use crate::inputs::percent::PercentArg;
 use crate::inputs::pool_id::{PoolIdArg, PoolIdListArg};
 use crate::inputs::share::ShareArg;
 use crate::outcome::{DexEvents, ExpectedOutcome};
-use crate::planning::xyk_math::{
-    at_least_with_slippage, liquidity_for_shares, shares_for_liquidity,
-};
+use crate::planning::xyk_math::{at_least_with_slippage, liquidity_for_shares};
 use crate::planning::{
-    self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, amp_storage, format_near, storage,
+    self, FunctionCall, ONE_YOCTO_NEAR, Preflight, TransactionPlan, amp_storage, format_near,
+    storage,
 };
 use xyk_dex_types::PoolId;
 
 const ADD_LIQUIDITY_GAS: Gas = Gas::from_teragas(100);
+const ADD_LIQUIDITY_WITH_ORACLE_GAS: Gas = Gas::from_teragas(200);
 const REMOVE_LIQUIDITY_GAS: Gas = Gas::from_teragas(100);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -58,9 +61,9 @@ pub enum LiquidityAction {
     /// The pools an account has shares in, and what its part holds
     Show(Show),
     #[strum_discriminants(strum(
-        message = "add     - Add both assets of a pool, in its ratio, from the signer's balance on dex.intear.near"
+        message = "add     - Add one or both assets of a pool, in any ratio, from the signer's balance on dex.intear.near"
     ))]
-    /// Add both assets of a pool, in its ratio, from the signer's balance on dex.intear.near
+    /// Add one or both assets of a pool, in any ratio, from the signer's balance on dex.intear.near
     Add(Add),
     #[strum_discriminants(strum(
         message = "remove  - Take liquidity out of a pool to the signer's wallet"
@@ -262,10 +265,10 @@ pub struct Add {
     /// How much of one asset, e.g. '10 NEAR'
     amount_0: AmountArg,
     #[interactive_clap(skip_default_input_arg)]
-    /// How much of the other asset, e.g. '30 USDC'
+    /// How much of the other asset, e.g. '30 USDC', or '0 USDC' to add only the first
     amount_1: AmountArg,
     #[interactive_clap(named_arg)]
-    /// How far the pool's ratio may move before the transaction
+    /// How far the pool and its price may move before the transaction
     max_slippage: AddMaxSlippage,
 }
 
@@ -288,7 +291,9 @@ impl Add {
     }
 
     fn input_amount_1(_context: &AmpContext) -> color_eyre::eyre::Result<Option<AmountArg>> {
-        crate::inputs::prompt("How much of the other asset? e.g. '30 USDC'")
+        crate::inputs::prompt(
+            "How much of the other asset? e.g. '30 USDC', or '0 USDC' to add only the first",
+        )
     }
 }
 
@@ -355,12 +360,37 @@ impl AddMaxSlippageContext {
                 preflight.ensure_engine_not_paused()?;
                 let signer_id = preflight.signer_id.clone();
                 let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
-                let (amount_0, amount_1) =
-                    amounts_in_pool_order(&pool.assets, &pool.pair_label(), &amounts)?;
+                let pool_is_empty = pool.pool.total_shares.is_none();
+                // An empty pool starts with both assets, and a pool with shares takes either
+                let (amount_0, amount_1) = if pool_is_empty {
+                    amounts_in_pool_order(&pool.assets, &pool.pair_label(), &amounts)?
+                } else {
+                    let amounts = amounts_in_pool_order_allowing_zero(
+                        &pool.assets,
+                        &pool.pair_label(),
+                        &amounts,
+                    )?;
+                    if amounts == (0, 0) {
+                        return Err(PreflightError::ZeroAmount.into_report());
+                    }
+                    amounts
+                };
                 for (side, amount) in [(0, amount_0), (1, amount_1)] {
+                    if amount == 0 {
+                        continue;
+                    }
                     let (asset_id, metadata) = &pool.assets[side];
                     preflight.ensure_engine_balance(asset_id, metadata.as_ref(), amount)?;
                 }
+                // A pool with shares rates the deposit at its price, which a pool that an
+                // oracle rates gets from an oracle request that the operations start with
+                let oracle_request = match &pool.pool.rate_source {
+                    PoolRateSource::Oracle { key, .. } if !pool_is_empty => Some((
+                        key,
+                        payable_oracle_fee(preflight, key, &pool.assets, [amount_0, amount_1])?,
+                    )),
+                    PoolRateSource::Oracle { .. } | PoolRateSource::Fixed(_) => None,
+                };
                 let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
                 let amounts_label = format!(
                     "{} and {}",
@@ -382,6 +412,33 @@ impl AddMaxSlippageContext {
                 .copied()
                 .flatten()
                 .is_some();
+                if !is_registered {
+                    let registration_calls = preflight.registration_calls(
+                        &planning::storage_near_registrations(&signer_id, &dex_id),
+                    )?;
+                    steps.extend(registration_calls.steps);
+                    function_calls.extend(registration_calls.function_calls);
+                }
+                if let Some((oracle_key, (fee_asset_id, fee))) = &oracle_request {
+                    let fee_metadata = AssetMetadataCache::new(
+                        &preflight.network_config,
+                        preflight.block_reference.clone(),
+                    )
+                    .get(fee_asset_id)?;
+                    steps.push(format!(
+                        "Ask the oracle {oracle_key} for the prices of {}, paying its fee of {} from {signer_id}'s balance on {ENGINE_ACCOUNT_ID}; the next steps run once it responds, and it keeps the fee even if they fail",
+                        pool.pair_label(),
+                        display::format_amount(*fee, fee_metadata.as_ref())
+                    ));
+                    operations.push(serde_json::to_value(Operation::OracleRequest {
+                        oracle_key: (*oracle_key).clone(),
+                        dex_id: dex_id.clone(),
+                        request: Base64VecU8(near_sdk::borsh::to_vec(&pool.pool.prices_request())?),
+                        fee: (fee_asset_id.clone(), TokenAmount::new(*fee)),
+                        swap: None,
+                        rescue_address: None,
+                    })?);
+                }
                 if !is_registered {
                     // Providers start keeping their fees, in fee balances of
                     // both assets
@@ -405,11 +462,6 @@ impl AddMaxSlippageContext {
                         registration_bytes,
                         preflight.protocol_limits.storage_byte_cost,
                     )?;
-                    let registration_calls = preflight.registration_calls(
-                        &planning::storage_near_registrations(&signer_id, &dex_id),
-                    )?;
-                    steps.extend(registration_calls.steps);
-                    function_calls.extend(registration_calls.function_calls);
                     steps.push(format!(
                         "Register {signer_id} in {pool_label}, attaching {} from its wallet for the storage that takes; {dex_id} sends back what it doesn't use",
                         format_near(storage_near)
@@ -426,7 +478,7 @@ impl AddMaxSlippageContext {
                         )],
                     )?);
                 }
-                let min_shares_received = if pool.pool.total_shares.is_none() {
+                let min_shares_received = if pool_is_empty {
                     // Everyone took their liquidity out, so this liquidity
                     // sets the ratio again, and gets all the shares there are
                     steps.push(format!(
@@ -434,18 +486,45 @@ impl AddMaxSlippageContext {
                     ));
                     None
                 } else {
-                    let [(_, reserve_0), (_, reserve_1)] = pool_assets(&pool.pool);
-                    let expected_shares = shares_for_liquidity(
-                        (amount_0, amount_1),
-                        (reserve_0, reserve_1),
-                        pool.pool.total_shares.get(),
-                    )?;
+                    let (price, price_source) = match &pool.pool.rate_source {
+                        PoolRateSource::Fixed(price) => (*price, "its fixed price"),
+                        PoolRateSource::Oracle { last_price, .. } if last_price.is_zero() => {
+                            return Err(PreflightError::NoOraclePrice {
+                                dex_id: dex_id.clone(),
+                                pool_id,
+                            }
+                            .into_report());
+                        }
+                        PoolRateSource::Oracle { last_price, .. } => {
+                            (*last_price, "the last oracle price")
+                        }
+                    };
+                    let expected_shares = pool
+                        .pool
+                        .rated(price)
+                        .deposit_liquidity(
+                            PoolAssets([TokenAmount::new(amount_0), TokenAmount::new(amount_1)]),
+                            pool.pool.swap_fees(),
+                            pool.pool.total_shares,
+                        )
+                        .minted_shares
+                        .get();
                     let min_shares = at_least_with_slippage(expected_shares, max_slippage)?;
+                    let [(asset_id_0, metadata_0), (asset_id_1, metadata_1)] = &pool.assets;
                     steps.push(format!(
-                        "Add up to {amounts_label} to {pool_label} for at least {min_shares} shares, {expected_shares} at the current ratio; what doesn't fit the ratio goes back to {signer_id}'s wallet"
+                        "Add {amounts_label} to {pool_label} for at least {min_shares} shares, {expected_shares} at {price_source} of 1 {} = {price} {}; the part that's off the pool's ratio pays a fee like a swap",
+                        display::asset_label(asset_id_0, metadata_0.as_ref()),
+                        display::asset_label(asset_id_1, metadata_1.as_ref())
                     ));
                     Some(ProviderShares::new(min_shares))
                 };
+                let attached_amounts = [
+                    (pool.assets[0].0.clone(), amount_0),
+                    (pool.assets[1].0.clone(), amount_1),
+                ]
+                .into_iter()
+                .filter(|(_, amount)| *amount != 0)
+                .collect::<Vec<_>>();
                 operations.push(planning::dex_call_operation(
                     &dex_id,
                     "add_liquidity",
@@ -453,10 +532,7 @@ impl AddMaxSlippageContext {
                         pool_id: amp_pool_id(pool_id),
                         min_shares_received,
                     },
-                    &[
-                        (pool.assets[0].0.clone(), amount_0),
-                        (pool.assets[1].0.clone(), amount_1),
-                    ],
+                    &attached_amounts,
                 )?);
                 function_calls.push(FunctionCall {
                     method_name: "execute_operations",
@@ -466,7 +542,11 @@ impl AddMaxSlippageContext {
                     } else {
                         storage_near
                     },
-                    gas: ADD_LIQUIDITY_GAS,
+                    gas: if oracle_request.is_some() {
+                        ADD_LIQUIDITY_WITH_ORACLE_GAS
+                    } else {
+                        ADD_LIQUIDITY_GAS
+                    },
                 });
                 Ok(TransactionPlan {
                     receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
@@ -485,6 +565,63 @@ impl AddMaxSlippageContext {
             },
         )))
     }
+}
+
+/// The first fee of the oracle with `oracle_key` that the signer's balance on the engine pays on
+/// top of the `added_amounts` of the pool's `assets`
+fn payable_oracle_fee(
+    preflight: &Preflight,
+    oracle_key: &PublicKeyHandle,
+    assets: &[(AssetId, Option<AssetMetadata>); 2],
+    added_amounts: [u128; 2],
+) -> color_eyre::eyre::Result<(AssetId, u128)> {
+    let oracle_fees = engine::oracle_fees(
+        &preflight.network_config,
+        &preflight.block_reference,
+        oracle_key,
+    )?;
+    if oracle_fees.is_empty() {
+        return Err(PreflightError::OracleWithoutFees {
+            oracle_key: oracle_key.to_string(),
+        }
+        .into_report());
+    }
+    for (fee_asset_id, fee) in &oracle_fees {
+        let added_amount_of_fee_asset = assets
+            .iter()
+            .zip(added_amounts)
+            .find_map(|((asset_id, _), added_amount)| {
+                (asset_id == fee_asset_id).then_some(added_amount)
+            })
+            .unwrap_or(0);
+        let balance = engine::asset_balance_of(
+            &preflight.network_config,
+            &preflight.block_reference,
+            &AccountOrDexId::Account(preflight.signer_id.clone()),
+            fee_asset_id,
+        )?;
+        if let Some(U128(balance)) = balance
+            && let Some(needed) = fee.get().checked_add(added_amount_of_fee_asset)
+            && balance >= needed
+        {
+            return Ok((fee_asset_id.clone(), fee.get()));
+        }
+    }
+    let metadata_cache =
+        AssetMetadataCache::new(&preflight.network_config, preflight.block_reference.clone());
+    let mut fee_labels = Vec::new();
+    for (fee_asset_id, fee) in &oracle_fees {
+        fee_labels.push(display::format_amount(
+            fee.get(),
+            metadata_cache.get(fee_asset_id)?.as_ref(),
+        ));
+    }
+    Err(PreflightError::OracleFeeUnaffordable {
+        owner: preflight.signer_id.clone(),
+        oracle_key: oracle_key.to_string(),
+        fees: fee_labels.join(", "),
+    }
+    .into_report())
 }
 
 impl From<AddMaxSlippageContext> for ActionContext {
