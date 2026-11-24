@@ -405,6 +405,10 @@ impl PoolView {
     }
 }
 
+#[derive(BorshSerialize, Clone, Default, PartialEq, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct DepositFeesBreakdown(pub Vec<(FeeReceiver, AssetId, TokenAmount)>);
+
 /// The events of the dex, logged as borsh with the engine's `dex_event` host function and
 /// carried in its `dex_events_borsh` log
 #[near(serializers=[borsh])]
@@ -441,6 +445,8 @@ pub enum AmpDexEvent {
         new_total_asset_0: TokenAmount,
         new_total_asset_1: TokenAmount,
         new_total_shares: U128,
+
+        fees_breakdown: DepositFeesBreakdown,
     },
     LiquidityRemoved {
         pool_id: PoolId,

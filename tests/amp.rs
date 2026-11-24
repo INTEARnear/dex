@@ -382,6 +382,55 @@ impl AmpTest {
         pool_id
     }
 
+    /// Run `operations` of `account` after a request to the test's oracle for the prices of the
+    /// assets of the pool, for its fee of 0 in the first, which it responds to with `prices`
+    async fn execute_with_prices(
+        &self,
+        account: &Account,
+        pool_id: PoolId,
+        prices: &PricesResponse,
+        operations: Vec<Operation>,
+    ) -> ExecutionFinalResult {
+        let TestContext {
+            sandbox,
+            dex_engine_contract,
+            ..
+        } = &self.context;
+        let pool = get_pool(dex_engine_contract, &self.dex_id, pool_id).await;
+        let request = near_sdk::borsh::to_vec(&pool.prices_request()).unwrap();
+        let oracle_request = Operation::OracleRequest {
+            oracle_key: oracle_key_handle(&self.oracle_key),
+            dex_id: self.dex_id.clone(),
+            request: Base64VecU8(request.clone()),
+            fee: (pool.assets.0.asset_id.clone(), TokenAmount::new(0)),
+            swap: None,
+            rescue_address: None,
+        };
+        let operations = [vec![oracle_request], operations].concat();
+        let waiting = account
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": operations,
+            }))
+            .transact_async()
+            .await
+            .unwrap();
+        let nonces = waiting_for_oracle_request(sandbox, &[&waiting], &request).await;
+        let outcome = oracle_respond(
+            sandbox,
+            dex_engine_contract,
+            &self.oracle_key,
+            &request,
+            near_sdk::borsh::to_vec(prices).unwrap(),
+            nonces,
+        )
+        .await;
+        assert_gas_key_call_success(&outcome).unwrap();
+        waiting.await.unwrap()
+    }
+
     /// Swap in one pool, with operations that ask `oracle_key` for the prices of the pool first,
     /// which it responds to with `prices`
     #[allow(clippy::too_many_arguments)]
@@ -940,60 +989,53 @@ async fn test_amp_fees_and_liquidity() {
         .create_pool(test.create_pool_args(FeeFraction::new(3_000), liquidity))
         .await;
 
-    // user2 provides a third of the liquidity, in the ratio of the pool, and gets back the USDC
-    // that's more than the ratio
+    // user2 provides a third of the liquidity, in the ratio of the pool, which pays no fees
     deposit_near(dex_engine_contract, user2, NearToken::from_near(1)).await;
     deposit_ft(dex_engine_contract, deployer, ft1, user2, liquidity.0 / 2).await;
-    deposit_ft(
-        dex_engine_contract,
-        deployer,
-        ft2,
-        user2,
-        liquidity.1 / 2 + usdc(1),
-    )
-    .await;
-    let result = execute_operations(
-        user2,
-        dex_engine_contract,
-        vec![
-            dex_call(
-                dex_id,
-                "register_liquidity",
-                near_sdk::borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap(),
-                &[(AssetId::Near, NearToken::from_millinear(10).as_yoctonear())],
-            ),
-            dex_call(
-                dex_id,
-                "add_liquidity",
-                near_sdk::borsh::to_vec(&AddLiquidityArgs {
-                    pool_id,
-                    min_shares_received: None,
-                })
-                .unwrap(),
-                &[
-                    (near_asset_id.clone(), liquidity.0 / 2),
-                    (usdc_asset_id.clone(), liquidity.1 / 2 + usdc(1)),
-                ],
-            ),
-        ],
-    )
-    .await;
+    deposit_ft(dex_engine_contract, deployer, ft2, user2, liquidity.1 / 2).await;
+    let result = test
+        .execute_with_prices(
+            user2,
+            pool_id,
+            &agreeing_prices(),
+            vec![
+                dex_call(
+                    dex_id,
+                    "register_liquidity",
+                    near_sdk::borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap(),
+                    &[(AssetId::Near, NearToken::from_millinear(10).as_yoctonear())],
+                ),
+                dex_call(
+                    dex_id,
+                    "add_liquidity",
+                    near_sdk::borsh::to_vec(&AddLiquidityArgs {
+                        pool_id,
+                        min_shares_received: None,
+                    })
+                    .unwrap(),
+                    &[
+                        (near_asset_id.clone(), liquidity.0 / 2),
+                        (usdc_asset_id.clone(), liquidity.1 / 2),
+                    ],
+                ),
+            ],
+        )
+        .await;
     assert_success(&result).unwrap();
     let added = amp_events(&result)
         .into_iter()
         .find_map(|event| match event {
             AmpDexEvent::LiquidityAdded {
-                added_amount_0,
-                added_amount_1,
                 minted_shares,
+                fees_breakdown,
                 ..
-            } => Some((added_amount_0.get(), added_amount_1.get(), minted_shares)),
+            } => Some((minted_shares, fees_breakdown)),
             _ => None,
         })
         .unwrap();
-    let (_, added_usdc, user2_shares) = added;
+    let (user2_shares, deposit_fees) = added;
     assert!(INITIAL_SHARES.get() / 2 - user2_shares.get() < INITIAL_SHARES.get() / 1_000_000);
-    assert!(added_usdc <= liquidity.1 / 2 + 1);
+    assert!(deposit_fees.0.is_empty(), "{deposit_fees:?}");
     assert_eq!(
         get_pool_shares(dex_engine_contract, dex_id, pool_id, user2.id()).await,
         Some(user2_shares)
@@ -1210,6 +1252,131 @@ async fn test_amp_fees_and_liquidity() {
     assert_eq!(
         get_pool_shares(dex_engine_contract, dex_id, pool_id, user2.id()).await,
         Some(ProviderShares::ZERO)
+    );
+}
+
+#[tokio::test]
+async fn test_amp_add_liquidity_in_any_ratio() {
+    let test = setup_amp().await;
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user2,
+        ft1,
+        ..
+    } = &test.context;
+    let dex_id = &test.dex_id;
+    let (near_asset_id, usdc_asset_id) = (&test.near_asset_id, &test.usdc_asset_id);
+    // 0.3% to the pool, of which the protocol takes 20%
+    let liquidity = (near(1_000_000), usdc(3_750_000));
+    let pool_id = test
+        .create_pool(test.create_pool_args(FeeFraction::new(3_000), liquidity))
+        .await;
+
+    // user2 deposits only NEAR, a tenth of the pool's
+    let near_in = liquidity.0 / 10;
+    deposit_near(dex_engine_contract, user2, NearToken::from_near(1)).await;
+    deposit_ft(dex_engine_contract, deployer, ft1, user2, near_in).await;
+    let operations = vec![
+        dex_call(
+            dex_id,
+            "register_liquidity",
+            near_sdk::borsh::to_vec(&RegisterLiquidityArgs { pool_id }).unwrap(),
+            &[(AssetId::Near, NearToken::from_millinear(10).as_yoctonear())],
+        ),
+        dex_call(
+            dex_id,
+            "add_liquidity",
+            near_sdk::borsh::to_vec(&AddLiquidityArgs {
+                pool_id,
+                min_shares_received: Some(ProviderShares::new(1)),
+            })
+            .unwrap(),
+            &[(near_asset_id.clone(), near_in)],
+        ),
+    ];
+
+    // A pool that an oracle rates needs its prices
+    let result = execute_operations(user2, dex_engine_contract, operations.clone()).await;
+    assert!(
+        format!("{:?}", result.into_result().unwrap_err())
+            .contains("Calls on these pools must start with an oracle request")
+    );
+
+    let result = test
+        .execute_with_prices(user2, pool_id, &agreeing_prices(), operations)
+        .await;
+    assert_success(&result).unwrap();
+    let (added, minted_shares, new_total, fees_breakdown) = amp_events(&result)
+        .into_iter()
+        .find_map(|event| match event {
+            AmpDexEvent::LiquidityAdded {
+                added_amount_0,
+                added_amount_1,
+                minted_shares,
+                new_total_asset_0,
+                fees_breakdown,
+                ..
+            } => Some((
+                (added_amount_0.get(), added_amount_1.get()),
+                minted_shares,
+                new_total_asset_0.get(),
+                fees_breakdown.0,
+            )),
+            _ => None,
+        })
+        .unwrap();
+    let fees_of = |receiver: &FeeReceiver| {
+        fees_breakdown
+            .iter()
+            .filter(|(fee_receiver, _, _)| fee_receiver == receiver)
+            .map(|(_, asset_id, amount)| (asset_id.clone(), amount.get()))
+            .collect::<Vec<_>>()
+    };
+    // Half the fee on about half of the deposit that's over the pool's ratio, and on what's
+    // under it of USDC
+    let protocol_fees = fees_of(&FeeReceiver::Protocol);
+    let protocol_near_fee = protocol_fees
+        .iter()
+        .find_map(|(asset_id, amount)| (asset_id == near_asset_id).then_some(*amount))
+        .unwrap();
+    let expected_near_fee = near_in / 2 * 600 / 1_000_000 / 2;
+    assert!(
+        protocol_near_fee.abs_diff(expected_near_fee) < expected_near_fee / 20,
+        "{protocol_near_fee} {expected_near_fee}"
+    );
+    assert!(
+        protocol_fees
+            .iter()
+            .any(|(asset_id, amount)| asset_id == usdc_asset_id && *amount > 0)
+    );
+    assert_eq!(
+        get_pending_fees(
+            dex_engine_contract,
+            dex_id,
+            &PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+            near_asset_id
+        )
+        .await,
+        protocol_near_fee
+    );
+    assert!(!fees_of(&FeeReceiver::Pool).is_empty());
+
+    assert_eq!(added, (near_in, 0));
+    assert_eq!(
+        get_pool_shares(dex_engine_contract, dex_id, pool_id, user2.id()).await,
+        Some(minted_shares)
+    );
+    // Worth a little less than a twentieth of the pool, the half of a tenth of its NEAR that's
+    // in the pool's ratio, and the half swapped into it after fees and price impact
+    let twentieth = INITIAL_SHARES.get() / 20;
+    assert!(minted_shares.get() < twentieth);
+    assert!(minted_shares.get() > twentieth / 100 * 99);
+    let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
+    assert_eq!(pool.assets.0.balance.get(), new_total);
+    assert_eq!(
+        pool.total_shares.get(),
+        INITIAL_SHARES.get() + minted_shares.get()
     );
 }
 

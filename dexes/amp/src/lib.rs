@@ -9,22 +9,23 @@ use std::collections::HashMap;
 use amp_dex_types::{
     AddLiquidityArgs, AddLiquidityResponse, AmpDexEvent, AssetIndex, AssetWithBalance,
     CollectLiquidityFeesArgs, CreatePoolArgs, CreatePoolResponse, DEFAULT_FEE_PAYOUT_TYPE,
-    FULL_FEE_FRACTION, FeeDiscountFraction, FeePayoutType, FeeReceiver, GetLiquidityPositionArgs,
-    GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs, INITIAL_SHARES,
-    LiquidityPosition, LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS, MIN_AMPLIFICATION,
-    NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares, PayoutGroups, Pool, PoolAssets,
-    PoolId, PoolRateSource, PoolView, Price, PricesRequest, PricesResponse, ProviderShares,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, RemoveLiquidityResponse, RouteFraction,
-    SetAmplificationArgs, SetFeeArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs,
-    SwapRoute, TokenAmount, TotalShares, WithdrawFeesArgs,
-    math::{RatedPool, SwapAmounts},
+    DepositFeesBreakdown, FULL_FEE_FRACTION, FeeDiscountFraction, FeePayoutType, FeeReceiver,
+    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, GetPoolsArgs,
+    INITIAL_SHARES, LiquidityPosition, LiquidityPositionView, MAX_AMPLIFICATION, MAX_DECIMALS,
+    MIN_AMPLIFICATION, NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares,
+    PayoutGroups, Pool, PoolAssets, PoolId, PoolRateSource, PoolView, Price, PricesRequest,
+    PricesResponse, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
+    RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs, SetFeeArgs,
+    SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, TotalShares,
+    WithdrawFeesArgs,
+    math::{LiquidityDeposit, RatedPool, SwapAmounts},
 };
 use intear_dex_common::{
     AssetId, AssetWithdrawRequest, AssetWithdrawalType, Caller, Dex, DexCallResponse, FeeBalances,
     SwapRequest, SwapRequestAmount, SwapResponse, env, expect,
 };
 use near_sdk::{
-    AccountId, BorshStorageKey, NearToken, PanicOnDefault,
+    AccountId, BorshStorageKey, NearToken, PanicOnDefault, PublicKeyHandle,
     json_types::U128,
     near,
     store::{LookupMap, Vector},
@@ -230,68 +231,20 @@ impl AmpDex {
             pool_fee,
             protocol_fee,
         } = swap_amounts;
-        // The part of the pool's fee that each payout group takes. What rounding leaves goes into
-        // the pool's liquidity.
-        let paid_out_pool_fees = pool
-            .payout_groups
-            .split_pool_fee(pool_fee, pool.total_shares)
-            .into_iter()
-            .filter(|(_, paid_out_fee)| !paid_out_fee.is_zero())
-            .collect::<Vec<_>>();
-        let pool_fee_added_to_liquidity = paid_out_pool_fees
-            .iter()
-            .try_fold(pool_fee, |rest, (_, paid_out_fee)| {
-                rest.checked_sub(*paid_out_fee)
-            })
-            .expect("Paid out more than the fee");
-        let amount_in_after_fees = swap_amounts.amount_in_after_fees();
         balances[in_index] = balances[in_index]
-            .checked_add(amount_in_after_fees)
-            .expect("Overflow")
-            .checked_add(pool_fee_added_to_liquidity)
+            .checked_add(swap_amounts.amount_in_after_fees())
             .expect("Overflow");
         balances[out_index] = balances[out_index]
             .checked_sub(amount_out)
             .expect("Underflow");
-
-        // What the pool's liquidity and providers took in each asset, after converting what their
-        // payouts convert
-        let mut pool_fees_taken = PoolAssets([TokenAmount::ZERO; 2]);
-        pool_fees_taken[in_index] = pool_fee;
-        for (payout_type, paid_out_fee) in paid_out_pool_fees {
-            let payout_asset_index = payout_type.asset_index(in_index);
-            let payout_amount = if payout_asset_index == in_index {
-                paid_out_fee
-            } else {
-                pool_fees_taken[in_index] = pool_fees_taken[in_index]
-                    .checked_sub(paid_out_fee)
-                    .expect("Underflow");
-                // The pool swaps the fee into the other asset without fees, on its curve at the
-                // oracle's price
-                let converted_fee = RatedPool {
-                    balances,
-                    ..rated_pool
-                }
-                .exact_in_amount_out(in_index, paid_out_fee);
-                balances[in_index] = balances[in_index]
-                    .checked_add(paid_out_fee)
-                    .expect("Overflow");
-                balances[out_index] = balances[out_index]
-                    .checked_sub(converted_fee)
-                    .expect("Underflow");
-                pool_fees_taken[out_index] = pool_fees_taken[out_index]
-                    .checked_add(converted_fee)
-                    .expect("Overflow");
-                converted_fee
-            };
-            let fee_added_to_liquidity = pool
-                .payout_groups
-                .group_mut(payout_type)
-                .share_fee(payout_asset_index, payout_amount);
-            balances[payout_asset_index] = balances[payout_asset_index]
-                .checked_add(fee_added_to_liquidity)
-                .expect("Overflow");
-        }
+        let pool_fees_taken = pay_out_pool_fee(
+            &mut pool.payout_groups,
+            pool.total_shares,
+            rated_pool,
+            &mut balances,
+            in_index,
+            pool_fee,
+        );
         pool.set_balances(balances);
         if let PoolRateSource::Oracle { last_price, .. } = &mut pool.rate_source {
             *last_price = price;
@@ -366,14 +319,20 @@ impl OraclePrices {
             oracle_pools.iter().all(|(_, key)| *key == oracle_key),
             "Pools of a swap must ask the same oracle"
         );
-        let request =
-            PricesRequest::of_pools(oracle_pools.iter().map(|(pool, _)| pool.asset_ids()));
+        Some(Self::requested(
+            oracle_key,
+            PricesRequest::of_pools(oracle_pools.iter().map(|(pool, _)| pool.asset_ids())),
+        ))
+    }
+
+    /// The prices that the call's oracle request of `request` from `oracle_key` got
+    fn requested(oracle_key: &PublicKeyHandle, request: PricesRequest) -> Self {
         expect!(
             let Some(response) = env::oracle_request(
                 oracle_key,
                 near_sdk::borsh::to_vec(&request).unwrap()
             ),
-            "Swaps on these pools must start with an oracle request of the prices of {} from {oracle_key}",
+            "Calls on these pools must start with an oracle request of the prices of {} from {oracle_key}",
             request
                 .asset_ids
                 .iter()
@@ -384,7 +343,7 @@ impl OraclePrices {
         let Ok(response) = near_sdk::borsh::from_slice(&response) else {
             panic!("Invalid oracle response");
         };
-        Some(Self { request, response })
+        Self { request, response }
     }
 
     /// The median of the prices of a whole token of the pool's first asset in its second, which
@@ -395,6 +354,66 @@ impl OraclePrices {
             .median_price(&self.request, asset_0, asset_1)
             .unwrap_or_else(|error| near_sdk::env::panic_str(&error.to_string()))
     }
+}
+
+fn pay_out_pool_fee(
+    payout_groups: &mut PayoutGroups,
+    total_shares: TotalShares,
+    rated_pool: RatedPool,
+    balances: &mut PoolAssets<TokenAmount>,
+    fee_index: AssetIndex,
+    pool_fee: TokenAmount,
+) -> PoolAssets<TokenAmount> {
+    let other_index = fee_index.other();
+    let paid_out_pool_fees = payout_groups
+        .split_pool_fee(pool_fee, total_shares)
+        .into_iter()
+        .filter(|(_, paid_out_fee)| !paid_out_fee.is_zero())
+        .collect::<Vec<_>>();
+    let pool_fee_added_to_liquidity = paid_out_pool_fees
+        .iter()
+        .try_fold(pool_fee, |rest, (_, paid_out_fee)| {
+            rest.checked_sub(*paid_out_fee)
+        })
+        .expect("Paid out more than the fee");
+    balances[fee_index] = balances[fee_index]
+        .checked_add(pool_fee_added_to_liquidity)
+        .expect("Overflow");
+
+    let mut pool_fees_taken = PoolAssets([TokenAmount::ZERO; 2]);
+    pool_fees_taken[fee_index] = pool_fee;
+    for (payout_type, paid_out_fee) in paid_out_pool_fees {
+        let payout_asset_index = payout_type.asset_index(fee_index);
+        let payout_amount = if payout_asset_index == fee_index {
+            paid_out_fee
+        } else {
+            pool_fees_taken[fee_index] = pool_fees_taken[fee_index]
+                .checked_sub(paid_out_fee)
+                .expect("Underflow");
+            let converted_fee = RatedPool {
+                balances: *balances,
+                ..rated_pool
+            }
+            .exact_in_amount_out(fee_index, paid_out_fee);
+            balances[fee_index] = balances[fee_index]
+                .checked_add(paid_out_fee)
+                .expect("Overflow");
+            balances[other_index] = balances[other_index]
+                .checked_sub(converted_fee)
+                .expect("Underflow");
+            pool_fees_taken[other_index] = pool_fees_taken[other_index]
+                .checked_add(converted_fee)
+                .expect("Overflow");
+            converted_fee
+        };
+        let fee_added_to_liquidity = payout_groups
+            .group_mut(payout_type)
+            .share_fee(payout_asset_index, payout_amount);
+        balances[payout_asset_index] = balances[payout_asset_index]
+            .checked_add(fee_added_to_liquidity)
+            .expect("Overflow");
+    }
+    pool_fees_taken
 }
 
 /// Starts the balances of `account_id` in `fee_balances` in the assets of a pool of `asset_ids`
@@ -625,6 +644,8 @@ impl AmpDex {
             new_total_asset_0: initial_liquidity.0,
             new_total_asset_1: initial_liquidity.1,
             new_total_shares: U128(INITIAL_SHARES.get()),
+
+            fees_breakdown: DepositFeesBreakdown::default(),
         }
         .emit();
 
@@ -882,7 +903,10 @@ impl AmpDex {
         }
     }
 
-    /// Add liquidity in the ratio of the pool's balances, which doesn't need the oracle
+    /// Add liquidity in any ratio, of one asset or both, rated at the pool's price, which a pool
+    /// that an oracle rates gets from the call's oracle request. The deposit pays a fee on how far
+    /// it is from the pool's ratio, which goes where a swap's fees do. An empty pool starts with
+    /// both assets in the ratio they're added in.
     #[payable]
     #[result_serializer(borsh)]
     pub fn add_liquidity(
@@ -903,36 +927,31 @@ impl AmpDex {
         else {
             near_sdk::env::panic_str("Invalid args");
         };
+        let fee_discount = env::fee_discount();
         let Some(pool) = self.pools.get_mut(pool_id.get()) else {
             panic!("Pool not found");
         };
-        let Pool {
-            assets,
-            providers,
-            total_shares,
-            payout_groups,
-            ..
-        } = &mut *pool;
-        let attached_amount_0 = attached_assets
-            .remove(&assets.0.asset_id)
-            .expect("Asset 1 not found");
-        let attached_amount_1 = attached_assets
-            .remove(&assets.1.asset_id)
-            .expect("Asset 2 not found");
+        let (asset_id_0, asset_id_1) = pool.asset_ids();
+        let asset_ids = PoolAssets([asset_id_0.clone(), asset_id_1.clone()]);
+        let amounts = PoolAssets(asset_ids.each_ref().0.map(|asset_id| {
+            attached_assets
+                .remove(asset_id)
+                .unwrap_or(TokenAmount::ZERO)
+        }));
         expect!(
             attached_assets.is_empty(),
             "No assets other than the two pool assets should be attached"
         );
-        expect!(
-            !attached_amount_0.is_zero() && !attached_amount_1.is_zero(),
-            "Amounts must be greater than 0"
-        );
-        expect!(
-            let Some(mut position) = providers.get(&caller_id).cloned(),
-            "User has not registered using register_liquidity"
-        );
-        let mut asset_withdraw_requests = Vec::new();
-        let (shares_to_mint, added_amount_0, added_amount_1) = if total_shares.is_none() {
+        let Some(mut position) = pool.providers.get(&caller_id).cloned() else {
+            panic!("User has not registered using register_liquidity");
+        };
+        let mut balances = pool.balances();
+        let mut fees_breakdown = Vec::new();
+        let minted_shares = if pool.total_shares.is_none() {
+            expect!(
+                amounts.0.iter().all(|amount| !amount.is_zero()),
+                "Amounts must be greater than 0"
+            );
             expect!(
                 min_shares_received.is_none(),
                 "Min shares received must not be specified for empty pools"
@@ -941,93 +960,121 @@ impl AmpDex {
                 position.shares.is_zero(),
                 "User already has shares but there are no total shares"
             );
-            (INITIAL_SHARES, attached_amount_0, attached_amount_1)
+            for asset_index in AssetIndex::BOTH {
+                balances[asset_index] = balances[asset_index]
+                    .checked_add(amounts[asset_index])
+                    .expect("Overflow");
+            }
+            INITIAL_SHARES
         } else {
-            let pool_balance_0 = assets.0.balance;
-            let pool_balance_1 = assets.1.balance;
-            let shares_mintable_from_0 = ProviderShares::minted_for(
-                attached_amount_0
-                    .checked_sub(TokenAmount::new(1))
-                    .expect("Underflow"),
-                *total_shares,
-                pool_balance_0,
+            expect!(
+                amounts.0.iter().any(|amount| !amount.is_zero()),
+                "Amounts must not both be 0"
             );
-            let shares_mintable_from_1 = ProviderShares::minted_for(
-                attached_amount_1
-                    .checked_sub(TokenAmount::new(1))
-                    .expect("Underflow"),
-                *total_shares,
-                pool_balance_1,
-            );
-            let shares_to_mint = shares_mintable_from_0.min(shares_mintable_from_1);
-            expect!(!shares_to_mint.is_zero(), "Can't mint zero shares");
+            let price = match &pool.rate_source {
+                PoolRateSource::Oracle { key, .. } => {
+                    OraclePrices::requested(key, pool.prices_request()).of_pool(pool)
+                }
+                PoolRateSource::Fixed(price) => *price,
+            };
+            let rated_pool = pool.rated(balances, price);
+            let swap_fees = match fee_discount {
+                Some(fee_discount) => pool.swap_fees().discounted(fee_discount),
+                None => pool.swap_fees(),
+            };
+            let LiquidityDeposit {
+                pool_fees,
+                protocol_fees,
+                minted_shares,
+            } = rated_pool.deposit_liquidity(amounts, swap_fees, pool.total_shares);
+            expect!(!minted_shares.is_zero(), "Can't mint zero shares");
             if let Some(min_shares_received) = min_shares_received {
-                expect!(shares_to_mint >= min_shares_received, "Slippage error");
+                expect!(minted_shares >= min_shares_received, "Slippage error");
             }
 
-            let deposited_amount_0 = shares_to_mint
-                .worth_in(*total_shares, pool_balance_0)
-                .checked_add(TokenAmount::new(1))
-                .expect("Overflow");
-            let deposited_amount_1 = shares_to_mint
-                .worth_in(*total_shares, pool_balance_1)
-                .checked_add(TokenAmount::new(1))
-                .expect("Overflow");
-
-            for (asset, attached_amount, deposited_amount) in [
-                (&assets.0, attached_amount_0, deposited_amount_0),
-                (&assets.1, attached_amount_1, deposited_amount_1),
-            ] {
-                if let Some(refund_amount) = attached_amount.checked_sub(deposited_amount) {
-                    asset_withdraw_requests.push(AssetWithdrawRequest {
-                        asset_id: asset.asset_id.clone(),
-                        amount: refund_amount,
-                        withdrawal_type: AssetWithdrawalType::WithdrawUnderlyingAsset(
-                            caller_id.clone(),
-                        ),
-                    });
+            for asset_index in AssetIndex::BOTH {
+                balances[asset_index] = balances[asset_index]
+                    .checked_add(amounts[asset_index])
+                    .and_then(|balance| balance.checked_sub(pool_fees[asset_index]))
+                    .and_then(|balance| balance.checked_sub(protocol_fees[asset_index]))
+                    .expect("The fees are less than the deposit and the balance");
+            }
+            for fee_index in AssetIndex::BOTH {
+                if pool_fees[fee_index].is_zero() {
+                    continue;
+                }
+                let pool_fees_taken = pay_out_pool_fee(
+                    &mut pool.payout_groups,
+                    pool.total_shares,
+                    rated_pool,
+                    &mut balances,
+                    fee_index,
+                    pool_fees[fee_index],
+                );
+                for asset_index in AssetIndex::BOTH {
+                    if !pool_fees_taken[asset_index].is_zero() {
+                        fees_breakdown.push((
+                            FeeReceiver::Pool,
+                            asset_ids[asset_index].clone(),
+                            pool_fees_taken[asset_index],
+                        ));
+                    }
                 }
             }
-            (shares_to_mint, deposited_amount_0, deposited_amount_1)
+            for asset_index in AssetIndex::BOTH {
+                if protocol_fees[asset_index].is_zero() {
+                    continue;
+                }
+                self.fees_collected_by_users.credit(
+                    &PROTOCOL_FEE_RECEIVER_ID.to_owned(),
+                    &asset_ids[asset_index],
+                    protocol_fees[asset_index],
+                );
+                fees_breakdown.push((
+                    FeeReceiver::Protocol,
+                    asset_ids[asset_index].clone(),
+                    protocol_fees[asset_index],
+                ));
+            }
+            if let PoolRateSource::Oracle { last_price, .. } = &mut pool.rate_source {
+                *last_price = price;
+            }
+            minted_shares
         };
-        assets.0.balance = assets
-            .0
-            .balance
-            .checked_add(added_amount_0)
-            .expect("Overflow");
-        assets.1.balance = assets
-            .1
-            .balance
-            .checked_add(added_amount_1)
-            .expect("Overflow");
-        let collected_fees = payout_groups.add_shares(&mut position, shares_to_mint);
-        *total_shares = total_shares.minted(shares_to_mint).expect("Overflow");
+        pool.set_balances(balances);
+
+        let collected_fees = pool.payout_groups.add_shares(&mut position, minted_shares);
+        pool.total_shares = pool.total_shares.minted(minted_shares).expect("Overflow");
         credit_liquidity_fees(
             &mut self.fees_collected_by_users,
             pool_id,
             &caller_id,
-            PoolAssets([&assets.0.asset_id, &assets.1.asset_id]),
+            asset_ids.each_ref(),
             collected_fees,
         );
         let new_owned_shares = position.shares;
-        providers.insert(caller_id.clone(), position);
+        pool.providers.insert(caller_id.clone(), position);
 
         AmpDexEvent::LiquidityAdded {
             pool_id,
-            asset_0: assets.0.asset_id.clone(),
-            asset_1: assets.1.asset_id.clone(),
+            asset_0: asset_ids[AssetIndex::First].clone(),
+            asset_1: asset_ids[AssetIndex::Second].clone(),
 
-            added_amount_0,
-            added_amount_1,
-            minted_shares: shares_to_mint,
+            added_amount_0: amounts[AssetIndex::First],
+            added_amount_1: amounts[AssetIndex::Second],
+            minted_shares,
 
-            new_owned_asset_0: new_owned_shares.worth_in(*total_shares, assets.0.balance),
-            new_owned_asset_1: new_owned_shares.worth_in(*total_shares, assets.1.balance),
+            new_owned_asset_0: new_owned_shares
+                .worth_in(pool.total_shares, balances[AssetIndex::First]),
+            new_owned_asset_1: new_owned_shares
+                .worth_in(pool.total_shares, balances[AssetIndex::Second]),
             new_owned_shares,
 
-            new_total_asset_0: assets.0.balance,
-            new_total_asset_1: assets.1.balance,
-            new_total_shares: U128(total_shares.get()),
+            new_total_asset_0: balances[AssetIndex::First],
+            new_total_asset_1: balances[AssetIndex::Second],
+            new_total_shares: U128(pool.total_shares.get()),
+
+            fees_breakdown: DepositFeesBreakdown(fees_breakdown),
         }
         .emit();
         AmpDexEvent::PoolUpdated {
@@ -1038,7 +1085,6 @@ impl AmpDex {
 
         let response = AddLiquidityResponse;
         DexCallResponse {
-            asset_withdraw_requests,
             response: near_sdk::borsh::to_vec(&response).expect("Failed to serialize response"),
             ..Default::default()
         }

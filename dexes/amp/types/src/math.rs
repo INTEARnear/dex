@@ -3,8 +3,8 @@ use ethnum::U256;
 use intear_dex_common::SwapRequestAmount;
 
 use crate::{
-    Amplification, AssetIndex, FULL_FEE_FRACTION, FeeFraction, PoolAssets, Price, SwapFees,
-    TokenAmount,
+    Amplification, AssetIndex, FULL_FEE_FRACTION, FeeFraction, PoolAssets, Price, ProviderShares,
+    SwapFees, TokenAmount, TotalShares,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +22,14 @@ impl SwapAmounts {
             .and_then(|amount| amount.checked_sub(self.protocol_fee))
             .expect("Fee exceeds 100%")
     }
+}
+
+/// The fees that a deposit in any ratio pays, out of its amounts, and the shares it gets
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiquidityDeposit {
+    pub pool_fees: PoolAssets<TokenAmount>,
+    pub protocol_fees: PoolAssets<TokenAmount>,
+    pub minted_shares: ProviderShares,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +178,69 @@ impl RatedPool {
             true,
         );
         TokenAmount::new(u128::try_from(amount_in).expect("Amount must be less than u128::MAX"))
+    }
+
+    pub fn deposit_liquidity(
+        &self,
+        amounts: PoolAssets<TokenAmount>,
+        fees: SwapFees,
+        total_shares: TotalShares,
+    ) -> LiquidityDeposit {
+        let values_before = self.values();
+        let invariant_before = invariant(values_before, self.amplification);
+        let pool_after = RatedPool {
+            balances: PoolAssets(AssetIndex::BOTH.map(|asset_index| {
+                self.balances[asset_index]
+                    .checked_add(amounts[asset_index])
+                    .expect("Balance overflow")
+            })),
+            ..*self
+        };
+        let values_after = pool_after.values();
+        let invariant_after = invariant(values_after, self.amplification);
+        let half_of = |fee: FeeFraction, imbalance: TokenAmount| {
+            TokenAmount::new(fee.of(imbalance).get().div_ceil(2))
+        };
+        let mut deposit = LiquidityDeposit {
+            pool_fees: PoolAssets([TokenAmount::ZERO; 2]),
+            protocol_fees: PoolAssets([TokenAmount::ZERO; 2]),
+            minted_shares: ProviderShares::ZERO,
+        };
+        let mut pool_after_fees = pool_after;
+        for asset_index in AssetIndex::BOTH {
+            let balanced_value = mul_div(
+                invariant_after,
+                values_before[asset_index],
+                invariant_before,
+                false,
+            );
+            let imbalance = self.amount_of(
+                asset_index,
+                balanced_value.abs_diff(values_after[asset_index]),
+                true,
+            );
+            deposit.pool_fees[asset_index] = half_of(fees.pool, imbalance);
+            deposit.protocol_fees[asset_index] = half_of(fees.protocol, imbalance);
+            pool_after_fees.balances[asset_index] = pool_after_fees.balances[asset_index]
+                .checked_sub(deposit.pool_fees[asset_index])
+                .and_then(|balance| balance.checked_sub(deposit.protocol_fees[asset_index]))
+                .expect("The fees are less than the balance");
+        }
+        let invariant_after_fees = invariant(pool_after_fees.values(), self.amplification);
+        // -1 for the rounding of the invariant
+        let invariant_growth = invariant_after_fees
+            .saturating_sub(invariant_before)
+            .saturating_sub(U256::ONE);
+        let minted_shares = mul_div(
+            U256::from(total_shares.get()),
+            invariant_growth,
+            invariant_before,
+            false,
+        );
+        deposit.minted_shares = ProviderShares::new(
+            u128::try_from(minted_shares).expect("Shares must be less than u128::MAX"),
+        );
+        deposit
     }
 
     fn values(&self) -> PoolAssets<U256> {

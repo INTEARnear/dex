@@ -6,8 +6,8 @@ use near_sdk::{
 };
 
 use crate::{
-    Amplification, AssetWithBalance, FeeFraction, PoolRateSource, PoolView, Price, SwapArgs,
-    SwapRoute, TokenAmount, TotalShares,
+    Amplification, AssetWithBalance, DepositFeesBreakdown, FeeFraction, PoolRateSource, PoolView,
+    Price, SwapArgs, SwapRoute, TokenAmount, TotalShares,
 };
 
 impl BorshDeserialize for SwapArgs {
@@ -26,6 +26,17 @@ impl BorshDeserialize for SwapArgs {
             ));
         }
         Ok(Self { routes })
+    }
+}
+
+impl BorshDeserialize for DepositFeesBreakdown {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> near_sdk::borsh::io::Result<Self> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        if bytes.is_empty() {
+            return Ok(Self::default());
+        }
+        Ok(Self(BorshDeserialize::try_from_slice(&bytes)?))
     }
 }
 
