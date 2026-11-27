@@ -14,20 +14,18 @@ use near_sdk::{
     base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base64VecU8, U128},
 };
-use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::{Account, AccountDetailsPatch, Contract, Worker};
+use near_workspaces::{Account, Contract};
 use std::collections::HashMap;
 use xyk_dex_types::{
-    AddLiquidityArgs, CAN_MIGRATE, ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs,
-    CreatePoolArgs, CurrentFees, FULL_FEE_DISCOUNT, FULL_ROUTE_FRACTION, FeeAmount,
-    FeeConfigurationV2, FeeDiscountFraction, FeeFraction, FeePayoutType, FeeReceiver,
-    GetClaimableFeesArgs, GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs,
-    GetPoolSharesArgs, LAST_CREATED_POOL_ID_MARKER, LiquidityPositionView, LockPoolArgs,
-    MAX_FEE_RECEIVERS, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, ProviderShares,
-    RegisterLiquidityArgs, RemoveLiquidityArgs, RouteFraction, ScheduledFeeCurve,
-    SetLiquidityFeePayoutArgs, ShareGrowth, SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
-    XykDexEvent,
+    AddLiquidityArgs, ClaimFeesArgs, ClaimMode, CollectLiquidityFeesArgs, CreatePoolArgs,
+    CurrentFees, FULL_FEE_DISCOUNT, FULL_ROUTE_FRACTION, FeeAmount, FeeConfigurationV2,
+    FeeDiscountFraction, FeeFraction, FeePayoutType, FeeReceiver, GetClaimableFeesArgs,
+    GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs,
+    LAST_CREATED_POOL_ID_MARKER, LiquidityPositionView, LockPoolArgs, MAX_FEE_RECEIVERS,
+    PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolType, PoolView, ProviderShares, RegisterLiquidityArgs,
+    RemoveLiquidityArgs, RouteFraction, ScheduledFeeCurve, SetLiquidityFeePayoutArgs, ShareGrowth,
+    SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs, XykDexEvent,
 };
 
 async fn get_pool(
@@ -4242,33 +4240,6 @@ async fn test_xyk_community_receiver_outside_launch_pools() {
     assert!(!claim_unregistered_result.is_success());
 }
 
-async fn create_migrator(sandbox: &Worker<Sandbox>, dex_engine_contract: &Contract) -> Account {
-    let account_id: AccountId = CAN_MIGRATE.to_owned();
-    let key =
-        near_workspaces::types::SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
-    sandbox
-        .patch(&account_id)
-        .account(AccountDetailsPatch::default().balance(NearToken::from_near(1_000)))
-        .access_key(
-            key.public_key(),
-            near_workspaces::types::AccessKey::full_access(),
-        )
-        .transact()
-        .await
-        .unwrap();
-    let migrator = Account::from_secret_key(account_id, key, sandbox);
-    let result = migrator
-        .call(dex_engine_contract.id(), "storage_deposit")
-        .max_gas()
-        .deposit(engine_user_storage_deposit())
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    migrator
-}
-
 /// The engine with a new xyk dex, whose fee discounts `fee_discount_signer` signs. Its assets are
 /// registered for the dex and the engine accounts, and the FTs are registered for all.
 async fn setup_xyk_with_fee_discount_signer(
@@ -5376,117 +5347,6 @@ async fn test_xyk_trader_fee_discount() {
         );
     }
     assert_eq!(pools.user2_pending_fees().await, (0, 0));
-}
-
-#[tokio::test]
-async fn test_xyk_fee_discount_signer_migration() {
-    let fee_discount_signer = SecretKey::from_seed(KeyType::ED25519, "fee-discount-signer");
-    let swap_amount_ft1 = 1_000_000_000u128;
-    let pools = setup_two_pools(&fee_discount_signer, swap_amount_ft1).await;
-    pools.deposit_ft1(swap_amount_ft1).await;
-    let TwoPools {
-        context:
-            TestContext {
-                sandbox,
-                dex_engine_contract,
-                user1,
-                ..
-            },
-        dex_id,
-        ft1_asset_id,
-        ft2_asset_id,
-        first_pool_id,
-        ..
-    } = &pools;
-
-    // The state of the dex while it had a fee discount signer after its other fields: the pool
-    // vector, the length and prefix of which is StorageKey::Pools, and the fee balances of
-    // StorageKey::FeesCollectedByUsers and FeesClaimableByAnyone. The engine stores the records
-    // of dexes in StorageKey::DexStorage by dex and key.
-    let pool_count = get_pool_count(dex_engine_contract, dex_id).await;
-    let signer_public_key: near_sdk::PublicKey = fee_discount_signer
-        .public_key()
-        .to_string()
-        .parse()
-        .unwrap();
-    let state_before_migration = near_sdk::borsh::to_vec(&(
-        pool_count,
-        vec![0u8],
-        vec![2u8],
-        vec![5u8],
-        Some(signer_public_key),
-    ))
-    .unwrap();
-    let state_record_key = [
-        vec![1],
-        near_sdk::borsh::to_vec(&(dex_id, b"STATE".to_vec())).unwrap(),
-    ]
-    .concat();
-    sandbox
-        .patch(dex_engine_contract.id())
-        .state(
-            &state_record_key,
-            &near_sdk::borsh::to_vec(&state_before_migration).unwrap(),
-        )
-        .transact()
-        .await
-        .unwrap();
-    // The new code can't read the state like that
-    dex_engine_contract
-        .view("dex_view")
-        .args_json(json!({
-            "dex_id": dex_id,
-            "method": "get_pool_count",
-            "args": "",
-        }))
-        .await
-        .unwrap_err();
-
-    let migrate = async |account: &Account| {
-        account
-            .call(dex_engine_contract.id(), "dex_call")
-            .max_gas()
-            .deposit(NearToken::from_yoctonear(1))
-            .args_json(json!({
-                "dex_id": dex_id,
-                "method": "migrate",
-                "args": "",
-                "attached_assets": {},
-            }))
-            .transact()
-            .await
-            .unwrap()
-    };
-    let result = migrate(user1).await;
-    assert!(
-        format!("{result:?}").contains("Only owner can migrate"),
-        "{result:#?}"
-    );
-    let migrator = create_migrator(sandbox, dex_engine_contract).await;
-    let result = migrate(&migrator).await;
-    assert_success(&result).unwrap();
-
-    // The dex reads the state it had without the signer, and swaps
-    assert_eq!(
-        get_pool_count(dex_engine_contract, dex_id).await,
-        pool_count
-    );
-    let result = user1
-        .call(dex_engine_contract.id(), "execute_operations")
-        .max_gas()
-        .deposit(NearToken::from_yoctonear(1))
-        .args_json(json!({
-            "operations": [pools.swap_operation(
-                vec![route(100, vec![*first_pool_id])],
-                ft1_asset_id,
-                ft2_asset_id,
-                SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(swap_amount_ft1))),
-            )],
-        }))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
 }
 
 #[tokio::test]

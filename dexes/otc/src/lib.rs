@@ -8,14 +8,15 @@ use intear_dex_common::{
     SwapRequestAmount, SwapResponse, TokenAmount, env, expect,
 };
 use near_sdk::{
-    AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey,
+    AccountId, BlockHeight, BorshStorageKey, CurveType, NearToken, PublicKey, PublicKeyHandle,
     json_types::U64,
     near,
     store::{LookupMap, LookupSet, TreeMap},
 };
 use otc_dex_types::{
     AuthorizationMethod, AuthorizedTradeIntent, DepositAssetsArgs, ExpiryCondition,
-    GetAuthorizedKeyArgs, GetBalanceArgs, IsNonceUsedArgs, MatchArgs, Nonce, OtcDexEvent,
+    GetAuthorizedKeyArgs, GetBalanceArgs, IsNonceUsedArgs, MatchArgs, Nonce,
+    ORACLE_SWAP_MESSAGE_PREFIX, OracleRequest, OracleResponse, OracleSwapArgs, OtcDexEvent,
     OutputDestination, RegisterAssetsArgs, SetAuthorizedKeyArgs, StorageBalance,
     StorageBalanceOfArgs, StorageDepositArgs, TradeIntent, TradeIntentSignaturePayload, Validity,
     WithdrawAssetsArgs, WithdrawRequest,
@@ -53,10 +54,18 @@ impl Dex for OtcDex {
     #[payable]
     #[result_serializer(borsh)]
     fn swap(&mut self, #[serializer(borsh)] request: SwapRequest) -> SwapResponse {
-        let Ok(maker_intent) =
-            near_sdk::borsh::from_slice::<AuthorizedTradeIntent>(&request.message.0)
-        else {
-            near_sdk::env::panic_str("Invalid message: expected an AuthorizedTradeIntent");
+        let maker_intent = match request.message.0.strip_prefix(ORACLE_SWAP_MESSAGE_PREFIX) {
+            Some(oracle_swap_args) => self.oracle_solver_intent(&request, oracle_swap_args),
+            None => {
+                let Ok(maker_intent) =
+                    near_sdk::borsh::from_slice::<AuthorizedTradeIntent>(&request.message.0)
+                else {
+                    near_sdk::env::panic_str(
+                        "Invalid message: expected an AuthorizedTradeIntent or an Oracle swap",
+                    );
+                };
+                maker_intent
+            }
         };
         let trader = env::caller();
         let trader_id = trader.alleged_account_id().clone();
@@ -408,13 +417,20 @@ impl OtcDex {
         #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
         #[serializer(borsh)] args: Vec<u8>,
     ) -> DexCallResponse {
-        expect!(
-            let Caller::Direct(caller_id) = env::caller(),
-            "This method can only be called directly, not in a transfer call"
-        );
+        let caller = env::caller();
+        let caller_id = caller.alleged_account_id().clone();
         let Ok(DepositAssetsArgs) = near_sdk::borsh::from_slice(&args) else {
             near_sdk::env::panic_str("Invalid args");
         };
+        if let Caller::OnTransfer { .. } = caller {
+            for asset_id in attached_assets.keys() {
+                expect!(
+                    self.balances
+                        .contains_key(&(caller_id.clone(), asset_id.clone())),
+                    "{caller_id} has no registered balance for asset {asset_id}, which a deposit in a transfer call needs"
+                );
+            }
+        }
         let storage_usage_before = near_sdk::env::storage_usage();
         for (asset_id, amount) in attached_assets.iter() {
             self.balances
@@ -652,6 +668,100 @@ impl OtcDex {
                     );
                 }
             }
+            AuthorizationMethod::OracleResponse { request, nonce } => {
+                let Some(authorized_key) = self.authorized_keys.get(&trade_intent.user_id) else {
+                    panic!(
+                        "Intent not authorized: AuthorizationMethod::OracleResponse cannot be used if there is no authorized key"
+                    );
+                };
+                let Some(response) = env::oracle_request(
+                    &PublicKeyHandle::from(authorized_key),
+                    near_sdk::borsh::to_vec(request).unwrap(),
+                ) else {
+                    panic!(
+                        "Intent not authorized: the operations didn't start with the request to the authorized key of {}",
+                        trade_intent.user_id
+                    );
+                };
+                expect!(
+                    response
+                        == near_sdk::borsh::to_vec(&OracleResponse::Fill {
+                            trade_intent: trade_intent.clone(),
+                            nonce: *nonce,
+                        })
+                        .unwrap(),
+                    "Intent not authorized: the oracle response isn't this intent"
+                );
+            }
+        }
+    }
+
+    /// The intent of the solver of a Romi swap, from its response to the request that
+    /// the dex makes of the swap
+    fn oracle_solver_intent(
+        &self,
+        request: &SwapRequest,
+        oracle_swap_args: &[u8],
+    ) -> AuthorizedTradeIntent {
+        let Ok(OracleSwapArgs {
+            solver_id,
+            quote_id,
+            worst_case_amount,
+        }) = near_sdk::borsh::from_slice(oracle_swap_args)
+        else {
+            near_sdk::env::panic_str("Invalid oracle swap args");
+        };
+        let Some(solver_key) = self.authorized_keys.get(&solver_id) else {
+            panic!("Solver {solver_id} has no authorized key");
+        };
+        let oracle_request = OracleRequest {
+            trader: env::caller(),
+            quote_id,
+        };
+        let Some(response) = env::oracle_request(
+            &PublicKeyHandle::from(solver_key),
+            near_sdk::borsh::to_vec(&oracle_request).unwrap(),
+        ) else {
+            panic!(
+                "The operations of an oracle swap must start with its request to the authorized key of {solver_id}"
+            );
+        };
+        let Ok(response) = near_sdk::borsh::from_slice::<OracleResponse>(&response) else {
+            panic!("Invalid response of solver {solver_id}");
+        };
+        let (trade_intent, nonce) = match response {
+            OracleResponse::Fill {
+                trade_intent,
+                nonce,
+            } => (trade_intent, nonce),
+            OracleResponse::Reject { reason } => {
+                panic!("Solver {solver_id} rejected the swap: {reason}")
+            }
+        };
+        expect!(
+            trade_intent.user_id == solver_id,
+            "The intent that solver {solver_id} responded with is of {}",
+            trade_intent.user_id
+        );
+        // The solver's asset in is what it gives, and its asset out what it gets
+        match request.amount {
+            SwapRequestAmount::ExactIn(_) => expect!(
+                trade_intent.amount_in >= worst_case_amount,
+                "Solver {solver_id} gives {}, less than the worst case of {worst_case_amount}",
+                trade_intent.amount_in
+            ),
+            SwapRequestAmount::ExactOut(_) => expect!(
+                trade_intent.amount_out <= worst_case_amount,
+                "Solver {solver_id} takes {}, more than the worst case of {worst_case_amount}",
+                trade_intent.amount_out
+            ),
+        }
+        AuthorizedTradeIntent {
+            trade_intent,
+            authorization_method: AuthorizationMethod::OracleResponse {
+                request: oracle_request,
+                nonce,
+            },
         }
     }
 
@@ -680,7 +790,8 @@ impl OtcDex {
         }
 
         // mark nonce as used
-        if let AuthorizationMethod::Signature { nonce, .. } =
+        if let AuthorizationMethod::Signature { nonce, .. }
+        | AuthorizationMethod::OracleResponse { nonce, .. } =
             &authorized_trade_intent.authorization_method
         {
             expect!(

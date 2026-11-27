@@ -231,7 +231,8 @@ impl RunContext {
                         } => referenced_accounts.push(account_id),
                         Operation::Withdraw { to, .. } => referenced_accounts.extend(to),
                         Operation::RegisterAssets { r#for: None, .. }
-                        | Operation::StorageDeposit { r#for: None, .. } => {}
+                        | Operation::StorageDeposit { r#for: None, .. }
+                        | Operation::RespondToOracleRequest { .. } => {}
                     }
                 }
                 referenced_accounts.sort();
@@ -561,5 +562,17 @@ fn operation_step(
                 None => format!("Wait {wait_for}"),
             }
         }
+        Operation::RespondToOracleRequest {
+            oracle_key,
+            request_hash,
+            response,
+            nonces,
+            signature: _,
+        } => format!(
+            "Respond to request {} as oracle {oracle_key} with {} bytes, resuming {} waiting operation batches",
+            String::from(request_hash),
+            response.0.len(),
+            nonces.len()
+        ),
     })
 }

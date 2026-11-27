@@ -4,7 +4,7 @@ use intear_dex::storage_management::TotalStorageBalances;
 use intear_dex_common::{AssetId, DexId};
 use intear_dex_types::{
     AccountOrDexId, FeeDiscount, FeeDiscountSignaturePayload, IntearDexEvent, Operation,
-    SignedFeeDiscount,
+    OracleResponseSignaturePayload, SignedFeeDiscount,
 };
 use near_contract_standards::storage_management::StorageBalance;
 use near_crypto::{KeyType, SecretKey, Signature};
@@ -1217,16 +1217,50 @@ pub fn sign_fee_discount(
         engine_contract_id: engine_contract_id.clone(),
         discount: discount.clone(),
     };
-    let signature = match signer.sign(&near_sdk::env::sha256_array(
-        near_sdk::borsh::to_vec(&signature_payload).unwrap(),
-    )) {
+    SignedFeeDiscount {
+        discount,
+        signature: signature_of_payload(signer, &signature_payload),
+    }
+}
+
+/// Of sha256(borsh(`payload`)) by `signer`, as the engine verifies it
+fn signature_of_payload(
+    signer: &SecretKey,
+    payload: &impl near_sdk::borsh::BorshSerialize,
+) -> Base64VecU8 {
+    let hash = near_sdk::env::sha256_array(near_sdk::borsh::to_vec(payload).unwrap());
+    Base64VecU8(match signer.sign(&hash) {
         Signature::ED25519(signature) => signature.to_bytes().to_vec(),
         Signature::SECP256K1(signature) => <[u8; 65]>::from(signature).to_vec(),
         Signature::MLDSA65(signature) => signature.0.to_vec(),
+    })
+}
+
+/// The response to `request` as the oracle that has `oracle_key`, resuming the operations of
+/// `nonces`, signed by `signer` for the engine `engine_contract_id` on `chain_id`
+pub fn respond_to_oracle_request(
+    oracle_key: &SecretKey,
+    signer: &SecretKey,
+    chain_id: &str,
+    engine_contract_id: &AccountId,
+    request: &[u8],
+    response: Vec<u8>,
+    nonces: Vec<Base64VecU8>,
+) -> Operation {
+    let signature_payload = OracleResponseSignaturePayload {
+        chain_id: chain_id.to_string(),
+        engine_contract_id: engine_contract_id.clone(),
+        request_hash: Base58CryptoHash::from(near_sdk::env::sha256_array(request)),
+        response: Base64VecU8(response),
+        nonces,
     };
-    SignedFeeDiscount {
-        discount,
-        signature: Base64VecU8(signature),
+    let signature = signature_of_payload(signer, &signature_payload);
+    Operation::RespondToOracleRequest {
+        oracle_key: oracle_key.public_key().to_string().parse().unwrap(),
+        request_hash: signature_payload.request_hash,
+        response: signature_payload.response,
+        nonces: signature_payload.nonces,
+        signature,
     }
 }
 

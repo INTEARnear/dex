@@ -3,10 +3,14 @@ use std::collections::HashMap;
 use intear_dex_common::{
     AssetId, Caller, DexId, FeeDiscountFraction, SwapRequestAmount, TokenAmount, expect,
 };
-use intear_dex_types::{AccountOrDexId, IntearDexEvent, Operation, OracleFeeSwap, ReferralFees};
+use intear_dex_types::{
+    AccountOrDexId, IntearDexEvent, Operation, OracleFeeSwap, OracleResponseSignaturePayload,
+    ReferralFees,
+};
 use near_sdk::{
     AccountId, Allowance, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
     PromiseOrValue, PublicKey, PublicKeyHandle, UserYieldId,
+    base64::{Engine, prelude::BASE64_STANDARD},
     json_types::{Base58CryptoHash, Base64VecU8},
     near,
     serde_json::json,
@@ -14,7 +18,7 @@ use near_sdk::{
 
 use crate::{
     DexEngine, DexEngineExt, OracleResponse, STORAGE_BYTES_PER_RECORD, call_events::CallEvents,
-    internal_operations::TradeAccount,
+    internal_operations::TradeAccount, verify_signature,
 };
 
 /// Also includes gas of the withdrawal that refunds a deposit
@@ -542,6 +546,49 @@ impl DexEngine {
                 .with_unused_gas_weight(0)
                 .after_oracle_operations(trader, sandboxed_assets, oracle_fee, rescue_address),
         )
+    }
+
+    pub(crate) fn internal_respond_to_oracle_request(
+        &self,
+        oracle_key: PublicKey,
+        request_hash: Base58CryptoHash,
+        response: Base64VecU8,
+        nonces: Vec<Base64VecU8>,
+        signature: Base64VecU8,
+    ) {
+        expect!(
+            response.0.len() <= MAX_ORACLE_RESPONSE_BYTES,
+            "Response is more than {MAX_ORACLE_RESPONSE_BYTES} bytes"
+        );
+        let signature_payload = OracleResponseSignaturePayload {
+            chain_id: near_sdk::env::chain_id(),
+            engine_contract_id: near_sdk::env::current_account_id(),
+            request_hash,
+            response,
+            nonces,
+        };
+        let hash =
+            near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
+        expect!(
+            verify_signature(&oracle_key, hash, &signature.0),
+            "Oracle response signature verification failed"
+        );
+        let oracle_key = PublicKeyHandle::from(oracle_key);
+        let request_hash = CryptoHash::from(signature_payload.request_hash);
+        for nonce in signature_payload.nonces {
+            let nonce_bytes: [u8; 32] = nonce
+                .0
+                .as_slice()
+                .try_into()
+                .expect("Nonce must be 32 bytes");
+            expect!(
+                oracle_yield_id(&oracle_key, request_hash, nonce_bytes)
+                    .resume(&signature_payload.response.0)
+                    .is_ok(),
+                "No operations with nonce {} wait for the response",
+                BASE64_STANDARD.encode(nonce.0)
+            );
+        }
     }
 }
 

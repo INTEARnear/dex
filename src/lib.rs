@@ -348,45 +348,6 @@ impl DexEngine {
         }
     }
 
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate() -> Self {
-        #[near(serializers=[borsh])]
-        struct OldState {
-            dex_balances: LookupMap<DexId, AssetBalances>,
-            dex_storage: DexStorage,
-            dex_codes: LookupMap<DexId, Vec<u8>>,
-            dex_storage_balances: StorageBalances<DexId>,
-            user_balances: LookupMap<AccountId, AssetBalances>,
-            user_storage_balances: StorageBalances<AccountId>,
-            total_in_custody: IterableMap<AssetId, TokenAmount>,
-            paused: bool,
-            trusted_code_deployer: AccountId,
-            uploaded_code: LazyOption<Vec<u8>>,
-            oracle_fee_receivers: LookupMap<PublicKeyHandle, AccountId>,
-            oracle_fees: LookupMap<PublicKeyHandle, HashMap<AssetId, TokenAmount>>,
-            fee_discount_signer: Option<PublicKey>,
-        }
-        let old_state: OldState = near_sdk::env::state_read().expect("Failed to read old state");
-        Self {
-            dex_balances: old_state.dex_balances,
-            dex_storage: old_state.dex_storage,
-            dex_codes: old_state.dex_codes,
-            dex_storage_balances: old_state.dex_storage_balances,
-            user_balances: old_state.user_balances,
-            user_storage_balances: old_state.user_storage_balances,
-            total_in_custody: old_state.total_in_custody,
-            paused: old_state.paused,
-            trusted_code_deployer: old_state.trusted_code_deployer,
-            uploaded_code: old_state.uploaded_code,
-            oracle_fee_receivers: old_state.oracle_fee_receivers,
-            oracle_fees: old_state.oracle_fees,
-            fee_discount_signer: old_state.fee_discount_signer,
-            dex_swap_codes: LookupMap::new(StorageKey::DexSwapCodes),
-            translated_dex_codes: TranslatedDexCodes::default(),
-        }
-    }
-
     /// Upload a chunk of new engine code at `offset`, replacing everything
     /// after it. `code_hash_so_far` is the hash of the code up to the chunk's end.
     #[private]
@@ -864,37 +825,12 @@ impl DexEngine {
             discount,
         };
 
-        let public_key_bytes = &signer_public_key.as_bytes()[1..];
         let hash =
             near_sdk::env::sha256_array(near_sdk::borsh::to_vec(&signature_payload).unwrap());
-        let is_verified = match signer_public_key.curve_type() {
-            CurveType::ED25519 => near_sdk::env::ed25519_verify(
-                signature
-                    .0
-                    .as_slice()
-                    .try_into()
-                    .expect("Invalid signature"),
-                hash,
-                public_key_bytes.try_into().unwrap(),
-            ),
-            CurveType::SECP256K1 => {
-                let Some((recovery_id, signature)) = signature.0.split_last() else {
-                    near_sdk::env::panic_str("Invalid signature");
-                };
-                near_sdk::env::ecrecover(&hash, signature, *recovery_id, true)
-                    .is_some_and(|recovered| recovered.as_slice() == public_key_bytes)
-            }
-            CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
-                signature
-                    .0
-                    .as_slice()
-                    .try_into()
-                    .expect("Invalid signature"),
-                hash,
-                public_key_bytes.try_into().unwrap(),
-            ),
-        };
-        expect!(is_verified, "Fee discount signature verification failed");
+        expect!(
+            verify_signature(signer_public_key, hash, &signature.0),
+            "Fee discount signature verification failed"
+        );
         let block_height = near_sdk::env::block_height();
         let fee_discount = match signature_payload.discount {
             FeeDiscount::ForOperations(OperationsFeeDiscount {
@@ -955,5 +891,28 @@ impl DexEngine {
             "Fee discount can't exceed 100%"
         );
         fee_discount
+    }
+}
+
+fn verify_signature(public_key: &PublicKey, hash: CryptoHash, signature: &[u8]) -> bool {
+    let public_key_bytes = &public_key.as_bytes()[1..];
+    match public_key.curve_type() {
+        CurveType::ED25519 => near_sdk::env::ed25519_verify(
+            signature.try_into().expect("Invalid signature"),
+            hash,
+            public_key_bytes.try_into().unwrap(),
+        ),
+        CurveType::SECP256K1 => {
+            let Some((recovery_id, signature)) = signature.split_last() else {
+                near_sdk::env::panic_str("Invalid signature");
+            };
+            near_sdk::env::ecrecover(&hash, signature, *recovery_id, true)
+                .is_some_and(|recovered| recovered.as_slice() == public_key_bytes)
+        }
+        CurveType::MLDSA65 => near_sdk::env::ml_dsa_verify(
+            signature.try_into().expect("Invalid signature"),
+            hash,
+            public_key_bytes.try_into().unwrap(),
+        ),
     }
 }

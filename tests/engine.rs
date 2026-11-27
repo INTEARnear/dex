@@ -6644,6 +6644,234 @@ async fn test_oracle_key_types() {
 }
 
 #[tokio::test]
+async fn test_signed_oracle_response() {
+    let rate = 2u128;
+    let request = b"rate of the swap".to_vec();
+    let user1_ft1 = 1_000u128;
+    let swap_amount = 100u128;
+    let oracle_ft2 = 1_000_000u128;
+    let oracle_key_deposit = NearToken::from_near(1);
+
+    let TestContext {
+        sandbox,
+        dex_engine_contract,
+        user1,
+        user3,
+        user4,
+        deployer,
+        ft1,
+        ft2,
+        ..
+    } = setup_test_environment_with_config(TestSetupConfig {
+        dex: Some(DexSetupConfig {
+            id: "dex".to_string(),
+            code: get_compiled_wasms().await.test_dex_wasm.clone(),
+            init_method: Some(("new".to_string(), vec![])),
+        }),
+        register_assets_for_all: true,
+        ft_storage_deposit_for_all: true,
+    })
+    .await;
+    let dex_id = DexId {
+        deployer: deployer.id().clone(),
+        id: "dex".to_string(),
+    };
+    let chain_id = sandbox.status().await.unwrap().chain_id;
+    let ft1_asset_id = AssetId::Nep141(ft1.id().clone());
+    let ft2_asset_id = AssetId::Nep141(ft2.id().clone());
+    let rate_response = near_sdk::borsh::to_vec(&rate).unwrap();
+    let swap_output = swap_amount * rate;
+
+    // user1 swaps ft1 on the dex at the oracle's rate, and the oracle, whose fees user3 takes,
+    // has the ft2 that the dex pays it with
+    for (receiver, token, amount) in [(&user1, &ft1, user1_ft1), (&user3, &ft2, oracle_ft2)] {
+        let result = deployer
+            .call(token.id(), "ft_transfer")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "receiver_id": receiver.id(),
+                "amount": U128(amount),
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+    }
+    let result = user1
+        .call(ft1.id(), "ft_transfer_call")
+        .max_gas()
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": dex_engine_contract.id(),
+            "amount": U128(user1_ft1),
+            "msg": "",
+        }))
+        .transact()
+        .await
+        .unwrap();
+    assert_success(&result).unwrap();
+
+    let mut user1_ft1_balance = user1_ft1;
+    let mut user1_ft2_balance = 0;
+    let mut oracle_ft2_wallet = oracle_ft2;
+    for key_type in [KeyType::ED25519, KeyType::SECP256K1, KeyType::MLDSA65] {
+        let oracle_key =
+            create_oracle_key(&dex_engine_contract, &user3, key_type, oracle_key_deposit).await;
+        let result = set_oracle_fees(
+            &dex_engine_contract,
+            &user3,
+            &oracle_key,
+            &[(ft1_asset_id.clone(), 0)],
+        )
+        .await;
+        assert_success(&result).unwrap();
+        let respond_signed_by = |signer: &SecretKey, nonces: Vec<Base64VecU8>| {
+            respond_to_oracle_request(
+                &oracle_key,
+                signer,
+                &chain_id,
+                dex_engine_contract.id(),
+                &request,
+                rate_response.clone(),
+                nonces,
+            )
+        };
+        // The oracle deposits what the dex pays the swap with in the transfer call that responds
+        let deliver_and_respond = |respond: Operation| {
+            user3
+                .call(ft2.id(), "ft_transfer_call")
+                .max_gas()
+                .deposit(NearToken::from_yoctonear(1))
+                .args_json(json!({
+                    "receiver_id": dex_engine_contract.id(),
+                    "amount": U128(swap_output),
+                    "msg": near_sdk::serde_json::to_string(&[
+                        Operation::TransferAsset {
+                            to: AccountOrDexId::Dex(dex_id.clone()),
+                            asset_id: ft2_asset_id.clone(),
+                            amount: TokenAmount::new(swap_output),
+                        },
+                        respond,
+                    ])
+                    .unwrap(),
+                }))
+        };
+
+        // The dex has no ft2 to pay the swap with until the oracle responds
+        let waiting = user1
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": [
+                    Operation::OracleRequest {
+                        oracle_key: oracle_key_handle(&oracle_key),
+                        dex_id: dex_id.clone(),
+                        request: Base64VecU8(request.clone()),
+                        fee: (ft1_asset_id.clone(), TokenAmount::ZERO),
+                        swap: None,
+                        rescue_address: None,
+                    },
+                    Operation::SwapSimple {
+                        dex_id: dex_id.clone(),
+                        message: Base64VecU8(
+                            near_sdk::borsh::to_vec(&SwapMessage::OracleRate {
+                                oracle_key: oracle_key_handle(&oracle_key),
+                                request: request.clone(),
+                            })
+                            .unwrap(),
+                        ),
+                        asset_in: ft1_asset_id.clone(),
+                        asset_out: ft2_asset_id.clone(),
+                        amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(
+                            TokenAmount::new(swap_amount),
+                        )),
+                        constraint: None,
+                        quote_improvement_fee: None,
+                    },
+                ],
+            }))
+            .transact_async()
+            .await
+            .unwrap();
+        let nonces = waiting_for_oracle_request(&sandbox, &[&waiting], &request).await;
+
+        // Only the oracle's key can sign its response, and anyone can deliver it
+        let forger_key = SecretKey::from_random(key_type);
+        let result = user4
+            .call(dex_engine_contract.id(), "execute_operations")
+            .max_gas()
+            .deposit(NearToken::from_yoctonear(1))
+            .args_json(json!({
+                "operations": [respond_signed_by(&forger_key, nonces.clone())],
+            }))
+            .transact()
+            .await
+            .unwrap();
+        assert!(
+            format!("{result:?}").contains("Oracle response signature verification failed"),
+            "{key_type}: {result:?}"
+        );
+        let result = deliver_and_respond(respond_signed_by(&oracle_key, nonces.clone()))
+            .transact()
+            .await
+            .unwrap();
+        assert_success(&result).unwrap();
+        oracle_ft2_wallet -= swap_output;
+        let result = wait_for_transaction(waiting).await;
+        assert_success(&result).unwrap();
+        user1_ft1_balance -= swap_amount;
+        user1_ft2_balance += swap_output;
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(user1.id().clone()),
+            ft1_asset_id.clone(),
+            Some(U128(user1_ft1_balance)),
+        )
+        .await
+        .unwrap();
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Account(user1.id().clone()),
+            ft2_asset_id.clone(),
+            Some(U128(user1_ft2_balance)),
+        )
+        .await
+        .unwrap();
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Dex(dex_id.clone()),
+            ft2_asset_id.clone(),
+            Some(U128(0)),
+        )
+        .await
+        .unwrap();
+
+        // A response that resumes nothing fails the transfer call, which refunds the deposit
+        let result = deliver_and_respond(respond_signed_by(&oracle_key, nonces))
+            .transact()
+            .await
+            .unwrap();
+        assert!(
+            format!("{result:?}").contains("wait for the response"),
+            "{key_type}: {result:?}"
+        );
+        assert_ft_balance(&user3, ft2.clone(), U128(oracle_ft2_wallet))
+            .await
+            .unwrap();
+        assert_inner_asset_balance(
+            &dex_engine_contract,
+            AccountOrDexId::Dex(dex_id.clone()),
+            ft2_asset_id.clone(),
+            Some(U128(0)),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_oracle_fees() {
     let rate = 2u128;
     let request = b"rate of the swap".to_vec();
@@ -7801,407 +8029,4 @@ async fn test_set_fee_discount_signer() {
     let result = set_fee_discount_signer(&dex_engine_contract, None).await;
     assert_success(&result).unwrap();
     assert_eq!(get_fee_discount_signer(&dex_engine_contract).await, None);
-}
-
-#[tokio::test]
-async fn test_swap_codes_migration() {
-    let TestContext {
-        sandbox,
-        dex_engine_contract,
-        deployer,
-        ..
-    } = setup_test_environment().await;
-    let state = || async {
-        dex_engine_contract
-            .view_state()
-            .prefix(b"STATE")
-            .await
-            .unwrap()
-            .remove(b"STATE".as_slice())
-            .unwrap()
-    };
-    let fee_discount_signer = get_fee_discount_signer(&dex_engine_contract).await;
-
-    // The state from before the swap codes, which are the last field that's stored, and which a
-    // new engine doesn't have: a LookupMap stores its prefix, StorageKey::DexSwapCodes, the 16th
-    let state_with_swap_codes = state().await;
-    let (state_before_migration, swap_codes) =
-        state_with_swap_codes.split_at(state_with_swap_codes.len() - 5);
-    assert_eq!(swap_codes, [1, 0, 0, 0, 15]);
-    sandbox
-        .patch(dex_engine_contract.id())
-        .state(b"STATE", state_before_migration)
-        .transact()
-        .await
-        .unwrap();
-    // The new code can't read the state like that
-    is_paused(&dex_engine_contract).await.unwrap_err();
-
-    // The migrate that `engine upgrade deploy` calls on the new code in the receipt that deploys
-    // it, so that the engine can store the code chunks with the old code that reads the old state
-    let result = dex_engine_contract
-        .call("migrate")
-        .max_gas()
-        .args_json(json!({}))
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    assert!(!is_paused(&dex_engine_contract).await.unwrap());
-    assert_eq!(
-        get_fee_discount_signer(&dex_engine_contract).await,
-        fee_discount_signer
-    );
-    assert_eq!(
-        dex_engine_contract
-            .view("get_trusted_code_deployer")
-            .await
-            .unwrap()
-            .json::<AccountId>()
-            .unwrap(),
-        *deployer.id()
-    );
-    assert_eq!(state().await, state_with_swap_codes);
-}
-
-/// The borsh of what a view of `dex_id` returns
-async fn dex_view_bytes(
-    dex_engine_contract: &Contract,
-    dex_id: &DexId,
-    method: &str,
-    args: Vec<u8>,
-) -> Vec<u8> {
-    dex_engine_contract
-        .view("dex_view")
-        .args_json(json!({
-            "dex_id": dex_id,
-            "method": method,
-            "args": Base64VecU8(args),
-        }))
-        .await
-        .unwrap()
-        .json::<Base64VecU8>()
-        .unwrap()
-        .0
-}
-
-/// The borsh of every pool of an xyk or amp dex, which both view by pool ID
-async fn pool_views(dex_engine_contract: &Contract, dex_id: &DexId) -> Vec<Vec<u8>> {
-    let pool_count: u32 = near_sdk::borsh::from_slice(
-        &dex_view_bytes(dex_engine_contract, dex_id, "get_pool_count", vec![]).await,
-    )
-    .unwrap();
-    assert!(pool_count > 0, "{dex_id} has no pools");
-    let mut pools = Vec::new();
-    for pool_id in 0..pool_count {
-        pools.push(
-            dex_view_bytes(
-                dex_engine_contract,
-                dex_id,
-                "get_pool",
-                near_sdk::borsh::to_vec(&pool_id).unwrap(),
-            )
-            .await,
-        );
-    }
-    pools
-}
-
-/// The pools of xyk `views`, without the fees of a swap at the time of the view, which fee
-/// schedules change, and without the share growth of reinvested fees, which the views of the
-/// mainnet code don't have
-fn xyk_pools(views: &[Vec<u8>]) -> Vec<Option<xyk_dex_types::PoolView>> {
-    views
-        .iter()
-        .map(|view| {
-            let mut pool: Option<xyk_dex_types::PoolView> =
-                near_sdk::borsh::from_slice(view).unwrap();
-            match &mut pool {
-                Some(
-                    xyk_dex_types::PoolView::Private { fees, .. }
-                    | xyk_dex_types::PoolView::Launch { fees, .. },
-                ) => fees.receivers.clear(),
-                Some(xyk_dex_types::PoolView::Public {
-                    fees,
-                    reinvest_share_growth,
-                    ..
-                }) => {
-                    fees.receivers.clear();
-                    *reinvest_share_growth = None;
-                }
-                None => {}
-            }
-            pool
-        })
-        .collect()
-}
-
-fn amp_pools(views: &[Vec<u8>]) -> Vec<Option<amp_dex_types::PoolView>> {
-    views
-        .iter()
-        .map(|view| near_sdk::borsh::from_slice(view).unwrap())
-        .collect()
-}
-
-fn assert_same_pools<Pool: PartialEq + std::fmt::Debug>(pools: Vec<Pool>, expected: Vec<Pool>) {
-    assert_eq!(pools.len(), expected.len());
-    for (pool_id, (pool, expected)) in pools.iter().zip(&expected).enumerate() {
-        assert_eq!(pool, expected, "Pool {pool_id}");
-    }
-}
-
-#[tokio::test]
-async fn test_swap_code_migration_of_mainnet_state() {
-    let sandbox = near_workspaces::sandbox().await.unwrap();
-    let (dex_engine_contract, _) = import_mainnet_engine(&sandbox).await;
-    // The owner of the dexes, which is the trusted code deployer of the engine
-    let owner = mainnet_account(&sandbox, &"slimedragon.near".parse().unwrap()).await;
-    let xyk_dex_id = DexId {
-        deployer: owner.id().clone(),
-        id: "xyk".to_string(),
-    };
-    let amp_dex_id = DexId {
-        deployer: owner.id().clone(),
-        id: "amp".to_string(),
-    };
-    let fee_discount_signer_before_migration = get_fee_discount_signer(&dex_engine_contract).await;
-    let xyk_pools_before_migration = pool_views(&dex_engine_contract, &xyk_dex_id).await;
-    let amp_pools_before_migration = pool_views(&dex_engine_contract, &amp_dex_id).await;
-    let total_storage_balances = async || {
-        near_sdk::serde_json::to_value(
-            get_total_storage_balances(&dex_engine_contract)
-                .await
-                .unwrap(),
-        )
-        .unwrap()
-    };
-
-    // A trader who swaps NEAR on a pool of the xyk dex that has NEAR and fees
-    let (pool_id, asset_out) = xyk_pools_before_migration
-        .iter()
-        .enumerate()
-        .find_map(|(pool_id, pool)| {
-            let pool: Option<xyk_dex_types::PoolView> = near_sdk::borsh::from_slice(pool).unwrap();
-            let (assets, fees) = match pool? {
-                xyk_dex_types::PoolView::Private { assets, fees, .. }
-                | xyk_dex_types::PoolView::Public { assets, fees, .. } => (assets, fees),
-                xyk_dex_types::PoolView::Launch {
-                    quote_asset,
-                    launched_asset,
-                    fees,
-                    ..
-                } => ((quote_asset, launched_asset), fees),
-            };
-            let has_near_liquidity = [&assets.0, &assets.1]
-                .iter()
-                .all(|asset| asset.balance.get() > 10u128.pow(24));
-            let asset_out = match (&assets.0.asset_id, &assets.1.asset_id) {
-                (AssetId::Near, asset_out) | (asset_out, AssetId::Near) => asset_out.clone(),
-                _ => return None,
-            };
-            (has_near_liquidity && !fees.receivers.is_empty()).then(|| {
-                (
-                    xyk_dex_types::PoolId::new(u32::try_from(pool_id).unwrap()),
-                    asset_out,
-                )
-            })
-        })
-        .expect("No pool of NEAR with liquidity and fees");
-    let trader = sandbox.dev_create_account().await.unwrap();
-    for (method, args, deposit) in [
-        ("storage_deposit", json!({}), NearToken::from_near(1)),
-        (
-            "register_assets",
-            json!({ "asset_ids": [AssetId::Near, asset_out.clone()] }),
-            NearToken::from_yoctonear(1),
-        ),
-        ("deposit_near", json!({}), NearToken::from_near(10)),
-    ] {
-        let result = trader
-            .call(dex_engine_contract.id(), method)
-            .max_gas()
-            .deposit(deposit)
-            .args_json(args)
-            .transact()
-            .await
-            .unwrap();
-        assert_success(&result).unwrap();
-    }
-    let near_in = SwapRequestAmount::ExactIn(TokenAmount::new(10u128.pow(22)));
-    let single_pool_message =
-        near_sdk::borsh::to_vec(&xyk_dex_types::SwapArgs::single_pool(pool_id)).unwrap();
-    let simulate = async || {
-        dex_engine_contract
-            .view("simulate_swap_simple")
-            .args_json(json!({
-                "dex_id": xyk_dex_id,
-                "message": Base64VecU8(single_pool_message.clone()),
-                "trader": trader.id(),
-                "asset_in": AssetId::Near,
-                "asset_out": asset_out,
-                "amount": near_in,
-            }))
-            .await
-            .unwrap()
-            .json::<(U128, U128)>()
-            .unwrap()
-            .1
-            .0
-    };
-    let balance_out = async || {
-        get_inner_asset_balance(
-            &dex_engine_contract,
-            AccountOrDexId::Account(trader.id().clone()),
-            asset_out.clone(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .0
-    };
-    let swap = async || {
-        let balance_before = balance_out().await;
-        let result = trader
-            .call(dex_engine_contract.id(), "execute_operations")
-            .max_gas()
-            .deposit(NearToken::from_yoctonear(1))
-            .args_json(json!({
-                "operations": [Operation::SwapSimple {
-                    dex_id: xyk_dex_id.clone(),
-                    message: Base64VecU8(single_pool_message.clone()),
-                    asset_in: AssetId::Near,
-                    asset_out: asset_out.clone(),
-                    amount: SwapOperationAmount::Amount(near_in),
-                    constraint: None,
-                    quote_improvement_fee: None,
-                }],
-            }))
-            .transact()
-            .await
-            .unwrap();
-        assert_success(&result).unwrap();
-        balance_out().await - balance_before
-    };
-    let dex_swap_code = async |dex_id: &DexId| {
-        dex_engine_contract
-            .view("dex_swap_code")
-            .args_json(json!({ "dex_id": dex_id }))
-            .await
-            .unwrap()
-            .json::<Option<Base64VecU8>>()
-            .unwrap()
-            .map(|swap_code| swap_code.0)
-    };
-
-    let total_storage_balances_before_migration = total_storage_balances().await;
-
-    // The engine of this checkout, as `engine upgrade deploy` deploys it: the old code stores the
-    // chunks, and migrate runs on the new code in the receipt that deploys it
-    let result = deploy_code_in_chunks(
-        &dex_engine_contract,
-        &get_compiled_wasms().await.contract_wasm,
-        700_000,
-        "migrate",
-        b"{}",
-    )
-    .await;
-    assert_success(&result).unwrap();
-    println!(
-        "GAS {:<40} {:>8.3} TGas",
-        "deploy the engine and migrate",
-        result.total_gas_burnt.as_gas() as f64 / 1e12
-    );
-    create_translator(&dex_engine_contract).await;
-    // The engine reads the state that it had, and the dexes still read theirs
-    assert_eq!(
-        get_fee_discount_signer(&dex_engine_contract).await,
-        fee_discount_signer_before_migration
-    );
-    assert_eq!(
-        dex_engine_contract
-            .view("get_trusted_code_deployer")
-            .await
-            .unwrap()
-            .json::<AccountId>()
-            .unwrap(),
-        *owner.id()
-    );
-    assert!(!is_paused(&dex_engine_contract).await.unwrap());
-    assert_eq!(
-        total_storage_balances().await,
-        total_storage_balances_before_migration
-    );
-    assert_same_pools(
-        xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
-        xyk_pools(&xyk_pools_before_migration),
-    );
-    // No dex has swap code yet, so swaps run the code of the dexes
-    assert_eq!(dex_swap_code(&xyk_dex_id).await, None);
-    let expected_out = simulate().await;
-    assert_eq!(swap().await, expected_out);
-    let xyk_pools_before_deploy = pool_views(&dex_engine_contract, &xyk_dex_id).await;
-
-    // What `xyk deploy` and `amp deploy` send: a top-up of the dex's storage balance for the codes,
-    // and the code with its swap code. Their state is from after their own migration.
-    let wasms = get_compiled_wasms().await;
-    for (dex_id, code, swap_code) in [
-        (&xyk_dex_id, &wasms.xyk_dex_wasm, &wasms.xyk_dex_swap_wasm),
-        (&amp_dex_id, &wasms.amp_dex_wasm, &wasms.amp_dex_swap_wasm),
-    ] {
-        let result = owner
-            .batch(dex_engine_contract.id())
-            .call(
-                Function::new("dex_storage_deposit")
-                    .args_json(json!({ "dex_id": dex_id }))
-                    .deposit(NearToken::from_near(5))
-                    .gas(Gas::from_tgas(10)),
-            )
-            .call(
-                Function::new("deploy_dex_code")
-                    .args_json(json!({
-                        "last_part_of_id": dex_id.id,
-                        "code_base64": BASE64_STANDARD.encode(code),
-                        "swap_code_base64": BASE64_STANDARD.encode(swap_code),
-                    }))
-                    .deposit(NearToken::from_yoctonear(1))
-                    .gas(Gas::from_tgas(980)),
-            )
-            .transact()
-            .await
-            .unwrap();
-        assert_success(&result).unwrap();
-        println!(
-            "GAS {:<40} {:>8.3} TGas",
-            format!("top up, deploy {} with swap code", dex_id.id),
-            result.total_gas_burnt.as_gas() as f64 / 1e12
-        );
-        assert_eq!(dex_swap_code(dex_id).await.as_ref(), Some(swap_code));
-    }
-    assert_same_pools(
-        xyk_pools(&pool_views(&dex_engine_contract, &xyk_dex_id).await),
-        xyk_pools(&xyk_pools_before_deploy),
-    );
-    assert_same_pools(
-        amp_pools(&pool_views(&dex_engine_contract, &amp_dex_id).await),
-        amp_pools(&amp_pools_before_migration),
-    );
-    // Swaps run the swap code, which swaps like the code
-    let expected_out = simulate().await;
-    assert_eq!(swap().await, expected_out);
-
-    // Translating the codes again translates the swap codes that the state has too
-    let result = owner
-        .call(dex_engine_contract.id(), "translate_dex_codes")
-        .args_json(json!({ "dex_ids": [&xyk_dex_id, &amp_dex_id] }))
-        .max_gas()
-        .transact()
-        .await
-        .unwrap();
-    assert_success(&result).unwrap();
-    assert_eq!(
-        dex_swap_code(&xyk_dex_id).await.as_ref(),
-        Some(&wasms.xyk_dex_swap_wasm)
-    );
-    let expected_out = simulate().await;
-    assert_eq!(swap().await, expected_out);
 }

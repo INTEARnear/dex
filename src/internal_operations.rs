@@ -1238,6 +1238,19 @@ impl DexEngine {
                 Operation::OracleRequest { .. } => {
                     panic!("Only the first operation can be an oracle request");
                 }
+                Operation::RespondToOracleRequest {
+                    oracle_key,
+                    request_hash,
+                    response,
+                    nonces,
+                    signature,
+                } => self.internal_respond_to_oracle_request(
+                    oracle_key,
+                    request_hash,
+                    response,
+                    nonces,
+                    signature,
+                ),
             }
         }
         for (asset_id, amount) in anon_swap_available_assets.unwrap_or_default() {

@@ -1,6 +1,6 @@
 #![deny(clippy::arithmetic_side_effects)]
 
-use intear_dex_common::{AssetId, DexId, TokenAmount};
+use intear_dex_common::{AssetId, Caller, DexId, TokenAmount};
 use near_sdk::{
     AccountId, BlockHeight, NearToken, PublicKey,
     json_types::{Base64VecU8, U64, U128},
@@ -29,6 +29,11 @@ pub enum AuthorizationMethod {
     /// The user calls the dex directly, or sends the attached assets in a transfer
     /// call
     Predecessor,
+    /// The response of the authorized key of the user, as an oracle, to the borsh of
+    /// `request`, which the operations started with, is [`OracleResponse::Fill`] with
+    /// the trade intent and `nonce`. The nonce can't be used again while the intent
+    /// is valid
+    OracleResponse { request: OracleRequest, nonce: Nonce },
 }
 
 #[derive(Debug)]
@@ -101,6 +106,42 @@ pub enum OutputDestination {
     InternalOtcBalance,
     IntearDexBalance,
     WithdrawToUser,
+}
+
+pub const ORACLE_SWAP_MESSAGE_PREFIX: &[u8; 4] = b"romi";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[near(serializers=[borsh, json])]
+pub struct QuoteId(pub U128);
+
+/// A swap with the solver's intent from its response to the [`OracleRequest`] that the
+/// dex makes of the swap
+#[near(serializers=[borsh])]
+pub struct OracleSwapArgs {
+    pub solver_id: AccountId,
+    pub quote_id: QuoteId,
+    /// The least the trader gets for an exact-in swap, or the most the trader pays
+    /// for an exact-out one
+    pub worst_case_amount: TokenAmount,
+}
+
+#[derive(Clone, Debug)]
+#[near(serializers=[borsh, json])]
+pub struct OracleRequest {
+    pub trader: Caller,
+    pub quote_id: QuoteId,
+}
+
+#[derive(Debug)]
+#[near(serializers=[borsh, json])]
+pub enum OracleResponse {
+    Fill {
+        trade_intent: TradeIntent,
+        nonce: Nonce,
+    },
+    Reject {
+        reason: String,
+    },
 }
 
 #[near(serializers=[borsh])]

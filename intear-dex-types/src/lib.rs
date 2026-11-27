@@ -7,7 +7,7 @@ use intear_dex_common::{
     SwapRequestAmount, TokenAmount, expect, fraction_of,
 };
 use near_sdk::{
-    AccountId, BlockHeight, PublicKeyHandle,
+    AccountId, BlockHeight, PublicKey, PublicKeyHandle,
     json_types::{Base58CryptoHash, Base64VecU8},
     near,
     serde::Deserialize,
@@ -245,6 +245,31 @@ pub enum Operation {
         swap: Option<OracleFeeSwap>,
         rescue_address: Option<AccountId>,
     },
+    /// Respond to the request with `request_hash` as the oracle that has
+    /// `oracle_key`, like its `oracle_respond`, but with its signature instead
+    /// of a transaction that its key signs, so the oracle can respond in the
+    /// same transfer call that deposits what the operations after the request
+    /// need. Fails if the operations of any of `nonces` don't wait for it.
+    RespondToOracleRequest {
+        oracle_key: PublicKey,
+        request_hash: Base58CryptoHash,
+        response: Base64VecU8,
+        nonces: Vec<Base64VecU8>,
+        /// Signature of sha256(borsh([`OracleResponseSignaturePayload`])) by
+        /// `oracle_key`
+        signature: Base64VecU8,
+    },
+}
+
+/// What an oracle signs for [`Operation::RespondToOracleRequest`]
+#[derive(Debug)]
+#[near(serializers=[borsh])]
+pub struct OracleResponseSignaturePayload {
+    pub chain_id: String,
+    pub engine_contract_id: AccountId,
+    pub request_hash: Base58CryptoHash,
+    pub response: Base64VecU8,
+    pub nonces: Vec<Base64VecU8>,
 }
 
 /// The most blocks before a [`TraderFeeDiscount`] expires, about 7 days
