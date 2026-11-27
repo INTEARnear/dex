@@ -15,7 +15,7 @@ use amp_dex_types::{
     MIN_AMPLIFICATION, NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PayoutGroupShares,
     PayoutGroups, Pool, PoolAssets, PoolId, PoolRateSource, PoolView, Price, PricesRequest,
     PricesResponse, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs, SetFeeArgs,
+    RemoveLiquidityResponse, RouteFraction, SetAmplificationArgs, SetFeeArgs, SetFixedPriceArgs,
     SetLiquidityFeePayoutArgs, SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, TotalShares,
     WithdrawFeesArgs,
     math::{LiquidityDeposit, RatedPool, SwapAmounts},
@@ -738,6 +738,41 @@ impl AmpDex {
             panic!("Pool not found");
         };
         pool.fee = fee;
+        AmpDexEvent::PoolUpdated {
+            pool_id,
+            pool: pool.view(),
+        }
+        .emit();
+        DexCallResponse::default()
+    }
+
+    #[payable]
+    #[result_serializer(borsh)]
+    pub fn set_fixed_price(
+        &mut self,
+        #[serializer(borsh)] attached_assets: HashMap<AssetId, TokenAmount>,
+        #[serializer(borsh)] args: Vec<u8>,
+    ) -> DexCallResponse {
+        expect!(
+            let Caller::Direct(caller_id) = env::caller(),
+            "This method can only be called directly, not in a transfer call"
+        );
+        expect!(
+            caller_id == env::dex_id().deployer,
+            "Only the owner of the dex can set the fixed price"
+        );
+        let Ok(SetFixedPriceArgs { pool_id, price }) = near_sdk::borsh::from_slice(&args) else {
+            near_sdk::env::panic_str("Invalid args");
+        };
+        expect!(attached_assets.is_empty(), "No assets should be attached");
+        expect!(!price.is_zero(), "The fixed price must be greater than 0");
+        let Some(pool) = self.pools.get_mut(pool_id.get()) else {
+            panic!("Pool not found");
+        };
+        match &mut pool.rate_source {
+            PoolRateSource::Fixed(fixed_price) => *fixed_price = price,
+            PoolRateSource::Oracle { .. } => panic!("The pool has an oracle, not a fixed price"),
+        }
         AmpDexEvent::PoolUpdated {
             pool_id,
             pool: pool.view(),

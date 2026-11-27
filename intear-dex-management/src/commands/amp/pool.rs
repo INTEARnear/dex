@@ -1,6 +1,6 @@
 use amp_dex_types::{
     FULL_FEE_FRACTION, FeeFraction, PROTOCOL_FEE_SHARE, PoolRateSource, Price,
-    SetAmplificationArgs, SetFeeArgs, SetOracleKeyArgs,
+    SetAmplificationArgs, SetFeeArgs, SetFixedPriceArgs, SetOracleKeyArgs,
 };
 use near_cli_rs::commands::ActionContext;
 use near_cli_rs::network_view_at_block::{
@@ -18,6 +18,7 @@ use crate::deployment::ENGINE_ACCOUNT_ID;
 use crate::display::{self, OutputFormat};
 use crate::errors::PreflightError;
 use crate::inputs::amplification::AmplificationArg;
+use crate::inputs::fixed_price::FixedPriceArg;
 use crate::inputs::oracle_key::OracleKeyArg;
 use crate::inputs::percent::PercentArg;
 use crate::inputs::pool_id::PoolIdArg;
@@ -27,6 +28,7 @@ use crate::planning::{self, FunctionCall, ONE_YOCTO_NEAR, TransactionPlan, amp_s
 const SET_AMPLIFICATION_GAS: Gas = Gas::from_teragas(60);
 const SET_ORACLE_KEY_GAS: Gas = Gas::from_teragas(60);
 const SET_FEE_GAS: Gas = Gas::from_teragas(60);
+const SET_FIXED_PRICE_GAS: Gas = Gas::from_teragas(60);
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
 #[interactive_clap(context = AmpContext)]
@@ -60,6 +62,11 @@ pub enum PoolAction {
     ))]
     /// Change the fee of swaps on a pool
     SetFee(SetFee),
+    #[strum_discriminants(strum(
+        message = "set-fixed-price    - Change the price that a pool without an oracle swaps at"
+    ))]
+    /// Change the price that a pool without an oracle swaps at
+    SetFixedPrice(SetFixedPrice),
 }
 
 #[derive(Debug, Clone, interactive_clap::InteractiveClap)]
@@ -549,6 +556,135 @@ impl SetFeeContext {
 
 impl From<SetFeeContext> for ActionContext {
     fn from(item: SetFeeContext) -> Self {
+        item.0
+    }
+}
+
+#[derive(Debug, Clone, interactive_clap::InteractiveClap)]
+#[interactive_clap(input_context = AmpContext)]
+#[interactive_clap(output_context = SetFixedPriceContext)]
+pub struct SetFixedPrice {
+    #[interactive_clap(skip_default_input_arg)]
+    /// Which account, the owner of the dex, changes the price?
+    signer_account_id: near_cli_rs::types::account_id::AccountId,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The pool id
+    pool_id: PoolIdArg,
+    #[interactive_clap(skip_default_input_arg)]
+    /// The new price of a whole token of the first asset in the second, e.g. 1 for stablecoins
+    price: FixedPriceArg,
+    #[interactive_clap(named_arg)]
+    /// Select network
+    network_config: near_cli_rs::network_for_transaction::NetworkForTransactionArgs,
+}
+
+impl SetFixedPrice {
+    fn input_signer_account_id(
+        context: &AmpContext,
+    ) -> color_eyre::eyre::Result<Option<near_cli_rs::types::account_id::AccountId>> {
+        super::input_dex_owner(context, "Which account changes the price?")
+    }
+
+    fn input_pool_id(context: &AmpContext) -> color_eyre::eyre::Result<Option<PoolIdArg>> {
+        super::input_pool_id(context)
+    }
+
+    fn input_price(_context: &AmpContext) -> color_eyre::eyre::Result<Option<FixedPriceArg>> {
+        crate::inputs::prompt(
+            "The new price of a whole token of the first asset in the second? e.g. 1 for stablecoins",
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct SetFixedPriceContext(ActionContext);
+
+impl SetFixedPriceContext {
+    pub fn from_previous_context(
+        previous_context: AmpContext,
+        scope: &<SetFixedPrice as interactive_clap::ToInteractiveClapContextScope>::InteractiveClapContextScope,
+    ) -> color_eyre::eyre::Result<Self> {
+        let dex_id = previous_context.dex_id;
+        let PoolIdArg(pool_id) = scope.pool_id;
+        let FixedPriceArg(price) = scope.price;
+        Ok(Self(planning::write_action_context(
+            &previous_context.global_context,
+            scope.signer_account_id.clone().into(),
+            move |preflight| {
+                preflight.ensure_engine_not_paused()?;
+                super::ensure_dex_owner(preflight, &dex_id, "change the price of its pools")?;
+                let pool = PoolToWrite::read(preflight, &dex_id, pool_id)?;
+                let PoolRateSource::Fixed(current_price) = pool.pool.rate_source else {
+                    return Err(PreflightError::PoolHasOracle {
+                        dex_id: dex_id.clone(),
+                        pool_id,
+                    }
+                    .into_report());
+                };
+                let [(asset_id_0, metadata_0), (asset_id_1, metadata_1)] = &pool.assets;
+                let price_label = |price: Price| {
+                    format!(
+                        "1 {} = {price} {}",
+                        display::asset_label(asset_id_0, metadata_0.as_ref()),
+                        display::asset_label(asset_id_1, metadata_1.as_ref())
+                    )
+                };
+                if current_price == price {
+                    return Err(PreflightError::PoolSettingUnchanged {
+                        dex_id: dex_id.clone(),
+                        pool_id,
+                        setting: format!("a fixed price of {}", price_label(price)),
+                    }
+                    .into_report());
+                }
+                let pool_label = format!("pool #{pool_id} ({}) of {dex_id}", pool.pair_label());
+                Ok(TransactionPlan {
+                    receiver_id: ENGINE_ACCOUNT_ID.to_owned(),
+                    steps: vec![
+                        format!(
+                            "Change the price that swaps on {pool_label} rate the assets at from {} to {}",
+                            price_label(current_price),
+                            price_label(price)
+                        ),
+                        "The pool's balances stay as they are, so their worth to liquidity providers moves with the price".to_string(),
+                    ],
+                    function_calls: vec![FunctionCall {
+                        method_name: "execute_operations",
+                        args: serde_json::json!({
+                            "operations": [planning::dex_call_operation(
+                                &dex_id,
+                                "set_fixed_price",
+                                &SetFixedPriceArgs {
+                                    pool_id: amp_pool_id(pool_id),
+                                    price,
+                                },
+                                &[],
+                            )?],
+                        })
+                        .into(),
+                        deposit: ONE_YOCTO_NEAR,
+                        gas: SET_FIXED_PRICE_GAS,
+                    }],
+                    expected_outcome: ExpectedOutcome {
+                        action_name: "price change",
+                        success_message: format!(
+                            "Swaps on {pool_label} now rate {}",
+                            price_label(price)
+                        ),
+                        transfer_call: None,
+                        dex_id: Some(dex_id.clone()),
+                        dex_events: DexEvents::Amp,
+                        deployment: None,
+                    },
+                    deploy_code: None,
+                })
+            },
+        )))
+    }
+}
+
+impl From<SetFixedPriceContext> for ActionContext {
+    fn from(item: SetFixedPriceContext) -> Self {
         item.0
     }
 }

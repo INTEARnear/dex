@@ -80,9 +80,9 @@ pub enum AmpAction {
     /// List or count pools
     Pools(self::pools::PoolsCommands),
     #[strum_discriminants(strum(
-        message = "pool            - One pool in detail, or change it: set-amplification, set-oracle-key, set-fee"
+        message = "pool            - One pool in detail, or change it: set-amplification, set-oracle-key, set-fee, set-fixed-price"
     ))]
-    /// One pool in detail, or change it: set-amplification, set-oracle-key, set-fee
+    /// One pool in detail, or change it: set-amplification, set-oracle-key, set-fee, set-fixed-price
     Pool(self::pool::PoolCommands),
     #[strum_discriminants(strum(message = "liquidity       - Show, add or remove liquidity"))]
     /// Show, add or remove liquidity

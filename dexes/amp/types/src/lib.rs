@@ -270,6 +270,13 @@ pub struct SetFeeArgs {
 
 #[near(serializers=[borsh])]
 #[derive(Debug)]
+pub struct SetFixedPriceArgs {
+    pub pool_id: PoolId,
+    pub price: Price,
+}
+
+#[near(serializers=[borsh])]
+#[derive(Debug)]
 pub struct RegisterLiquidityArgs {
     pub pool_id: PoolId,
 }

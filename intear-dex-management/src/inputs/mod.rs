@@ -5,6 +5,7 @@ pub mod asset_amounts;
 pub mod asset_ids;
 pub mod dex_id;
 pub mod fees;
+pub mod fixed_price;
 pub mod funds;
 pub mod near_amount;
 pub mod oracle_key;

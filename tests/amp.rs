@@ -6,8 +6,8 @@ use amp_dex_types::{
     GetLiquidityPositionArgs, GetPendingFeesArgs, GetPoolArgs, GetPoolSharesArgs, INITIAL_SHARES,
     NewPoolRateSource, PROTOCOL_FEE_RECEIVER_ID, PoolId, PoolRateSource, PoolView, Price,
     PricesRequest, PricesResponse, ProviderShares, RegisterLiquidityArgs, RemoveLiquidityArgs,
-    RouteFraction, SetAmplificationArgs, SetFeeArgs, SetLiquidityFeePayoutArgs, SetOracleKeyArgs,
-    SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
+    RouteFraction, SetAmplificationArgs, SetFeeArgs, SetFixedPriceArgs, SetLiquidityFeePayoutArgs,
+    SetOracleKeyArgs, SwapArgs, SwapRoute, TokenAmount, WithdrawFeesArgs,
 };
 use intear_dex_common::{AssetId, DexId, SwapRequestAmount};
 use intear_dex_types::{
@@ -1808,6 +1808,119 @@ async fn test_amp_fixed_price_pool() {
     )
     .await;
     assert!(format!("{result:?}").contains("The pool has a fixed price, not an oracle"));
+}
+
+#[tokio::test]
+async fn test_amp_set_fixed_price() {
+    let test = setup_amp().await;
+    let TestContext {
+        dex_engine_contract,
+        deployer,
+        user1,
+        ft1,
+        ..
+    } = &test.context;
+    let dex_id = &test.dex_id;
+    let (near_asset_id, usdc_asset_id) = (&test.near_asset_id, &test.usdc_asset_id);
+    // 0.1% to the pool, of which the protocol takes 20%
+    let fee = FeeFraction::new(1_000);
+    let fee_fractions = [800, 200];
+    let liquidity = (near(1_000_000), usdc(3_750_000));
+    let fixed_price = agreeing_prices()
+        .median_price(
+            &PricesRequest::of_pools([(near_asset_id, usdc_asset_id)]),
+            near_asset_id,
+            usdc_asset_id,
+        )
+        .unwrap();
+    let pool_id = test
+        .create_pool(CreatePoolArgs {
+            rate_source: NewPoolRateSource::Fixed(fixed_price),
+            ..test.create_pool_args(fee, liquidity)
+        })
+        .await;
+    let oracle_pool_id = test
+        .create_pool(test.create_pool_args(fee, liquidity))
+        .await;
+
+    // Only the owner changes the price of a pool with a fixed price, to more than 0
+    let new_price = Price::from_units(fixed_price.units() * 1_001 / 1_000);
+    let set_fixed_price = async |account: &Account, pool_id: PoolId, price: Price| {
+        execute_operations(
+            account,
+            dex_engine_contract,
+            vec![dex_call(
+                dex_id,
+                "set_fixed_price",
+                near_sdk::borsh::to_vec(&SetFixedPriceArgs { pool_id, price }).unwrap(),
+                &[],
+            )],
+        )
+        .await
+    };
+    let result = set_fixed_price(user1, pool_id, new_price).await;
+    assert!(format!("{result:?}").contains("Only the owner of the dex can set the fixed price"));
+    let result = set_fixed_price(deployer, pool_id, Price::from_units(0)).await;
+    assert!(format!("{result:?}").contains("The fixed price must be greater than 0"));
+    let result = set_fixed_price(deployer, oracle_pool_id, new_price).await;
+    assert!(format!("{result:?}").contains("The pool has an oracle, not a fixed price"));
+    assert_eq!(
+        get_pool(dex_engine_contract, dex_id, pool_id)
+            .await
+            .rate_source,
+        PoolRateSource::Fixed(fixed_price)
+    );
+    let result = set_fixed_price(deployer, pool_id, new_price).await;
+    assert_success(&result).unwrap();
+    let updated_rate_sources = amp_events(&result)
+        .into_iter()
+        .filter_map(|event| match event {
+            AmpDexEvent::PoolUpdated { pool, .. } => Some(pool.rate_source),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(updated_rate_sources, vec![PoolRateSource::Fixed(new_price)]);
+    let pool = get_pool(dex_engine_contract, dex_id, pool_id).await;
+    assert_eq!(pool.rate_source, PoolRateSource::Fixed(new_price));
+
+    // Swaps are rated at the new price
+    let near_in = near(100);
+    deposit_near(dex_engine_contract, user1, NearToken::from_near(1)).await;
+    deposit_ft(dex_engine_contract, deployer, ft1, user1, near_in).await;
+    let user1_usdc = async || {
+        inner_balance(
+            dex_engine_contract,
+            AccountOrDexId::Account(user1.id().clone()),
+            usdc_asset_id,
+        )
+        .await
+    };
+    let usdc_before = user1_usdc().await;
+    let expected_usdc_out = pool
+        .rated(new_price)
+        .exact_in_amount_out(
+            AssetIndex::First,
+            TokenAmount::new(after_fees(near_in, &fee_fractions)),
+        )
+        .get();
+    let result = execute_operations(
+        user1,
+        dex_engine_contract,
+        vec![Operation::SwapSimple {
+            dex_id: dex_id.clone(),
+            message: Base64VecU8(near_sdk::borsh::to_vec(&SwapArgs::single_pool(pool_id)).unwrap()),
+            asset_in: near_asset_id.clone(),
+            asset_out: usdc_asset_id.clone(),
+            amount: SwapOperationAmount::Amount(SwapRequestAmount::ExactIn(TokenAmount::new(
+                near_in,
+            ))),
+            constraint: None,
+            quote_improvement_fee: None,
+        }],
+    )
+    .await;
+    assert_success(&result).unwrap();
+    assert_eq!(user1_usdc().await, usdc_before + expected_usdc_out);
 }
 
 #[tokio::test]

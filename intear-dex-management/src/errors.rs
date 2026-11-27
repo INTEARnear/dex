@@ -211,6 +211,8 @@ pub enum PreflightError {
     },
     #[error("Pool #{pool_id} of {dex_id} has a fixed price, not an oracle")]
     PoolHasFixedPrice { dex_id: DexId, pool_id: PoolId },
+    #[error("Pool #{pool_id} of {dex_id} has an oracle, not a fixed price")]
+    PoolHasOracle { dex_id: DexId, pool_id: PoolId },
     #[error("Pool #{pool_id} of {dex_id} has no oracle price yet to estimate the shares at")]
     NoOraclePrice { dex_id: DexId, pool_id: PoolId },
     #[error("Launch pools pair NEAR with a token, so the token can't be NEAR itself")]
@@ -415,6 +417,7 @@ impl PreflightError {
             | Self::NoAssetDecimals { .. }
             | Self::PoolSettingUnchanged { .. }
             | Self::PoolHasFixedPrice { .. }
+            | Self::PoolHasOracle { .. }
             | Self::OracleWithoutFees { .. }
             | Self::LaunchOfNear
             | Self::PoolLocked { .. }
